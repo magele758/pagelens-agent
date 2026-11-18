@@ -26,6 +26,21 @@ node native/install-native-host.mjs --extension-id anpjolmpgjncncpocenkchhpkefop
 
 Then reload PageLens on `chrome://extensions`.
 
+## Development updates
+
+`tools/pagelens-dev-update.mjs test` runs the extension and Native Host regression tests. It includes a directed PTC draft inspection with real Native Messaging and a fixture seller page. It can run without a browser or store session.
+
+Run these commands in the checkout that Chrome loads as an unpacked extension:
+
+```bash
+node tools/pagelens-dev-update.mjs prepare --extension-id EXTENSION_ID
+node tools/pagelens-dev-update.mjs update --extension-id EXTENSION_ID --ref origin/main
+```
+
+`prepare` writes the ignored `extension/local-development.json`. The running extension needs to already contain the development update handler. If an older worker is still loaded, load a build with the handler once through Chrome. Once active, the update command confirms the target checkout and idle status, tests the selected locally available revision, refreshes the installed TikTok tools, and requests an update through the directed inbox. The extension records acceptance, calls its own `chrome.runtime.reload()`, and confirms the same request from the new worker. A pending job, chat, or delegate prevents the update.
+
+Add `--source-id SOURCE_ID --draft-id DRAFT_ID` to run a read-only inbox and PTC smoke test after the new worker confirms readiness. For a create test, pass `--source-url JAPAN_PRODUCT_URL --rate JPY_TO_MXN`. A source that already has a registered draft uses read-only verification. An unfinished source record stops the workflow and keeps the current editor and record available for recovery. A failed local test stops the workflow before asking Chrome to reload.
+
 ## Directories
 
 | Path | Role |

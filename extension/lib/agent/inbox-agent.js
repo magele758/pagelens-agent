@@ -39,6 +39,10 @@ async function getActive() {
   return data?.[ACTIVE_KEY] || null;
 }
 
+export async function hasActiveAgentPrompt() {
+  return Boolean(await getActive());
+}
+
 async function setActive(value) {
   if (value) await chrome.storage.session.set({ [ACTIVE_KEY]: value });
   else await chrome.storage.session.remove(ACTIVE_KEY);
