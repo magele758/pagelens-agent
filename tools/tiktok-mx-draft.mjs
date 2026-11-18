@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Browser operations run in the signed-in Chrome profile through PageLens.
 import { DraftTabs } from "./tiktok-mx-tabs.mjs";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { commercialDifferences, commercialPlan } from "./tiktok-mx-commerce.mjs";
 export { normDraftTitle, draftTitleOf, draftIdOf, selectDraftRows, draftListReady } from "./tiktok-mx-editor.mjs";
@@ -285,6 +286,74 @@ async function lookup(file) {
     return null;
   }
 }
+const maxHistoryArtifactBytes = 1024 * 1024;
+
+function isOwnedHistoryEntry(stat) {
+  return (typeof process.getuid !== "function" || stat.uid === process.getuid()) &&
+    (stat.mode & 0o022) === 0;
+}
+
+async function readHistoryArtifact(file) {
+  let handle;
+  try {
+    handle = await fs.open(file, fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW || 0) | (fsConstants.O_NONBLOCK || 0));
+    const stat = await handle.stat();
+    if (!stat.isFile() || !isOwnedHistoryEntry(stat) || stat.size > maxHistoryArtifactBytes) return null;
+    const buffer = Buffer.alloc(stat.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    if (length !== stat.size) return null;
+    return JSON.parse(buffer.subarray(0, length).toString("utf8"));
+  } catch (error) {
+    if (error instanceof SyntaxError || ["ENOENT", "ELOOP", "ENOTDIR", "EISDIR"].includes(error.code)) return null;
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function assertSourceCanBeCreated(id) {
+  const registered = await fs.lstat(sourceRecord(id)).catch(error => {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  });
+  if (registered) throw Error("Source already registered; use rerun");
+
+  const root = await fs.realpath(os.tmpdir());
+  const prefix = "pagelens-mx-" + id + "-";
+  const candidateIds = new Set();
+  for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+    if (!entry.name.startsWith(prefix) || !entry.isDirectory()) continue;
+    const dir = path.join(root, entry.name);
+    const stat = await fs.lstat(dir).catch(error => {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    });
+    if (!stat?.isDirectory() || !isOwnedHistoryEntry(stat)) continue;
+    const receipt = await readHistoryArtifact(path.join(dir, "receipt.json"));
+    if (receipt?.verified !== true || typeof receipt.id !== "string" || !/^\d{12,22}$/.test(receipt.id)) continue;
+    const link = seller + "/product/edit-draft/" + receipt.id + "?shop_region=MX";
+    if (receipt.link !== link || receipt.readback?.url !== link || typeof receipt.title !== "string" ||
+        !receipt.title.trim() || receipt.readback.title !== receipt.title) continue;
+    const source = await readHistoryArtifact(path.join(dir, "source.json"));
+    if (source?.id !== id || typeof source.url !== "string") continue;
+    let capturedId;
+    try { capturedId = sourceId(source.url); } catch { continue; }
+    if (capturedId !== id) continue;
+    const listing = await readHistoryArtifact(path.join(dir, "listing.json"));
+    if (listing?.title !== receipt.title || (listing.enTitle && listing.enTitle !== receipt.readback.enTitle)) continue;
+    candidateIds.add(receipt.id);
+  }
+  if (candidateIds.size) {
+    throw Error("Verified local history includes draft IDs " + [...candidateIds].sort().join(", ") +
+      ". Verify them by ID and reconcile the source record before creating.");
+  }
+}
 // Chrome may return a new tab while its visible URL is still empty. The bridge
 // can authorize that tab (including as a group anchor) only after navigation.
 export async function waitForSourceTab(tab, url, list = () => bridge("list_tabs", { query: new URL(url).hostname })) {
@@ -397,7 +466,7 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
 }
 
 async function createDraft(url, rate) {
-  if (await lookup(sourceRecord(sourceId(url)))) throw Error("Source already registered; use rerun");
+  await assertSourceCanBeCreated(sourceId(url));
   const { generateListing, matchingPlan } = await import("./tiktok-mx-ptc.mjs");
   let generated, initialList;
   const dir = await prepare(url, false, tab => {
