@@ -7,21 +7,32 @@ import { bindWorkflowCatalog } from "../sidepanel/workflow-catalog.js";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom");
 
-test("selects a platform and opens the requested workflow without running it", async t => {
-  const html = await readFile(new URL("../sidepanel/index.html", import.meta.url), "utf8");
-  const { window } = new JSDOM(html);
+const html = await readFile(new URL("../sidepanel/index.html", import.meta.url), "utf8");
+const storageKey = "pagelens.workflowPlatformId";
+
+function mountCatalog(t) {
+  const { window } = new JSDOM(html, { url: "https://fixture.invalid/" });
   const { document } = window;
   const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
   const oldChrome = globalThis.chrome;
   t.after(() => {
     globalThis.document = oldDocument;
+    globalThis.window = oldWindow;
     globalThis.chrome = oldChrome;
     window.close();
   });
   globalThis.document = document;
+  globalThis.window = window;
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
-  const byId = id => document.getElementById(id);
+  return { window, document, byId: id => document.getElementById(id) };
+}
+
+const selected = document => [...document.querySelectorAll("#workflow-platform button[aria-pressed=true]")].map(button => button.dataset.platform);
+
+test("selects a platform and opens the requested workflow without running it", async t => {
+  const { window, document, byId } = mountCatalog(t);
   const shopId = 42;
   const origin = "https://seller.shopee.cn";
   const tab = { id: 7, url: origin + "/portal/marketing?cnsc_shop_id=" + shopId };
@@ -40,6 +51,7 @@ test("selects a platform and opens the requested workflow without running it", a
   openCatalog = bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft });
 
   const picker = byId("workflow-platform");
+  const choosePlatform = id => picker.querySelector(`button[data-platform="${id}"]`).click();
   const choices = () => [...document.querySelectorAll("#workflow-feature-list button")];
   const launch = async id => {
     document.querySelector(`#workflow-feature-list button[data-workflow="${id}"]`).click();
@@ -48,12 +60,19 @@ test("selects a platform and opens the requested workflow without running it", a
   };
   byId("btn-ptc-flow").click();
   assert.equal(byId("workflow-catalog-dialog").open, true);
-  picker.value = "temu";
-  picker.dispatchEvent(new window.Event("change"));
+  assert.deepEqual([...picker.querySelectorAll("button")].map(button => button.dataset.platform), [
+    "shopee", "temu", "amazon", "tiktok-shop",
+  ]);
+  assert.deepEqual(selected(document), ["shopee"]);
+  choosePlatform("temu");
+  assert.deepEqual(selected(document), ["temu"]);
   assert.equal(choices().length, 0);
   assert.match(byId("workflow-feature-empty").textContent, /Temu 暂无/u);
-  picker.value = "shopee";
-  picker.dispatchEvent(new window.Event("change"));
+  assert.equal(window.localStorage.getItem(storageKey), "temu");
+  byId("workflow-catalog-close").click();
+  byId("btn-ptc-flow").click();
+  assert.deepEqual(selected(document), ["temu"]);
+  choosePlatform("shopee");
   assert.deepEqual(choices().map(item => item.dataset.workflow), [
     "product-listing", "campaign-data", "campaign-draft", "voucher-data", "voucher-draft",
   ]);
@@ -78,10 +97,27 @@ test("selects a platform and opens the requested workflow without running it", a
     byId("shopee-marketing-back").click();
     assert.equal(byId("workflow-catalog-dialog").open, true);
   }
-  picker.value = "tiktok-shop";
-  picker.dispatchEvent(new window.Event("change"));
+  choosePlatform("tiktok-shop");
   assert.deepEqual(choices().map(item => item.dataset.workflow), ["tiktok-mx-draft"]);
   await launch("tiktok-mx-draft");
   assert.equal(selectedSkill.skillName, "TikTok 墨西哥商品草稿");
   assert.equal(byId("shopee-marketing-dialog").open, false);
+});
+
+test("restores a saved platform when the sidebar starts", t => {
+  const { document, window, byId } = mountCatalog(t);
+  window.localStorage.setItem(storageKey, "tiktok-shop");
+  bindWorkflowCatalog({});
+  byId("btn-ptc-flow").click();
+  assert.deepEqual(selected(document), ["tiktok-shop"]);
+  assert.ok(document.querySelector('[data-workflow="tiktok-mx-draft"]'));
+});
+
+test("defaults to the first platform when the saved platform was removed", t => {
+  const { document, window, byId } = mountCatalog(t);
+  window.localStorage.setItem(storageKey, "taobao");
+  bindWorkflowCatalog({});
+  byId("btn-ptc-flow").click();
+  assert.deepEqual(selected(document), ["shopee"]);
+  assert.ok(document.querySelector('[data-workflow="product-listing"]'));
 });
