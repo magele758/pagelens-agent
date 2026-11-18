@@ -29,6 +29,10 @@ export async function loadProductDirectory(path, { send = readFromHost } = {}) {
     throw new Error("请输入商品目录的绝对路径。");
   }
   const loaded = await send({ op: "fs", action: "loadProductDirectory", path: path.trim() }, { interactive: false });
+  return validateProductDirectory(loaded);
+}
+
+export function validateProductDirectory(loaded) {
   if (loaded?.ok !== true) throw new Error(loaded?.error || "无法从本机读取商品目录。");
   const { root, products, issues = [] } = loaded;
   if (!isAbsolutePath(root) || !Array.isArray(products) || !Array.isArray(issues)) {

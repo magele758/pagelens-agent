@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { SOCKET_PROTOCOL, connectGateway, createBroker, defaultSocketPath } from "./gateway.mjs";
 import { shellPolicyBlock } from "../extension/lib/agent/shell-policy.js";
 import { loadProductDirectory, readProductSizeChartChunk } from "./product-directory.mjs";
+import { pickProductDirectory } from "./product-directory-picker.mjs";
 import {
   expandUserPath,
   fileExt,
@@ -462,7 +463,7 @@ export function handleFs(req) {
   }
 }
 
-export async function handleRequest(req) {
+export async function handleRequest(req, { pickDirectory = pickProductDirectory } = {}) {
   const op = String(req?.op || "").trim();
   if (op === "ping") {
     return {
@@ -485,6 +486,19 @@ export async function handleRequest(req) {
   }
   if (op === "fs") {
     return handleFs(req);
+  }
+  if (op === "chooseProductDirectory") {
+    if (req.scope === "agent") return { ok: false, error: "请在 PageLens 中手动选择商品目录。" };
+    try {
+      const selected = await pickDirectory();
+      if (selected === null) return { ok: true, cancelled: true };
+      if (typeof selected !== "string" || !path.isAbsolute(selected) || /[\0\r\n]/u.test(selected)) {
+        return { ok: false, error: "系统返回了无效的商品目录。" };
+      }
+      return { ...loadProductDirectory(selected), directoryName: path.basename(selected) };
+    } catch (error) {
+      return { ok: false, error: error?.code === "ENOENT" ? "所选目录已不存在，请重新选择。" : error.message };
+    }
   }
   if (op === "clipboard_write") {
     const textIn = String(req.text ?? "");

@@ -1,4 +1,5 @@
 import { requireHostUrl } from "../../../lib/optional-permissions.js";
+import { waitForTemu } from "../workflow-tab.js";
 import { operateTemuEnrollment } from "./enrollment.js";
 import { operateTemuSellerData } from "./page-state.js";
 import { isTemuEnrollmentPage, temuSellerDataPage } from "./routes.js";
@@ -18,25 +19,10 @@ export function canReadTemuSellerData(url, kind) {
   return Boolean(page && (!kind || page.kind === kind));
 }
 
-function sleep(signal, ms) {
-  signal?.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 async function bind(tab, accepts, signal) {
   const url = tab?.url;
   if (!url || !Number.isInteger(tab.id) || !accepts(url)) {
-    throw new Error("请在当前标签打开对应的 Temu 商家页面。");
+    throw new Error("Temu 页面已变化，请重新读取。");
   }
   signal?.throwIfAborted();
   const denied = await requireHostUrl(url, { tabId: tab.id, userGesture: true });
@@ -72,24 +58,28 @@ async function inject(target, func, args, options = {}) {
   return outcome.result;
 }
 
-async function waitForPage(target, kind, oldKey) {
-  const deadline = Date.now() + 5200;
+async function waitForPage(target, kind, { oldKey, opened = false } = {}) {
+  const deadline = Date.now() + (opened ? 12000 : 5200);
   let snapshot;
   do {
     snapshot = await inject(target, operateTemuSellerData, { kind }, { pagination: Boolean(oldKey) });
-    if (snapshot.ok && (!oldKey || snapshot.records.length && snapshot.pageKey !== oldKey)) return snapshot;
     if (!snapshot.ok && snapshot.code !== "loading") throw new Error(snapshot.error);
-    await sleep(target.signal, 250);
+    if (snapshot.ok && (oldKey
+      ? snapshot.records.length && snapshot.pageKey !== oldKey
+      : snapshot.records.length || (kind === "finance" || kind === "marketing") && Object.keys(snapshot.stats).length)) return snapshot;
+    // The seller can show an empty table before its initial fetch returns rows.
+    await waitForTemu(target.signal, 250);
   } while (Date.now() < deadline);
   if (oldKey) return null;
+  if (snapshot?.ok) return snapshot;
   throw new Error(snapshot?.error || "Temu 页面数据加载超时。");
 }
 
-export async function readTemuSellerData({ tab, kind, allPages = false, signal, onProgress } = {}) {
+export async function readTemuSellerData({ tab, kind, allPages = false, opened = false, signal, onProgress } = {}) {
   kind ||= temuSellerDataPage(tab?.url)?.kind;
   const target = await bind(tab, url => canReadTemuSellerData(url, kind), signal);
   const sourceUrl = target.url;
-  const first = await waitForPage(target, kind);
+  const first = await waitForPage(target, kind, { opened });
   const records = [];
   const pageKeys = new Set();
   const warnings = [...first.warnings];
@@ -109,7 +99,7 @@ export async function readTemuSellerData({ tab, kind, allPages = false, signal, 
         kind, action: "next-page", expectedPageKey: page.pageKey,
       });
       if (!advance.ok) throw new Error(advance.error);
-      const result = await waitForPage(target, kind, page.pageKey);
+      const result = await waitForPage(target, kind, { oldKey: page.pageKey });
       if (!result || pageKeys.has(result.pageKey)) throw new Error("翻页后数据没有更新。");
       if (filterKey(result) !== filterKey(first)) throw new Error("翻页时筛选条件发生变化。");
       page = result;

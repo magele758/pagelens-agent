@@ -1,6 +1,7 @@
 import { completeChat } from "../../../lib/openai.js";
 import { isModelReady, loadSettings, resolveModel } from "../../../lib/storage.js";
-import { loadProductDirectory } from "../../shopee/product-listing/sidepanel/product-directory.js";
+import { requireOptionalFeature } from "../../../lib/optional-permissions.js";
+import { loadProductDirectory, validateProductDirectory } from "../../shopee/product-listing/sidepanel/product-directory.js";
 
 const list = value => Array.isArray(value) ? value : [];
 const object = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -180,14 +181,34 @@ export function normalizeTemuListingInput(raw, { root, folder } = {}) {
 }
 
 export async function loadTemuProductDirectory(path, { load = loadProductDirectory, send } = {}) {
-  const loaded = await load(path, { send });
-  return {
-    ...loaded,
-    products: loaded.products.map(product => ({
-      ...product,
-      input: normalizeTemuListingInput(product.input, { root: loaded.root, folder: product.folder }),
-    })),
-  };
+  return normalizeDirectory(await load(path, { send }));
+}
+
+export async function chooseTemuProductDirectory({
+  authorize = requireOptionalFeature,
+  choose = () => chrome.runtime.sendMessage({ type: "pl.ptc.chooseDirectory" }),
+} = {}) {
+  const denied = await authorize("nativeMessaging", { userGesture: true });
+  if (denied) throw new Error(denied);
+  const loaded = await choose();
+  if (loaded?.ok === true && loaded.cancelled === true) return null;
+  const directory = validateProductDirectory(loaded);
+  if (!text(loaded.directoryName)) throw new Error("本机助手返回的商品目录名称无效。");
+  return normalizeDirectory({ ...directory, directoryName: loaded.directoryName });
+}
+
+function normalizeDirectory(loaded) {
+  const issues = [...loaded.issues];
+  const products = loaded.products.flatMap(product => {
+    try {
+      const input = normalizeTemuListingInput(product.input, { root: loaded.root, folder: product.folder });
+      return [{ ...product, input }];
+    } catch (error) {
+      issues.push({ folder: product.folder, error: error.message });
+      return [];
+    }
+  });
+  return { ...loaded, products, issues };
 }
 
 const SELECT_KIND = /select|dropdown|combo|radio|checkbox|switch/iu;

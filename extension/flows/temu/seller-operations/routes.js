@@ -31,10 +31,6 @@ export const TEMU_SELLER_OPERATIONS = {
   },
   "temu-campaign-draft": {
     kind: "enrollment", title: "活动报名试填", href: seller + "/activity/marketing-activity",
-    links: [
-      { label: "查看营销活动", href: seller + "/activity/marketing-activity" },
-      { label: "打开活动报名表", href: seller + "/activity/marketing-activity/detail" },
-    ],
   },
 };
 
