@@ -4,7 +4,7 @@ Zero-new-daemon bridge: drop a JSON job under `~/.pagelens/agent-inbox/`, PageLe
 
 Synchronous jobs can target an installed unpacked extension with `--extension-id <id>` on both `enqueue` and `wait`. The CLI puts the job in `agent-inbox/<id>/` and verifies the extension ID in the receipt. Existing clients may keep using the shared inbox. Agent prompts and cancellations use the shared inbox.
 
-Directed jobs and TikTok PTC jobs require the matching Native Host. The host claims a file in `processing/` before browser work. If the worker stops before writing a receipt, the claim stays on disk for reconciliation. Check the retained editor and draft list before submitting a replacement.
+Directed jobs and TikTok PTC jobs require the matching Native Host. The directed inbox can run up to three local TikTok MX draft creates for distinct source IDs in the same poll. Enqueue all source jobs before waiting. Each job owns its Chrome tab group and returns a separate receipt. Check the overlap of the native stage timestamps to confirm parallel execution. Other inbox actions wait for the running creates to finish. The host claims a file in `processing/` before browser work. If the worker stops before writing a receipt, the claim stays on disk for reconciliation. Check the retained editor and draft list before submitting a replacement.
 
 ```bash
 node tools/agent-inbox.mjs enqueue --extension-id "$PAGELENS_EXTENSION_ID" \

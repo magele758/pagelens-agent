@@ -423,7 +423,7 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
   assert.equal(draft.writableDraftId(current), null);
   assert.throws(() => draft.writableDraftId(stale), /already exists/);
   assert.deepEqual(await draft.confirmCreateList(stale, async () => stale), stale);
-  assert.deepEqual(await draft.confirmCreateList(current, () => assert.fail("unexpected refresh")), current);
+  assert.deepEqual(await draft.confirmCreateList(current, async () => stale), { ...stale, ids: current.ids });
   const binding = { category: "A > B", values: { Material: ["Glass\nVidrio"] } };
   const catalog = [{ name: "Material", options: ["玻璃\nVidrio"] }];
   assert.equal(draft.compatibleAttributePlan(binding, "A - B", catalog), true);
@@ -477,6 +477,67 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
       origins: Object.fromEntries(["brand", "packagedWeightGrams", "packageCm.length", "packageCm.width", "packageCm.height", "M.option", "M.stock", "M.priceMXN"].map((key) => [key, { kind: "estimated", basis: "fixture" }])),
     },
   };
+  // Native hosts have independent browser sessions and share their title lock directory.
+  {
+    const fixture = await fs.mkdtemp(path.join(home, "title-contention-"));
+    async function runDirectory(suffix, title) {
+      const id = "17296000000000000" + suffix;
+      const dir = path.join(fixture, suffix);
+      await fs.mkdir(dir);
+      await fs.writeFile(path.join(dir, "image-01.jpg"), "jpg");
+      await fs.writeFile(path.join(dir, "source.json"), JSON.stringify({
+        ...sourceFile, id, url: "https://shop.tiktok.com/jp/pdp/" + id,
+      }));
+      await fs.writeFile(path.join(dir, "listing.json"), JSON.stringify({ ...listing, title }));
+      return dir;
+    }
+    const [owner, contender, independent, ownerDir, contenderDir, independentDir] = await Promise.all([
+      import("./tiktok-mx-draft.mjs?title-lock-owner"),
+      import("./tiktok-mx-draft.mjs?title-lock-contender"),
+      import("./tiktok-mx-draft.mjs?title-lock-independent"),
+      runDirectory("11", "Molde nuevo"),
+      runDirectory("12", "Ｍolde   nuevo"),
+      runDirectory("13", "Otro molde"),
+    ]);
+    const save = (runner, dir) => runner.save(dir, false, false, null, null, null, 4, false,
+      Promise.resolve({ matches: [], ids: [] }));
+    const refreshing = Promise.withResolvers();
+    const finish = Promise.withResolvers();
+    const listBridge = read => async (tool, args) => {
+      if (tool === "open_tab" && args.url.includes("/product/manage")) return { tabId: 7, groupId: 1 };
+      if (tool === "reload_tab" && args.tabId === 7) return {};
+      if (tool === "run_js" && args.tabId === 7 && args.code.includes("readDraftList"))
+        return { ok: true, result: await read() };
+      assert.fail("Unexpected seller write while checking duplicate titles: " + tool);
+    };
+    owner.setDraftBridgeForTests(listBridge(async () => {
+      refreshing.resolve();
+      await finish.promise;
+      throw Error("owner fixture stopped during list refresh");
+    }));
+    contender.setDraftBridgeForTests(() => assert.fail("Lock refusal must precede browser calls"));
+    independent.setDraftBridgeForTests(listBridge(async () => {
+      throw Error("different title reached refreshing");
+    }));
+    const ownerRun = assert.rejects(save(owner, ownerDir), /owner fixture stopped/);
+    try {
+      await Promise.race([refreshing.promise, ownerRun]);
+      await assert.rejects(save(contender, contenderDir), /already owns this title/);
+      await assert.rejects(save(independent, independentDir), /different title reached refreshing/);
+      await assert.rejects(save(contender, contenderDir), /already owns this title/);
+    } finally {
+      finish.resolve();
+      await ownerRun;
+    }
+    contender.setDraftBridgeForTests(listBridge(() => ({
+      matches: [{ id: "556", text: "Molde nuevo" }], ids: ["556"],
+    })));
+    await assert.rejects(save(contender, contenderDir), /A matching draft already exists: 556/);
+    for (const dir of [ownerDir, contenderDir, independentDir])
+      await assert.rejects(fs.stat(path.join(dir, "receipt.json")), { code: "ENOENT" });
+    assert.ok(!(await fs.readdir(home)).some(name => name.endsWith(".lock")));
+    await fs.rm(fixture, { recursive: true });
+  }
   {
     const { inspectWithPtc } = await import("../native/mx-ptc-inspect.mjs");
     const { createDraftTransport, japaneseSourceId } = await import("../extension/skills/tiktok-mx-draft/tiktok-mx-native.mjs");

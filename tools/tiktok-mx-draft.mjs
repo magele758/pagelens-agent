@@ -5,7 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { commercialDifferences, commercialPlan } from "./tiktok-mx-commerce.mjs";
 export { normDraftTitle, draftTitleOf, draftIdOf, selectDraftRows, draftListReady } from "./tiktok-mx-editor.mjs";
-import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, readFreshDocument, saveDraftCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
+import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, normDraftTitle, readFreshDocument, saveDraftCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -612,7 +612,6 @@ async function refreshDraftList(list, title, waitForMatch = false) {
 // Keep IDs seen before the refresh excluded from post-save identification, even
 // when a deleted row disappears and later resurfaces on a stale seller replica.
 export async function confirmCreateList(snapshot, refresh) {
-  if (!snapshot.matches.length) return snapshot;
   const current = await refresh();
   return { ...current, ids: [...new Set([...snapshot.ids, ...current.ids])] };
 }
@@ -824,6 +823,7 @@ export async function save(
   // Serialize writes for this source, including separate callers preparing it simultaneously.
   const lock = path.join(home, "tiktok-mx-" + sourceId(data.url) + ".lock");
   await fs.mkdir(lock);
+  let titleLock;
   try {
     const recordFile = sourceRecord(sourceId(data.url));
     await fs.mkdir(path.dirname(recordFile), { recursive: true, mode: 0o700 });
@@ -840,13 +840,27 @@ export async function save(
     const verifiedRecord = readOnly && previous.verified && previous.id === registered?.id &&
       previous.link === registeredLink && registered?.link === registeredLink;
     const skipList = target || verifiedRecord;
-    const list = skipList ? null : await sellerTab(drafts, preparedForm == null);
+    const claimed = Boolean(previous.saving || previous.startedTab || previous.stagedTab);
+    const freshCreate = !skipList && !knownId && !claimed;
+    if (!knownId) {
+      // The seller list fallback identifies a newly saved draft by title. Keep
+      // identical titles exclusive across native hosts until readback finishes.
+      const key = createHash("sha256").update(normDraftTitle(copy.title)).digest("hex");
+      const candidate = path.join(home, "tiktok-mx-title-" + key + ".lock");
+      try {
+        await fs.mkdir(candidate, { mode: 0o700 });
+      } catch (error) {
+        if (error.code === "EEXIST") throw Error("A draft creation already owns this title: " + copy.title);
+        throw error;
+      }
+      titleLock = candidate;
+    }
+    const list = skipList ? null : await sellerTab(drafts, preparedForm == null && !freshCreate);
     let listState = skipList ? { matches: [], ids: [] } : await (initialList && !knownId ? initialList : listDrafts(list, copy.title, knownId));
-    if (!skipList && !knownId && !previous.startedTab && !previous.saving && !previous.stagedTab)
+    if (freshCreate)
       listState = await confirmCreateList(listState, () => refreshDraftList(list, copy.title));
     const seenIds = [...new Set((listState.ids || []).map(String))];
     if (!skipList) mark("listRead");
-    const claimed = Boolean(previous.saving || previous.startedTab || previous.stagedTab);
     const beforeIds = new Set((previous.draftIdsBefore || []).map(String));
     const matches = !knownId && claimed
       ? listState.matches.filter((row) => row.id && Array.isArray(previous.draftIdsBefore) && !beforeIds.has(String(row.id)))
@@ -1284,7 +1298,11 @@ export async function save(
     if (!nativeDispatch) printReceipt(receipt, resultFile);
 
   } finally {
-    await fs.rmdir(lock);
+    try {
+      if (titleLock) await fs.rmdir(titleLock);
+    } finally {
+      await fs.rmdir(lock);
+    }
   }
 }
 function printReceipt(receipt, resultFile) {
