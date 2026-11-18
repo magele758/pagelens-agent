@@ -182,6 +182,7 @@ export function operateTemuSellerData({ expectedUrl, kind, action = "read", expe
     const amount = /^(?:(?:[+-]\s*)?[¥￥$€]\s*|[¥￥$€]\s*[+-]\s*|[+-]\s*)?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?(?:\s*(?:[A-Z]{3}|元))?$|^(?:—|--|暂无)$/u;
     const values = new Map();
     let hasMerchandiseAccount = false;
+    const metricLabel = node => text(node).replace(/([）)])\s*收支明细$/u, "$1");
 
     function record(name, value) {
       if (!values.has(name)) values.set(name, new Set());
@@ -189,7 +190,7 @@ export function operateTemuSellerData({ expectedUrl, kind, action = "read", expe
     }
 
     for (const node of main.querySelectorAll("dt,th,label,h2,h3,h4,span,div,p")) {
-      const content = text(node);
+      const content = metricLabel(node);
       if (content === "货款账户" && rendered(node)) hasMerchandiseAccount = true;
       const match = content.length <= 60 && content.match(label);
       if (!match || !rendered(node)) continue;
@@ -202,7 +203,7 @@ export function operateTemuSellerData({ expectedUrl, kind, action = "read", expe
       // Temu can render a balance label in one child and the number in the next.
       // Only pair an adjacent amount while the parent still represents that metric.
       for (let cardLabel = node, depth = 0; cardLabel && depth < 3; depth++, cardLabel = cardLabel.parentElement) {
-        if (text(cardLabel) !== content) break;
+        if (metricLabel(cardLabel) !== content) break;
         const next = cardLabel.nextElementSibling;
         const value = text(next);
         if (amount.test(value) && rendered(next)) {

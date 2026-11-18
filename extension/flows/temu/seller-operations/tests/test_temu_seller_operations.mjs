@@ -89,7 +89,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
 {
   const dom = fixture(finance, [
     "<h1>资金中心</h1><h2>货款账户</h2>",
-    "<section><div><span>总金额（CNY）</span></div><div><strong>- ¥ 12,345.67</strong></div></section>",
+    "<section><div><span>总金额</span><span>（CNY）</span><a>收支明细</a></div><div><strong>- ¥ 12,345.67</strong></div></section>",
     "<div><span>可用余额 (CNY)</span><span> 1,200.50</span></div>",
     "<dl><dt>账户预留金额 (CNY)</dt><dd>--</dd></dl>",
     "<p>预留额度：0.00 元</p>",
