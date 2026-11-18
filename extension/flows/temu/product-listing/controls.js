@@ -6,7 +6,8 @@ export async function temuControls(request) {
   const HEAD = '[class*="ST_head_"]';
   const FORM_CONTROLS = 'input,textarea,select,[role="combobox"],[role="radio"],[role="checkbox"],[contenteditable="true"]';
   const MENU = '[data-testid="beast-core-portal"] [role="listbox"],[class*="ST_dropdown_"] [role="listbox"]';
-  const LABEL = 'label,[data-field-label],[class*="Form_itemLabelContent_"]';
+  const OPTION = '[role="option"],[data-testid="beast-core-select-option"]';
+  const LABEL = 'label,[data-field-label],[class*="Form_itemLabelContent_"],[class*="STF_label_"]';
   const FORM_ITEM = '[data-testid="beast-core-form-item"],[class*="Form_item_"]';
   const REQUIRED = '[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]';
   const MODAL = 'dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]';
@@ -194,14 +195,20 @@ export async function temuControls(request) {
     }
   }
 
-  const menus = () => Array.from(document.querySelectorAll(MENU)).filter(visible);
+  const menus = () => {
+    const lists = [...document.querySelectorAll(MENU)].filter(visible);
+    const dropdowns = [...document.querySelectorAll('[class*="ST_dropdown_"]')].filter(node =>
+      visible(node) && node.querySelector(OPTION) && !lists.some(list => node.contains(list)));
+    return [...lists, ...dropdowns.filter(node => !dropdowns.some(parent => parent !== node && parent.contains(node)))];
+  };
+  const popupFor = menu => menu.closest('[class*="ST_dropdown_"]') || menu.closest('[data-testid="beast-core-portal"]') || menu;
   const nonAction = 'a,button,input,select,textarea,label,summary,[role="button"],[role="tab"],[role="link"],[role="option"],[contenteditable="true"]';
   function neutralTitle() {
     const titles = Array.from(document.querySelectorAll('#page_container_id [class*="STP_stepsItemTitle_"]'))
       .filter((node) => clean(node.textContent) === "基本信息" && visible(node) && !node.closest(nonAction) && !node.querySelector(nonAction));
     return titles.length === 1 ? titles[0] : null;
   }
-  const containsOptions = (menu) => Boolean(menu.querySelector('[role="option"]'));
+  const containsOptions = (menu) => Boolean(menu.querySelector(OPTION));
 
   async function poll(pick, ms = 280) {
     const deadline = Date.now() + ms;
@@ -212,6 +219,17 @@ export async function temuControls(request) {
       await wait(20);
     } while (Date.now() < deadline);
     return null;
+  }
+
+  function associatedMenu({ input, wrapper }) {
+    const openMenus = menus();
+    const ids = [input, input.closest(HEAD), wrapper].flatMap((node) =>
+      clean(node?.getAttribute("aria-controls") || node?.getAttribute("aria-owns")).split(/\s+/)).filter(Boolean);
+    const associated = openMenus.filter(menu => wrapper.contains(menu) ||
+      ids.some(id => menu.id === id || document.getElementById(id)?.contains(menu)));
+    if (associated.length) return associated.length === 1 ? associated[0] : null;
+    return !ids.length && openMenus.length === 1 && (wrapper.contains(document.activeElement) || popupFor(openMenus[0]).contains(document.activeElement))
+      ? openMenus[0] : null;
   }
 
   async function open(control) {
@@ -226,14 +244,7 @@ export async function temuControls(request) {
       const hit = document.elementFromPoint(x, y);
       if (hit && !wrapper.contains(hit) && !hit.contains(wrapper)) return null;
     }
-    const findMenu = () => {
-      const openMenus = menus();
-      const ids = [input, input.closest(HEAD), wrapper].flatMap((node) =>
-        clean(node?.getAttribute("aria-controls") || node?.getAttribute("aria-owns")).split(/\s+/)).filter(Boolean);
-      const associated = openMenus.filter((menu) => ids.some((id) => menu.id === id || document.getElementById(id)?.contains(menu)));
-      if (associated.length === 1) return associated[0];
-      return openMenus.length === 1 && wrapper.contains(document.activeElement) ? openMenus[0] : null;
-    };
+    const findMenu = () => associatedMenu(control);
     input.focus({ preventScroll: true });
     let menu = findMenu();
     if (!menu) {
@@ -298,11 +309,14 @@ export async function temuControls(request) {
   }
 
   function choices(menu) {
-    return Array.from(menu.querySelectorAll('[role="option"]')).filter(visible).map((element) => {
+    return [...menu.querySelectorAll(OPTION)].filter(element => visible(element) && !menu.contains(element.parentElement.closest(OPTION))).map(element => {
       const label = clean(element.textContent, 500);
       const value = clean(element.getAttribute("data-value") || element.getAttribute("value") || label, 1000);
-      const aliases = Array.from(element.querySelectorAll("span,[aria-label]"))
-        .map((node) => clean(node.getAttribute("aria-label") || node.textContent)).filter(Boolean);
+      const parts = /^([\p{Script=Han}\d\s]+?)\s*[(\[]?([a-z][a-z\d\s?'’/-]*?)[)\]]?$/iu.exec(label.normalize("NFKC"));
+      const childLabels = Array.from(element.querySelectorAll("span,[aria-label]"))
+        .map((node) => clean(node.getAttribute("aria-label") || node.textContent));
+      const aliases = [...new Set([element.getAttribute("aria-label"), ...(parts?.slice(1) || []), ...childLabels])]
+        .map(alias => clean(alias)).filter(alias => alias && key(alias) !== key(label)).slice(0, 12);
       const status = element.getAttribute("data-checked") ?? element.getAttribute("aria-selected");
       const disabled = element.matches('[data-disabled="true"],[aria-disabled="true"],[disabled],a[href]') ||
         Boolean(element.querySelector('a[href]'));
@@ -314,8 +328,10 @@ export async function temuControls(request) {
     const multiple = control.field.constraints.multiple || menu.getAttribute("aria-multiselectable") === "true";
     return {
       ...control.field,
+      multiple,
       constraints: { ...control.field.constraints, ...(multiple ? { multiple: true } : {}) },
-      options: rows.slice(0, MAX_OPTIONS).map(({ label, value, disabled }) => ({ label, value, ...(disabled ? { disabled } : {}) })),
+      options: rows.slice(0, MAX_OPTIONS).map(({ label, value, aliases, disabled }) =>
+        ({ label, value, ...(aliases.length && { aliases }), ...(disabled && { disabled }) })),
     };
   }
 
@@ -327,57 +343,152 @@ export async function temuControls(request) {
     return matches[0];
   }
 
-  async function probe(control) {
-    const menu = await open(control);
+  function searchInput(control, menu) {
+    const popup = popupFor(menu);
+    const editableInputs = node => [...node.querySelectorAll("input")].filter(input =>
+      visible(input) && editable(input) && !input.readOnly && !input.closest(OPTION));
+    const inputs = editableInputs(popup);
+    if (inputs.length) return inputs.length === 1 ? inputs[0] : null;
+    const inline = editableInputs(control.wrapper);
+    return inline.length === 1 ? inline[0] : null;
+  }
+
+  async function search(control, menu, query, expected) {
+    const input = searchInput(control, menu);
+    const active = () => visible(menu) ? menu : associatedMenu(control);
+    if (!input || !validPage() || blocked() || menus().length !== 1) return null;
+    if (input.value === query) return menu;
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (!set) return null;
+    const signature = (rows) => JSON.stringify(rows.map(({ label, value }) => [label, value]));
+    const before = signature(choices(menu));
+    input.focus({ preventScroll: true });
+    set.call(input, query);
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    let previous = before;
+    let since = Date.now();
+    const settled = await poll(() => {
+      const current = active();
+      if (!current) return null;
+      const rows = choices(current);
+      if (expected !== undefined && pickOption(rows, expected)) return current;
+      const next = signature(rows);
+      if (previous !== next) {
+        previous = next;
+        since = Date.now();
+      }
+      return next !== before && Date.now() - since >= 160 ? current : null;
+    }, expected !== undefined ? 1000 : 1250);
+    return settled || active();
+  }
+
+  async function probe(control, query) {
+    let menu = await open(control);
     if (!menu) return fail("MENU_UNAVAILABLE", "无法安全打开该下拉选项列表。");
     let result;
     let closed;
     try {
-      await poll(() => containsOptions(menu), 1400);
-      const rows = choices(menu);
-      const field = observed(control, menu, rows);
-      result = { ok: true, field, options: field.options };
+      const term = clean(query, 120);
+      if (term) {
+        const searched = await search(control, menu, term);
+        if (searched) menu = searched;
+        else result = fail("SEARCH_UNAVAILABLE", "该下拉没有可安全输入的搜索框。");
+      } else await poll(() => containsOptions(menu), 1400);
+      if (!result) {
+        const rows = choices(menu);
+        const field = observed(control, menu, rows);
+        result = { ok: true, field, options: field.options, ...(term && { filtered: true }) };
+      }
     } finally {
       closed = await close(control, menu);
     }
     return closed ? result : fail("MENU_STILL_OPEN", "Temu 的选项菜单尚未关闭。");
   }
 
-  function checkValues(control, value) {
-    const multiple = Boolean(control.field.constraints.multiple);
-    const values = multiple ? value : [value];
-    if (!Array.isArray(values) || values.some((item) => (typeof item !== "string" && typeof item !== "number") || !key(item)) ||
+  function checkValues(field, value) {
+    const multiple = Boolean(field.constraints.multiple);
+    const values = Array.isArray(value) ? value : [value];
+    if ((!multiple && values.length !== 1) || values.some((item) => (typeof item !== "string" && typeof item !== "number") || !key(item)) ||
       values.length > MAX_OPTIONS || new Set(values.map(key)).size !== values.length) {
       return fail("INPUT_TYPE", multiple ? "此多选下拉需要不重复的选项数组。" : "此下拉需要一个选项名称或选项值。");
     }
-    if (!values.length && control.field.constraints.required) return fail("INPUT_REQUIRED", "当前下拉至少需要一个选项。");
+    if (!values.length && field.constraints.required) return fail("INPUT_REQUIRED", "当前下拉至少需要一个选项。");
     return { ok: true, values, multiple };
   }
 
-  async function select(control, field, value) {
-    const checked = checkValues(control, value);
-    if (!checked.ok) return checked;
+  async function select(control, field, value, query) {
     let menu = await open(control);
     if (!menu) return fail("MENU_UNAVAILABLE", "无法安全打开该下拉选项列表。");
     let changed = false;
     let live = control;
     const same = (first, second) => key(first.value) === key(second.value) && key(first.label) === key(second.label);
     const selected = (rows) => rows.filter((row) => row.status === "true" || row.status === "checked");
+    const matchesLabel = (value, option) => key(value) === key(option.label) || option.aliases.some(alias => key(value) === key(alias));
+    const labelsMatch = (values, expected) => values.length === expected.length &&
+      new Set(values.map(value => {
+        const matches = expected.filter(option => matchesLabel(value, option));
+        return matches.length === 1 ? matches[0] : null;
+      }).filter(Boolean)).size === expected.length;
+    let result;
+    let closed;
     try {
+      result = await apply();
+    } finally {
+      closed = await close(live || control, menu);
+    }
+    if (!closed) return fail("MENU_STILL_OPEN", "Temu 的选项菜单尚未关闭。", changed);
+    return result?.ok ? { ...result, options: result.observed.options } : result;
+
+    async function find(value, term = value, known) {
+      const option = (rows) => {
+        if (!known) return pickOption(rows, value);
+        const available = rows.filter(row => same(row, known));
+        return available.length === 1 && !available[0].disabled ? available[0] : null;
+      };
+      if (!validPage() || blocked()) return null;
+      if (!visible(menu)) {
+        live = locate(field);
+        menu = live && await open(live);
+      }
+      if (!menu) return null;
+      const direct = option(choices(menu));
+      if (direct) return direct;
+      if (!query && !/^(?:productProperties\[\d+\]|composition-material-\d+)$/u.test(field.key)) return null;
+      const searched = await search(live, menu, clean(term, 120), value);
+      if (!searched) return null;
+      menu = searched;
+      return option(choices(menu));
+    }
+
+    async function apply() {
       await poll(() => containsOptions(menu), 1400);
       const rows = choices(menu);
       const snapshot = observed(control, menu, rows);
-      const desired = checked.values.map((item) => pickOption(rows, item));
-      if (desired.some((choice) => !choice) ||
-        desired.some((choice, index) => desired.slice(0, index).some((earlier) => same(earlier, choice)))) {
-        return fail("OPTION_MISSING", "下拉列表没有唯一匹配的可选值。请使用当前页面显示的完整选项名称。");
+      const checked = checkValues(snapshot, value);
+      if (!checked.ok) return checked;
+      const desired = [];
+      for (const item of checked.values) {
+        const choice = pickOption(rows, item) || await find(item, checked.multiple ? item : clean(query, 120) || item);
+        if (!choice || desired.some(earlier => same(earlier, choice))) {
+          return fail("OPTION_MISSING", "下拉列表没有唯一匹配的可选值。请使用当前页面显示的完整选项名称。");
+        }
+        desired.push(choice);
+      }
+      if (!checked.multiple && labelsMatch([control.field.value], desired)) {
+        return { ok: true, status: "unchanged", observed: snapshot };
       }
       const prior = selected(rows);
-      if (checked.multiple && rows.some((row) => row.status == null)) {
+      const chips = checked.multiple ? readSelected(control.wrapper) : [];
+      for (const chip of chips) {
+        const visibleChoices = rows.filter(row => matchesLabel(chip, row));
+        const choice = (visibleChoices.length === 1 && visibleChoices[0]) || await find(chip);
+        if (!choice) return fail("SELECTION_UNVERIFIED", "无法核对已选项，需要手动确认。");
+        if (!prior.some(row => same(row, choice))) prior.push(choice);
+      }
+      if (checked.multiple && !chips.length && rows.some((row) => row.status == null)) {
         return fail("SELECTION_UNVERIFIED", "此多选下拉没有公开可读的选中状态，需要手动确认。");
       }
-      if (!checked.multiple && key(control.field.value) === key(desired[0]?.label) ||
-          prior.length === desired.length && desired.every((choice) => prior.some((row) => same(choice, row)))) {
+      if (prior.length === desired.length && desired.every((choice) => prior.some((row) => same(choice, row)))) {
         return { ok: true, status: "unchanged", observed: snapshot };
       }
       const unwanted = checked.multiple ? prior.filter((row) => !desired.some((choice) => same(row, choice))) : [];
@@ -385,20 +496,19 @@ export async function temuControls(request) {
       const wanted = desired.filter((row) => !prior.some((choice) => same(row, choice)));
       for (const choice of [...wanted, ...unwanted]) {
         if (!validPage() || blocked()) return fail("PAGE_CHANGED", "页面或弹窗发生变化，已停止填写。", changed);
-        if (!visible(menu)) {
-          live = locate(field);
-          menu = live && await open(live);
-        }
-        const current = menu && choices(menu).filter((row) => same(row, choice));
-        if (current?.length !== 1 || current[0].disabled) return fail("OPTION_CHANGED", "下拉选项已变化。", changed);
-        current[0].element.click();
+        const current = await find(choice.value, clean(query, 120) && !checked.multiple ? query : choice.aliases[0] || choice.label, choice);
+        if (!current) return fail("OPTION_CHANGED", "下拉选项已变化。", changed);
+        current.element.click();
         changed = true;
         await wait(25);
       }
       if (!validPage() || blocked()) return fail("PAGE_CHANGED", "页面或弹窗发生变化，请检查填写结果。", changed);
       live = locate(field);
       if (!live) return fail("READBACK_MISMATCH", "选择后无法重新定位此字段。", changed);
-      if (!checked.multiple && key(live.field.value) === key(desired[0]?.label)) {
+      if (await poll(() => {
+        live = locate(field) || live;
+        return labelsMatch(readSelected(live.wrapper), desired);
+      }, 400)) {
         return { ok: true, status: "filled", observed: snapshot };
       }
       if (!visible(menu)) menu = await open(live);
@@ -408,8 +518,6 @@ export async function temuControls(request) {
       }, 900);
       if (!verified) return fail("READBACK_MISMATCH", "平台未确认目标选项，请检查下拉当前值。", changed);
       return { ok: true, status: "filled", observed: snapshot };
-    } finally {
-      await close(live || control, menu);
     }
   }
 
@@ -420,10 +528,10 @@ export async function temuControls(request) {
     return { ok: true, fields: controls.map(({ field }) => field), unsupported, truncated };
   }
 
-  const { field, value } = request;
+  const { field, value, query } = request;
   const control = locate(field);
   if (!control) return fail("FIELD_MISSING", "无法在当前 Temu 表单唯一定位这个下拉控件。");
-  if (request.kind === "probe") return probe(control);
-  if (request.kind === "select") return select(control, field, value);
+  if (request.kind === "probe") return probe(control, query);
+  if (request.kind === "select") return select(control, field, value, query);
   return fail("ACTION_UNSUPPORTED", "无效的 Temu 控件操作。");
 }

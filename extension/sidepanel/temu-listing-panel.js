@@ -304,7 +304,9 @@ export function bindTemuListingPanel({
     }
     filled.attributes = { ...base?.attributes, ...normalized.attributes };
     filled.listingAttributes = { ...base?.listingAttributes, ...normalized.listingAttributes };
-    for (const key of ["mainImages", "detailImages", "variantImages", "sizeChartImagePath", "sizeChart"]) filled[key] = base?.[key] ?? normalized[key];
+    for (const key of ["mainImages", "detailImages", "variantImages", "sharedGalleryImages", "sizeChartImagePath", "sizeChart"]) {
+      filled[key] = base?.[key] ?? normalized[key];
+    }
     for (const key of ["skus", "variantGroups"]) filled[key] = base?.[key]?.length ? base[key] : normalized[key];
     return filled;
   }

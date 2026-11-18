@@ -194,9 +194,13 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
       const sku = /^productSkuMap\.[\w-]*\.previewImgsI18n\.common$/u.test(area.id);
       const skc = /^productSkcList\[(\d{1,3})\]\.carouselImgsI18n\.common$/u.exec(area.id);
       if ((!main && !sku && !skc) || !visible(area) || !area.querySelector('[class^="upload-trigger_wrap__"]')) continue;
-      const markers = [...area.querySelectorAll('img[src]')].filter(node => visible(node) &&
+      const images = [...area.querySelectorAll('img[src]')].filter(node => visible(node) &&
         !node.closest('[class^="upload-trigger_wrap__"],[aria-busy="true"],[class*="uploading" i]') &&
-        /^https?:\/\//iu.test(node.src) && !node.matches('[class*="placeholder" i],[class*="icon" i]')).length;
+        /^https?:\/\//iu.test(node.src) && !node.matches('[class*="placeholder" i],[class*="icon" i]')).map(node => {
+        const url = new URL(node.currentSrc || node.src);
+        return url.origin + url.pathname;
+      });
+      const markers = images.length;
       if (main) {
         list.push({ key: area.id, role: "main", mode: "material", multiple: true, markers, minimum: 3 });
       } else if (sku) {
@@ -205,7 +209,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
         const color = document.getElementById(`productSkcList[${skc[1]}].mainSpec[0]`);
         const variant = clean(color?.querySelector('[class*="ST_selectValueSingle_"]')?.textContent ||
           color?.querySelector('input[placeholder="选择或自定义颜色"]')?.value);
-        if (variant) list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, variant });
+        if (variant) list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, images, variant, minimum: 3 });
       }
     }
     for (const input of root.querySelectorAll('input[type="file"]')) {

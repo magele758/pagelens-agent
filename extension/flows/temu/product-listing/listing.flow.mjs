@@ -1,3 +1,5 @@
+import { readTemuAttributeValue } from "./input.js";
+
 export const id = "temu-listing";
 export const version = 1;
 
@@ -15,10 +17,6 @@ const standardColors = new Map([
   ["pink", "粉色"], ["yellow", "黄色"], ["orange", "橙色"], ["purple", "紫色"], ["gray", "灰色"], ["grey", "灰色"],
 ]);
 const standardColor = label => standardColors.get(keyOf(label.replace(/^[a-z]\s+-\s+/iu, "")));
-
-function fieldMap(values) {
-  return new Map(Object.entries(values || {}).map(([key, value]) => [keyOf(key), value]));
-}
 
 function optionAliases(value) {
   const alias = keyOf(value);
@@ -39,6 +37,7 @@ function skuValue(field, row, input) {
     "productSkuSameReferPrice.url": input.referenceUrl,
     sensitiveAttr: row.sensitiveAttribute ?? input.sensitiveAttribute,
     "productSkuMultiPack.skuClassification": row.skuClassification ?? input.skuClassification,
+    "productSkuMultiPack.packIncludeInfo": row.packageContents ?? input.packageContents,
   };
   const result = field.skuMember.startsWith("siteSupplierPriceMap.") ? row.price : values[field.skuMember];
   return field.multiple && hasValue(result) && !Array.isArray(result) ? [result] : result;
@@ -127,7 +126,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const result = await run("temu_field_options", { key: field.key });
     if (!result?.ok) { record(field.label, result, field.key); return undefined; }
     const aliases = optionAliases(wanted);
-    const matches = (result.options || []).filter(option => !option.disabled && [option.value, option.label]
+    const matches = (result.options || []).filter(option => !option.disabled && [option.value, option.label, ...(option.aliases || [])]
       .some(value => aliases.includes(keyOf(value))));
     return matches.length === 1 ? matches[0].value : undefined;
   }
@@ -271,7 +270,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   }
   async function uploadImages(role, paths, state, variant, targetKey) {
     if (input.uploadImages === false || !paths?.length) return;
-    const label = { main: "商品轮播图", detail: "详情图", "size-chart": "尺码图", variant: "规格图" }[role];
+    const label = variant ? `${variant}规格图` : { main: "商品轮播图", detail: "详情图", "size-chart": "尺码图", variant: "规格图" }[role];
     const targets = state.uploads.filter(target => target.role === role &&
       (!targetKey || target.key === targetKey) && (!variant || keyOf(target.variant) === keyOf(variant)));
     if (targets.length !== 1) {
@@ -289,16 +288,14 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     }
   }
   function explicitValue(field) {
-    const named = keyOf(field.key);
-    const label = keyOf(field.label);
-    const direct = attributes.get(named) ?? attributes.get(label);
-    if (hasValue(direct)) return direct;
     if (field.skuMember) {
       const rows = input.skus?.length ? input.skus : [input];
       const keys = new Set(lastState.fields.filter(entry => entry.skuMember).map(entry => entry.skuGroup));
       const row = matchingSku(field, rows, keys.size, colorLabels);
       return row && skuValue(field, row, input);
     }
+    const direct = readTemuAttributeValue(input, field);
+    if (hasValue(direct)) return direct;
     if (/^productEnName$|^英文(?:商品)?名称$/u.test(field.key === "productEnName" ? field.key : field.label)) {
       return input.englishTitle || (/[a-z]/iu.test(input.title) && !/\p{Script=Han}/u.test(input.title) ? input.title : null);
     }
@@ -313,7 +310,6 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     return undefined;
   }
 
-  const attributes = fieldMap({ ...input?.attributes, ...input?.listingAttributes });
   try {
     const sites = input?.sites?.length ? input.sites : input?.site ? [input.site] : [];
     if (!Number.isSafeInteger(tabId) || tabId < 1 || typeof call !== "function" ||
@@ -366,21 +362,24 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
 
     if (typeof suggestFields === "function") {
       report("suggest", "补齐当前类目字段");
-      const candidates = afterBasic.fields.filter(field => field.required && !field.skuMember &&
+      const current = await readEditor();
+      if (!current?.ok) return stop("类目资料补齐", current);
+      const candidates = current.fields.filter(field => field.required && !field.skuMember &&
         !attempted.has(field.key) && !hasValue(field.value) && (shouldSuggestField?.(field) ?? true)).slice(0, 30);
       const fields = [];
       for (const field of candidates) {
         if (field.locator && !field.options?.length) {
           const probed = await run("temu_field_options", { key: field.key });
           if (!probed?.ok && fatal.has(probed?.code)) return stop(field.label, probed);
-          if (probed?.ok && probed.options?.length) fields.push({ ...field, options: probed.options });
+          if (probed?.ok && probed.options?.length) fields.push({ ...field, ...probed.field, options: probed.options });
         } else fields.push(field);
       }
       if (fields.length) {
         try {
           const suggestion = await suggestFields(input, { fields }, { signal });
           for (const field of fields) if (Object.hasOwn(suggestion?.values || {}, field.key)) {
-            await applyField(field, suggestion.values[field.key]);
+            const outcome = await applyField(field, suggestion.values[field.key]);
+            if (outcome?.code === "OPTION_MISSING") await run("temu_field_options", { key: field.key, forceLive: true });
           }
         } catch (error) {
           if (signal?.aborted || error?.workflowCode) throw error;
@@ -413,13 +412,9 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const beforeImages = await readEditor();
     if (!beforeImages?.ok) return stop("图片控件", beforeImages);
     const gallery = input.mainImages || (input.imagePath ? [input.imagePath] : []);
-    const requiredGallerySize = beforeImages.uploads.find(target => target.role === "main")?.minimum || 3;
-    const galleryFiles = gallery.length < requiredGallerySize && input.variantImages?.length
-      ? [...new Set([...gallery, ...input.variantImages])].slice(0, requiredGallerySize)
-      : gallery;
     const apparelGalleries = beforeImages.uploads.filter(target => /^productSkcList\[/u.test(target.key) && target.role === "variant");
     if (!apparelGalleries.length || beforeImages.uploads.some(target => target.role === "main")) {
-      await uploadImages("main", galleryFiles, beforeImages);
+      await uploadImages("main", gallery, beforeImages);
     }
     const detailUpload = beforeImages.uploads.some(target => target.role === "detail");
     if (detailUpload) await uploadImages("detail", input.detailImages, beforeImages);
@@ -443,8 +438,22 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       const label = colorLabels.get(keyOf(option.value)) || option.value;
       const matching = beforeImages.uploads.filter(target => target.role === "variant" && keyOf(target.variant) === keyOf(label));
       if (matching.length === 1) {
+        const [target] = matching;
         const image = option.imagePath || (apparelGalleries.length === 1 && group.options.length === 1 ? gallery[0] : "");
-        if (image) await uploadImages("variant", [image], beforeImages, label, matching[0].key);
+        if (!apparelGalleries.includes(target)) {
+          if (image) await uploadImages("variant", [image], beforeImages, label, target.key);
+          continue;
+        }
+        if (input.uploadImages === false || target.markers >= target.minimum) continue;
+        const supporting = option.galleryImages ?? input.sharedGalleryImages ?? [];
+        const carousel = image ? [...new Set([image, ...supporting])].slice(0, 5) : [];
+        if (carousel.length < target.minimum || target.markers) {
+          record(`${label}规格图`, { code: "SKC_GALLERY_INCOMPLETE", message: target.markers
+            ? "此规格已有部分图片，请先核对现有槽位及顺序。"
+            : `请准备此色主图和共用素材，按主图、材质、版型、细节、工艺排列，最少 ${target.minimum} 张。` }, target.key);
+          continue;
+        }
+        await uploadImages("variant", carousel, beforeImages, label, target.key);
       }
     }
 
@@ -478,7 +487,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     }
     for (const upload of final.uploads || []) {
       if (upload.minimum && upload.markers < upload.minimum) {
-        missing.push({ key: upload.key, label: `商品轮播图需至少 ${upload.minimum} 张，已显示 ${upload.markers} 张` });
+        missing.push({ key: upload.key, label: `${upload.variant ? upload.variant + "规格图" : "商品轮播图"}需至少 ${upload.minimum} 张，已显示 ${upload.markers} 张` });
       }
     }
     for (const message of final.issues || []) issues.push(asIssue("Temu 页面提示", { code: "VALIDATION", message }));

@@ -1,6 +1,7 @@
 import { dialogNote } from "../../../lib/agent/cdp-tools.js";
 import { isSensitiveUploadPath } from "../../../lib/bridge/tools-browser.js";
 import { getCdp } from "../../../lib/cdp.js";
+import { createTemuOptionCache } from "./attribute-cache.js";
 import { temuApparelPage } from "./apparel-page.js";
 import { temuControls } from "./controls.js";
 import { temuDecorationPage } from "./decoration-page.js";
@@ -27,10 +28,14 @@ export function isTemuDraftEditor(href) {
 }
 
 /** A tool caller serves one trial begun on the new-product category page. */
-export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload, api = globalThis.chrome, cdp = getCdp() } = {}) {
+export function createTemuListingToolCaller({
+  tabId, url, signal, confirmUpload, api = globalThis.chrome, cdp = getCdp(),
+  optionCache = createTemuOptionCache({ storage: api?.storage?.local }),
+} = {}) {
   let href = url;
   let documentId;
   let categoryPath;
+  let site;
   let stage = "category";
   let siteAndCategorySet = false;
   let busy = false;
@@ -114,43 +119,41 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
     let confirmed;
     try {
       const previous = picker.knownMedia || [];
+      if (Number.isInteger(picker.available) && paths.length > picker.available) {
+        return failure("UPLOAD_CAPACITY", `素材中心还可选择 ${picker.available} 张图片。`);
+      }
       const known = new Map(paths.flatMap(path => {
         const accepted = verifiedMaterials.get(path);
         return accepted && previous.some(card => card.filename === accepted.filename && card.identity === accepted.identity)
           ? [[path, accepted]] : [];
       }));
-      const remaining = paths.filter(path => !known.has(path));
-      if (remaining.length > 1 && !picker.multiple) return failure("UPLOAD_CONTROL_SINGLE", "素材中心每次只接收一张图片。");
-      if (remaining.length) {
-        const selectedFiles = await selectFiles(picker.selector, remaining);
+      let snapshot = picker;
+      let automaticallySelected = 0;
+      for (const [index, path] of paths.entries()) {
+        if (known.has(path)) continue;
+        const selectedFiles = await selectFiles(snapshot.selector, [path]);
         if (!selectedFiles.ok) return selectedFiles;
+        const settled = await media("settle-upload", { name: filenames[index], previous: snapshot.knownMedia || [] });
+        if (!settled.ok) return settled;
+        if (!settled.card) return failure("UPLOAD_UNVERIFIED", "未能核对新上传的素材。");
+        known.set(path, settled.card);
+        snapshot = await media("inspect");
+        if (!snapshot.ok) return snapshot;
+        const extra = snapshot.count - picker.count - automaticallySelected;
+        if (extra === 1 && !picker.ordered) automaticallySelected++;
+        else if (extra !== 0) return failure("UPLOAD_UNVERIFIED", "上传后素材选择顺序已变化。");
       }
-      const deadline = Date.now() + 22000;
-      do {
-        const selected = await media("inspect");
-        if (!selected.ok) return selected;
-        const newCards = (selected.knownMedia || []).filter(card => !previous.some(old => old.identity === card.identity));
-        const expected = paths.map((path, index) => {
-          if (known.has(path)) return known.get(path);
-          const matches = newCards.filter(card => card.filename === filenames[index]);
-          return matches.length === 1 ? matches[0] : null;
-        });
-        if (expected.every(Boolean) && selected.count === picker.count) {
-          const picked = await media("select-new", { baseline: picker.count, previous, expected });
-          if (!picked.ok && picked.code !== "UPLOAD_PENDING") return picked;
-          if (picked.ok) {
-            confirmed = await media("confirm", { baseline: picker.count, added: paths.length });
-            if (confirmed.ok) paths.forEach((path, index) => verifiedMaterials.set(path, expected[index]));
-            return confirmed;
-          }
-        } else if (expected.every(Boolean) && selected.count === picker.count + paths.length) {
-          confirmed = await media("confirm", { baseline: picker.count, added: paths.length });
-          if (confirmed.ok) paths.forEach((path, index) => verifiedMaterials.set(path, expected[index]));
-          return confirmed;
-        }
-        await sleep(300);
-      } while (Date.now() < deadline);
-      return failure("UPLOAD_UNVERIFIED", "图片上传后没有确认全部新文件被选中，未确认素材中心。");
+      const expected = paths.map(path => known.get(path));
+      if (automaticallySelected > 0 && automaticallySelected !== paths.length) {
+        return failure("UPLOAD_UNVERIFIED", "只有部分图片被 Temu 自动选中。");
+      }
+      const picked = automaticallySelected === paths.length ? { ok: true, media: expected }
+        : await media("select-new", { baseline: picker.count, previous, expected });
+      if (!picked.ok) return picked;
+      confirmed = await media("confirm", { baseline: picker.count, added: paths.length });
+      if (!confirmed.ok) return confirmed;
+      for (const path of paths) verifiedMaterials.set(path, known.get(path));
+      return { ...confirmed, media: picked.media };
     } finally {
       if (!confirmed?.ok) await media("cancel").catch(() => {});
     }
@@ -169,9 +172,15 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
     const uploadDeadline = Date.now() + 14000;
     do {
       const next = await runInPage(temuEditorPage, request);
-      if (next.ok && next.markers >= stable.markers + paths.length) return {
-        ok: true, status: "verified", uploaded: paths.length,
-      };
+      if (next.ok && next.markers >= stable.markers + paths.length) {
+        if (Array.isArray(stable.images)) {
+          const desired = [...stable.images, ...(selected.media || []).map(card => card.src)];
+          if (desired.length !== next.images?.length || desired.some((src, index) => src !== next.images[index])) {
+            return failure("SKC_GALLERY_ORDER_UNVERIFIED", "规格图片已经回显，但无法按原定槽位核对顺序。");
+          }
+        }
+        return { ok: true, status: "verified", uploaded: paths.length };
+      }
       if (["PAGE_CHANGED", "MODAL_BLOCKED"].includes(next.code)) return next;
       await sleep(250);
     } while (Date.now() < uploadDeadline);
@@ -179,21 +188,22 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
   }
 
   async function fillDetails({ description, paths }) {
-    const denied = paths?.length ? await approveFiles("detail", paths) : null;
-    const files = denied ? [] : paths || [];
-    if (!files.length && !description?.trim()) return denied || failure("VALUE_INVALID", "没有可填写的详情资料。");
-    const edit = (kind, text) => runInPage(temuDecorationPage, { href, kind, description: text, hasImages: files.length > 0 });
-    const prepared = await edit("prepare", description);
+    if (!paths?.length) return failure("DETAIL_IMAGE_REQUIRED", "详情图文至少需要一张图片，请在商品目录中提供详情图并启用上传。");
+    const denied = await approveFiles("detail", paths);
+    if (denied) return denied;
+    const edit = (kind, text, images) => runInPage(temuDecorationPage, { href, kind, description: text, hasImages: true, images });
+    const prepared = await edit("begin", description);
     if (!prepared.ok) return prepared;
     let verified;
     try {
-      const written = prepared.written ?? description;
-      const imageResult = files.length ? await uploadMaterial("decoration-images", files) : null;
-      if (imageResult && !imageResult.ok && !written?.trim()) return imageResult;
-      verified = await edit("apply", written);
-      const imageIssue = denied || (imageResult && !imageResult.ok ? imageResult : null);
-      return verified.ok ? { ...verified, uploaded: imageResult?.ok ? files.length : 0,
-        ...(imageIssue && { imageIssue }), ...(prepared.detailIssue && { detailIssue: prepared.detailIssue }) } : verified;
+      const imageResult = await uploadMaterial("decoration-images", paths);
+      if (!imageResult.ok) return imageResult;
+      const images = imageResult.media?.map(card => card.src);
+      if (images?.length !== paths.length) return failure("UPLOAD_UNVERIFIED", "未能核对放入详情预览的图片。");
+      const written = await edit("write", description, images);
+      if (!written.ok) return written;
+      verified = await edit("apply", written.written ?? description, images);
+      return verified.ok ? { ...verified, uploaded: paths.length, ...(written.detailIssue && { detailIssue: written.detailIssue }) } : verified;
     } finally {
       if (!verified?.ok && !signal?.aborted) await edit("cancel").catch(() => {});
     }
@@ -212,6 +222,7 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
           if (!applied.ok) return applied;
           siteAndCategorySet = true;
           categoryPath = args.categoryPath;
+          site = args.site;
           const next = await runInPage(temuStagePage, { ...selection, kind: "next" });
           return next.ok ? await enteredEditor() : next;
         }
@@ -231,8 +242,19 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
             if (!options.ok) return options;
             const fields = options.fields.filter(field => field.key === args.key);
             if (fields.length !== 1) return failure("FIELD_MISSING", "没有唯一匹配的动态下拉字段。");
-            return await runInPage(temuControls, { kind: tool === "temu_select" ? "select" : "probe", field: fields[0],
-              value: args.value, scope: editorScope() });
+            const [field] = fields;
+            const scope = { site, categoryPath };
+            const request = { field, query: args.query, scope: editorScope() };
+            if (tool === "temu_select") {
+              const selected = await runInPage(temuControls, { ...request, kind: "select", value: args.value });
+              if (selected?.options?.length) await optionCache.write(scope, field, selected.options);
+              return selected;
+            }
+            const cached = !args.forceLive && !args.query && await optionCache.read(scope, field);
+            if (cached) return { ok: true, options: cached };
+            const live = await runInPage(temuControls, { ...request, kind: "probe" });
+            if (live.ok && !args.query) await optionCache.write(scope, field, live.options);
+            return live;
           }
           case "temu_write":
             return await runInPage(temuEditorPage, { kind: "write", href, key: args.key, value: args.value });

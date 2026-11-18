@@ -87,9 +87,17 @@ function resolveAdditionalImages(dir, input) {
     else delete item[key];
   }
   for (const file of Array.isArray(input.imageFiles) ? input.imageFiles : []) replacePath(file, "path");
-  for (const group of Array.isArray(input.variantGroups) ? input.variantGroups : []) {
-    for (const option of Array.isArray(group?.options) ? group.options : []) replacePath(option, "imagePath");
+  function resolveGallery(item, key) {
+    if (Array.isArray(item?.[key])) item[key] = item[key].map(resolve).filter(Boolean);
   }
+  for (const group of Array.isArray(input.variantGroups) ? input.variantGroups : []) {
+    for (const option of Array.isArray(group?.options) ? group.options : []) {
+      replacePath(option, "imagePath");
+      resolveGallery(option, "galleryImages");
+    }
+  }
+  resolveGallery(input, "sharedGalleryImages");
+  resolveGallery(input.temu, "sharedGalleryImages");
   for (const sku of Array.isArray(input.skus) ? input.skus : []) replacePath(sku, "imagePath");
   for (const key of ["mainImages", "detailImages"]) {
     if (Array.isArray(input[key])) {
