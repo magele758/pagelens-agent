@@ -34,6 +34,8 @@ export async function temuControls(request) {
   const labelText = (node) => clean(node?.textContent).replace(/^[*＊]\s*/u, "").replace(/[：:]$/u, "");
 
   function labelFor(input, group) {
+    if (/^productSkcList\[\d{1,3}\]\.mainSpec\[0\]$/u.test(group.id) &&
+        input.placeholder === "选择或自定义颜色") return "服装颜色";
     const parent = /^minorSpec\.(\d+)\.selectedRootSpecId$/u.exec(group.id);
     if (parent) return `父规格 ${Number(parent[1]) + 1}`;
     const fixed = {
@@ -63,10 +65,71 @@ export async function temuControls(request) {
     return labelText(header);
   }
 
+  function rowLabelsFor(input) {
+    const row = input.closest("tr");
+    if (!row) return [];
+    const cells = [...row.cells];
+    for (let index = row.sectionRowIndex - 1; index >= 0; index--) {
+      for (const cell of row.parentElement.rows[index]?.cells || []) {
+        if (cell.rowSpan === 0 || index + cell.rowSpan > row.sectionRowIndex) cells.push(cell);
+      }
+    }
+    return cells.filter(cell => !cell.querySelector(`${FORM_CONTROLS},button,a`))
+      .map(cell => clean(cell.dataset.value || cell.getAttribute("aria-label") || cell.textContent))
+      .filter(text => text && !/^[-–—]+$/u.test(text)).slice(0, 12);
+  }
+
+  function structural(input) {
+    const root = document.getElementById("page_container_id");
+    if (!root?.contains(input) || input.placeholder !== "请选择") return null;
+    const composition = input.closest('[id="productProperties[15]"]');
+    const row = input.closest("tbody tr");
+    const item = input.closest('[data-testid="beast-core-form-item"]');
+    let label;
+    let fieldKey;
+    let holder;
+    if (composition?.contains(row) && row.querySelectorAll('input[placeholder="请选择"]').length === 1) {
+      fieldKey = `composition-material-${row.sectionRowIndex}`;
+      label = "成分材料";
+      holder = composition;
+    } else if (item && /^[*＊]?\s*尺码\s*建议发布/u.test(clean(item.innerText || item.textContent)) &&
+        item.querySelectorAll('input[placeholder="请选择"]').length === 1) {
+      fieldKey = "apparel-size";
+      label = "尺码";
+      holder = item;
+    } else return null;
+    const segments = [];
+    for (let node = input; node && node !== root; node = node.parentElement) {
+      segments.unshift(`${node.localName}:nth-child(${[...node.parentElement.children].indexOf(node) + 1})`);
+    }
+    const selector = `#page_container_id > ${segments.join(" > ")}`;
+    return { holder, selector, fieldKey, label, requiredHint: true };
+  }
+
+  function describe(input, wrapper, { holder: group, selector, fieldKey, label, requiredHint = false }) {
+    const item = group.closest('[data-testid="beast-core-form-item"],[class*="Form_item_"]');
+    const required = requiredHint || input.required || input.getAttribute("aria-required") === "true" ||
+      /^(?:productOriginCode|manufacturingLocation|shipmentLimitSecond|freightTemplateId)$/u.test(group.id) ||
+      /^productSkuMap\.[\w-]*\.sensitiveAttr$/u.test(group.id) ||
+      Boolean((item || group).querySelector('[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]'));
+    const multiple = Boolean(wrapper.querySelector('[class*="ST_selectValueMultiple_"]') || input.getAttribute("aria-multiselectable") === "true");
+    const locator = { adapter: "temu-select", tag: "input", type: input.type, role: "combobox", selector, label };
+    const selected = [...wrapper.querySelectorAll('[class*="ST_selectValueSingle_"],[class*="ST_selectValueMultipleItem_"]')]
+      .filter(visible).map(node => clean(node.textContent)).filter(Boolean);
+    const sku = /^productSkuMap\.([\w-]*)\.(sensitiveAttr|productSkuMultiPack\.skuClassification)$/u.exec(group.id);
+    return { input, wrapper, field: {
+      key: fieldKey || group.id, kind: "select", label, locator, required: Boolean(required), multiple, value: multiple ? selected : selected[0] || "",
+      constraints: { ...(required ? { required: true } : {}), ...(multiple ? { multiple: true } : {}) }, options: [],
+      ...(sku && { skuGroup: sku[1], skuMember: sku[2], rowLabels: rowLabelsFor(group) }),
+    } };
+  }
+
   function info(input) {
     if (!input || !visible(input) || !editable(input)) return null;
     const wrapper = input.closest(WRAPPER);
     if (!wrapper || input.closest(HEAD)?.closest(WRAPPER) !== wrapper) return null;
+    const special = structural(input);
+    if (special) return describe(input, wrapper, special);
     for (const group of groups(wrapper)) {
       if (/^(?:page_container_id|sku_table_node|root|app)$/i.test(group.id)) continue;
       const selector = `[id="${group.id}"] ${WRAPPER} ${HEAD} input`;
@@ -74,19 +137,7 @@ export async function temuControls(request) {
       if (candidates.length !== 1 || candidates[0] !== input) continue;
       const label = labelFor(input, group);
       if (!label || /密码|验证码|安全码|动态口令|\b(?:password|captcha|passcode|otp)\b/i.test(label)) continue;
-      const item = group.closest('[data-testid="beast-core-form-item"],[class*="Form_item_"]');
-      const required = input.required || input.getAttribute("aria-required") === "true" ||
-        /^(?:productOriginCode|manufacturingLocation|shipmentLimitSecond|freightTemplateId)$/u.test(group.id) ||
-        /^productSkuMap\.[\w-]*\.sensitiveAttr$/u.test(group.id) ||
-        Boolean((item || group).querySelector('[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]'));
-      const multiple = Boolean(wrapper.querySelector('[class*="ST_selectValueMultiple_"]') || input.getAttribute("aria-multiselectable") === "true");
-      const locator = { adapter: "temu-select", tag: "input", type: input.type, role: "combobox", selector, label };
-      const selected = [...wrapper.querySelectorAll('[class*="ST_selectValueSingle_"],[class*="ST_selectValueMultipleItem_"]')]
-        .filter(visible).map(node => clean(node.textContent)).filter(Boolean);
-      return { input, wrapper, field: {
-        key: group.id, kind: "select", label, locator, required: Boolean(required), multiple, value: multiple ? selected : selected[0] || "",
-        constraints: { ...(required ? { required: true } : {}), ...(multiple ? { multiple: true } : {}) }, options: [],
-      } };
+      return describe(input, wrapper, { holder: group, selector, label });
     }
     return null;
   }

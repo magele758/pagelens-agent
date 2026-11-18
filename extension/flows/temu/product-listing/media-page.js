@@ -1,5 +1,5 @@
 /** Read and operate the material picker only while the new Temu draft remains open. */
-export async function temuMediaPage({ href, kind, key, filenames = [], previous = [], baseline, added }) {
+export async function temuMediaPage({ href, kind, key, filenames = [], previous = [], expected = [], baseline, added }) {
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
   const clean = value => String(value ?? "").replace(/\s+/gu, " ").trim();
@@ -14,7 +14,8 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
   const picker = () => withTitle("素材中心");
   const decoration = () => withTitle("详情页装修");
   const isImageArea = key => key === "noCostumeCarouselImgsI18n.common" ||
-    /^productSkuMap\.[\w-]*\.previewImgsI18n\.common$/u.test(key || "");
+    /^productSkuMap\.[\w-]*\.previewImgsI18n\.common$/u.test(key || "") ||
+    /^productSkcList\[\d{1,3}\]\.carouselImgsI18n\.common$/u.test(key || "");
 
   function selected(dialog) {
     const candidates = [...dialog.querySelectorAll("span,div,p")].filter(node => visible(node) && node.childElementCount <= 3)
@@ -76,7 +77,9 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       return fail("UPLOAD_UNVERIFIED", "当前素材选择或上传文件名与计划不一致。");
     }
     const existing = new Set(previous.map(card => card.identity));
-    const find = name => unique(mediaCards(dialog).filter(card => card.filename === name && !existing.has(card.identity)));
+    const approved = new Map(expected.map(card => [card.filename, card.identity]));
+    const find = name => unique(mediaCards(dialog).filter(card => card.filename === name &&
+      (approved.has(name) ? approved.get(name) === card.identity : !existing.has(card.identity))));
     const missing = filenames.filter(name => !find(name));
     if (missing.length) return fail("UPLOAD_PENDING", "尚未出现所有新上传的素材卡片。");
     for (const [index, name] of filenames.entries()) {

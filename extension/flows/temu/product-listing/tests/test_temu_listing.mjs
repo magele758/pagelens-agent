@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { replayTemuListing } from "../listing.flow.mjs";
 import { createTemuListingToolCaller, isTemuDraftEditor } from "../tool-adapter.js";
+import { temuApparelPage } from "../apparel-page.js";
+import { temuControls } from "../controls.js";
 import { temuDecorationPage } from "../decoration-page.js";
 import { temuEditorPage } from "../editor-page.js";
 import { temuMediaPage } from "../media-page.js";
@@ -206,6 +208,61 @@ const input = {
   assert.equal((await action({ kind: "select-new", previous: opened.knownMedia, baseline: 0 })).count, 1);
   assert.equal((await action({ kind: "confirm", baseline: 0, added: 1 })).ok, true);
   assert.equal(oldClicks, 0);
+  dom.window.close();
+}
+
+{
+  const dom = new JSDOM(`<main id="page_container_id">
+    <div id="productName"><textarea></textarea></div>
+    <div class="clothing-colors">
+      <div id="productSkcList[0].mainSpec[0]"><input placeholder="选择或自定义颜色"></div>
+      <div id="productSkcList[0].carouselImgsI18n.common"><div class="upload-trigger_wrap__test">素材中心</div></div>
+      <div class="product-skc_specItem__test"><a>+ 添加</a></div>
+    </div>
+    <div class="product-skc_specItem__size">
+      <div data-testid="beast-core-form-item"><span>*尺码</span><span>建议发布精准信息</span>
+        <div class="ST_outerWrapper_test"><div class="ST_head_test">
+          <input data-testid="beast-core-select-htmlInput" placeholder="请选择" readonly>
+          <span data-testid="beast-core-input-suffix"></span></div></div></div>
+    </div>
+    <div id="productProperties[15]">
+      <table><tbody><tr><td><div class="ST_outerWrapper_test"><div class="ST_head_test"><input placeholder="请选择"></div></div></td>
+      <td><input placeholder="请输入">%</td></tr></tbody></table><a>添加</a>
+    </div>
+  </main>`, { url: editor, runScripts: "outside-only" });
+  dom.window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const doc = dom.window.document;
+  const run = (script, request) => dom.window.eval(`(${script.toString()})(${JSON.stringify({ scope: { href: editor }, href: editor, ...request })})`);
+  const row = doc.querySelector(".clothing-colors");
+  row.querySelector("a").addEventListener("click", () => {
+    row.insertAdjacentHTML("afterbegin", '<div id="productSkcList[1].mainSpec[0]"><input placeholder="选择或自定义颜色"></div>');
+  });
+  assert.equal((await run(temuApparelPage, { kind: "inspect" })).rows.length, 1);
+  const first = "productSkcList[0].mainSpec[0]";
+  assert.equal((await run(temuApparelPage, { kind: "set-color", key: first, value: "黑白条纹" })).status, "filled");
+  assert.equal((await run(temuApparelPage, { kind: "set-color", key: first, value: "橙色条纹" })).code, "SPEC_VALUES_OCCUPIED");
+  assert.equal((await run(temuApparelPage, { kind: "add-color" })).rows.length, 2);
+  const state = await run(temuEditorPage, { kind: "inspect" });
+  assert.equal(state.uploads[0].variant, "黑白条纹");
+  const fields = await run(temuControls, { kind: "inspect" });
+  assert.ok(fields.fields.some(field => field.key === "apparel-size"));
+  assert.ok(fields.fields.some(field => field.key === "composition-material-0"));
+  const sizeHolder = doc.querySelector(".product-skc_specItem__size");
+  sizeHolder.querySelector('[data-testid="beast-core-input-suffix"]').addEventListener("click", () => {
+    sizeHolder.insertAdjacentHTML("beforeend", '<div role="option">欧美尺码</div>');
+    const option = sizeHolder.querySelector('[role="option"]');
+    option.addEventListener("click", () => {
+      sizeHolder.querySelector("input").value = "欧美尺码";
+      option.remove();
+      sizeHolder.insertAdjacentHTML("beforeend", '<label><input type="checkbox">S<span>HOT</span></label>');
+    });
+  });
+  const sizes = await run(temuApparelPage, { kind: "set-sizes", value: { system: "欧美尺码", sizes: ["S"] } });
+  assert.equal(sizes.status, "verified");
+  assert.equal(sizeHolder.querySelector('input[type="checkbox"]').checked, true);
+  const pct = await run(temuApparelPage, { kind: "composition-percentage", key: 0, value: "95" });
+  assert.equal(pct.status, "filled");
+  assert.equal(doc.getElementById("productProperties[15]").querySelector('input[placeholder="请输入"]').value, "95");
   dom.window.close();
 }
 

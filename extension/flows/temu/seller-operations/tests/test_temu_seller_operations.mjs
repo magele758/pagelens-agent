@@ -47,7 +47,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
     "<tr><td rowspan='2'>夹克</td><td>1001</td><td>30×20×5</td><td>200g</td><td>编辑</td></tr>",
     "<tr><td>1002</td><td>35×24×5</td><td>250g</td><td>删除</td></tr>",
     "</tbody></table></div></section>",
-    "<nav class='merchant-pagination'><button aria-current='page'>1</button><button title='下一页'>→</button></nav>",
+    "<ul data-testid='beast-core-pagination'><li class='PGT_pagerItemActive_5-125-0'>1</li><li data-testid='beast-core-pagination-next'>→</li></ul>",
   ].join("\n"));
   const first = read(goods, "products");
   assert.equal(first.ok, true);
@@ -55,7 +55,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
   assert.deepEqual(first.records[1].fields, { 商品信息: "夹克", "SKU ID": "1002", "包装 / 体积": "35×24×5", "包装 / 重量": "250g" });
   assert.equal(first.page, 1);
   let clicks = 0;
-  document.querySelector("[title='下一页']").addEventListener("click", () => clicks++);
+  document.querySelector("[data-testid='beast-core-pagination-next']").addEventListener("click", () => clicks++);
   assert.equal(read(goods, "products", { action: "next-page", expectedPageKey: "stale" }).ok, false);
   assert.equal(clicks, 0);
   assert.equal(read(goods, "products", { action: "next-page", expectedPageKey: first.pageKey }).ok, true);
@@ -89,7 +89,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
 {
   const dom = fixture(finance, [
     "<h1>资金中心</h1><h2>货款账户</h2>",
-    "<section><div><span>总金额（CNY）</span></div><div><strong>12,345.67</strong></div></section>",
+    "<section><div><span>总金额（CNY）</span></div><div><strong>- ¥ 12,345.67</strong></div></section>",
     "<div><span>可用余额 (CNY)</span><span> 1,200.50</span></div>",
     "<dl><dt>账户预留金额 (CNY)</dt><dd>--</dd></dl>",
     "<p>预留额度：0.00 元</p>",
@@ -107,7 +107,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
   assert.equal(report.hasMore, false, "提现 link cannot be mistaken for pagination");
   assert.equal(report.sections.includes("提现记录"), true);
   assert.equal(report.stats.账户类型, "货款账户");
-  assert.equal(report.stats["总金额 (CNY)"], "12,345.67");
+  assert.equal(report.stats["总金额 (CNY)"], "- ¥ 12,345.67");
   assert.equal(report.stats["可用余额 (CNY)"], "1,200.50");
   assert.equal(report.stats["账户预留金额 (CNY)"], "--");
   assert.equal(report.stats.预留额度, "0.00 元");

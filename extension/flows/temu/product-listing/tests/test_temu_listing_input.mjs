@@ -45,6 +45,8 @@ test("retains exact captured variants without using retail price, origin hints, 
   assert.deepEqual(product.categoryPath, ["女士服装", "上衣"]);
   assert.deepEqual(product.sites, ["美国站"]);
   assert.equal(product.origin, undefined);
+  assert.equal(product.sizes, undefined);
+  assert.equal(product.composition, undefined);
   assert.equal(product.price, undefined);
   assert.equal(product.skus[0].price, undefined);
   assert.equal(product.skus[0].sellerSku, undefined);
@@ -53,6 +55,29 @@ test("retains exact captured variants without using retail price, origin hints, 
     { id: "B0CMNBJKPG", options: { Color: "White", Size: "M" } },
     { id: "B0F0000001", options: { Color: "Orange", Size: "S" } },
   ]);
+});
+
+test("keeps explicit apparel, shipping and SKU settings separate from source evidence", () => {
+  const product = normalizeTemuListingInput({
+    title: "Women's top", sizes: ["XS"], composition: [{ material: "棉", percent: "100" }],
+    temu: {
+      sizes: [" S ", "M", "S"], composition: [{ material: "聚酯纤维", percent: "95.00" }, { material: "氨纶", percent: 5 }],
+      origin: { country: "中国大陆", region: "广东省" }, manufacturingLocation: "中国大陆",
+      skuClassification: "单品", sensitiveAttribute: "非敏感品", handlingTime: "2个工作日", freightTemplate: "示例模板",
+    },
+    skus: [{ id: "row-1", options: { Size: "S" }, skuClassification: "混合套装", sensitiveAttribute: "示例敏感属性" }],
+  });
+  assert.deepEqual(product.sizes, ["S", "M"]);
+  assert.deepEqual(product.composition, [{ material: "聚酯纤维", percent: "95.00" }, { material: "氨纶", percent: "5" }]);
+  assert.deepEqual(product.origin, { country: "中国大陆", region: "广东省" });
+  assert.equal(product.manufacturingLocation, "中国大陆");
+  assert.equal(product.skuClassification, "单品");
+  assert.equal(product.sensitiveAttribute, "非敏感品");
+  assert.equal(product.skus[0].skuClassification, "混合套装");
+  assert.equal(product.skus[0].sensitiveAttribute, "示例敏感属性");
+  assert.equal(product.freightTemplate, "示例模板");
+  assert.equal(product.handlingTime, "2个工作日");
+  assert.throws(() => normalizeTemuListingInput({ title: "Invalid top", composition: [{ material: "棉", percent: 150 }] }), /百分比/u);
 });
 
 test("native importer verifies auxiliary capture images and reports missing or symbolic files without dropping the product", async t => {

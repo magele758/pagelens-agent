@@ -47,6 +47,17 @@ function salesFields(input, fallback = {}) {
   };
 }
 
+function explicitComposition(value) {
+  if (value == null) return undefined;
+  if (!Array.isArray(value)) throw new TypeError("商品成分应为包含 material 与 percent 的数组。");
+  return value.map(row => {
+    const material = text(row?.material);
+    const percent = numeric(row?.percent);
+    if (!material || !percent || Number(percent) > 100) throw new TypeError("商品成分需要材质和大于 0、不超过 100 的百分比。");
+    return { material, percent };
+  });
+}
+
 // Only a path validated by the product-directory host is eligible for uploading.
 // A JSON pasted without selecting its directory still supplies product metadata.
 function directoryImage(path, root, folder) {
@@ -93,7 +104,10 @@ function normalizeVariants(raw, image, sales) {
       name.trim() && text(value) ? [[name.trim(), text(value)]] : []));
     if (!id && !sellerSku && !Object.keys(options).length) return [];
     const imagePath = image(row.imagePath);
+    const skuClassification = text(row.skuClassification);
+    const sensitiveAttribute = text(row.sensitiveAttribute);
     return [{ ...(id && { id }), ...(sellerSku && { sellerSku }), options,
+      ...(skuClassification && { skuClassification }), ...(sensitiveAttribute && { sensitiveAttribute }),
       ...salesFields(row, sales), ...(imagePath && { imagePath }) }];
   });
   return { variantGroups, skus };
@@ -128,6 +142,8 @@ export function normalizeTemuListingInput(raw, { root, folder } = {}) {
   const region = text(suppliedOrigin?.region ?? suppliedOrigin?.province ?? raw.originRegion);
   const sales = salesFields({ ...raw, ...target });
   const variants = normalizeVariants(raw, image, sales);
+  const suppliedSizes = target.sizes ?? raw.sizes;
+  const sizes = suppliedSizes == null ? undefined : [...new Set([].concat(suppliedSizes).map(text).filter(Boolean))];
   return {
     title,
     englishTitle: text(target.englishTitle ?? raw.englishTitle ?? raw.titleEn),
@@ -139,6 +155,13 @@ export function normalizeTemuListingInput(raw, { root, folder } = {}) {
     categoryId: text(target.categoryId ?? raw.categoryId),
     sourceCategory: text(raw.sourceCategory),
     origin: country ? { country, ...(region && { region }) } : undefined,
+    manufacturingLocation: text(target.manufacturingLocation ?? raw.manufacturingLocation),
+    sizes,
+    sizeSystem: text(target.sizeSystem ?? raw.sizeSystem),
+    sizeChartTemplate: text(target.sizeChartTemplate ?? raw.sizeChartTemplate),
+    composition: explicitComposition(target.composition ?? raw.composition),
+    skuClassification: text(target.skuClassification ?? raw.skuClassification),
+    sensitiveAttribute: text(target.sensitiveAttribute ?? raw.sensitiveAttribute),
     handlingTime: text(target.handlingTime ?? raw.handlingTime),
     shipDays: numeric(target.shipDays ?? raw.shipDays, { integer: true }),
     freightTemplate: text(target.freightTemplate ?? raw.freightTemplate),

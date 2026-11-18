@@ -1,6 +1,7 @@
 import { dialogNote } from "../../../lib/agent/cdp-tools.js";
 import { isSensitiveUploadPath } from "../../../lib/bridge/tools-browser.js";
 import { getCdp } from "../../../lib/cdp.js";
+import { temuApparelPage } from "./apparel-page.js";
 import { temuControls } from "./controls.js";
 import { temuDecorationPage } from "./decoration-page.js";
 import { temuEditorPage } from "./editor-page.js";
@@ -33,6 +34,7 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
   let stage = "category";
   let siteAndCategorySet = false;
   let busy = false;
+  const verifiedMaterials = new Map();
   const currentTab = () => api.tabs.get(tabId).catch(() => null);
   const editorScope = () => ({ origin: SITE, path: "/goods/edit", href });
 
@@ -111,25 +113,39 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
     if (!picker.ok) return picker;
     let confirmed;
     try {
-      if (paths.length > 1 && !picker.multiple) return failure("UPLOAD_CONTROL_SINGLE", "素材中心每次只接收一张图片。");
-      const selectedFiles = await selectFiles(picker.selector, paths);
-      if (!selectedFiles.ok) return selectedFiles;
+      const previous = picker.knownMedia || [];
+      const known = new Map(paths.flatMap(path => {
+        const accepted = verifiedMaterials.get(path);
+        return accepted && previous.some(card => card.filename === accepted.filename && card.identity === accepted.identity)
+          ? [[path, accepted]] : [];
+      }));
+      const remaining = paths.filter(path => !known.has(path));
+      if (remaining.length > 1 && !picker.multiple) return failure("UPLOAD_CONTROL_SINGLE", "素材中心每次只接收一张图片。");
+      if (remaining.length) {
+        const selectedFiles = await selectFiles(picker.selector, remaining);
+        if (!selectedFiles.ok) return selectedFiles;
+      }
       const deadline = Date.now() + 22000;
       do {
         const selected = await media("inspect");
         if (!selected.ok) return selected;
-        const previous = picker.knownMedia || [];
         const newCards = (selected.knownMedia || []).filter(card => !previous.some(old => old.identity === card.identity));
-        const allUploaded = filenames.every(name => newCards.filter(card => card.filename === name).length === 1);
-        if (allUploaded && selected.count === picker.count) {
-          const picked = await media("select-new", { baseline: picker.count, previous });
+        const expected = paths.map((path, index) => {
+          if (known.has(path)) return known.get(path);
+          const matches = newCards.filter(card => card.filename === filenames[index]);
+          return matches.length === 1 ? matches[0] : null;
+        });
+        if (expected.every(Boolean) && selected.count === picker.count) {
+          const picked = await media("select-new", { baseline: picker.count, previous, expected });
           if (!picked.ok && picked.code !== "UPLOAD_PENDING") return picked;
           if (picked.ok) {
             confirmed = await media("confirm", { baseline: picker.count, added: paths.length });
+            if (confirmed.ok) paths.forEach((path, index) => verifiedMaterials.set(path, expected[index]));
             return confirmed;
           }
-        } else if (allUploaded && selected.count === picker.count + paths.length) {
+        } else if (expected.every(Boolean) && selected.count === picker.count + paths.length) {
           confirmed = await media("confirm", { baseline: picker.count, added: paths.length });
+          if (confirmed.ok) paths.forEach((path, index) => verifiedMaterials.set(path, expected[index]));
           return confirmed;
         }
         await sleep(300);
@@ -219,6 +235,11 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
             return await runInPage(temuEditorPage, { kind: "add-parent-spec", href });
           case "temu_spec_values":
             return await runInPage(temuSpecPage, { href, parentIndex: args.parentIndex, labels: args.labels, values: args.values });
+          case "temu_apparel":
+            if (!["inspect", "add-color", "set-color", "set-sizes", "select-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
+              return failure("ACTION_UNSUPPORTED", "此操作不属于服装试填。");
+            }
+            return await runInPage(temuApparelPage, { href, kind: args.kind, key: args.key, value: args.value });
           case "temu_description":
             return await fillDetails(args);
           case "temu_origin":

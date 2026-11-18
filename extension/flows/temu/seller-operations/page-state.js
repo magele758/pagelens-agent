@@ -31,7 +31,7 @@ export function operateTemuSellerData({ expectedUrl, kind, action = "read", expe
     document.body;
 
   function tableParts(table) {
-    const all = table instanceof HTMLTableElement ? [...table.rows] : [...table.querySelectorAll("[role='row']")];
+    const all = [...table.querySelectorAll("tr,[role='row']")];
     const content = all.filter(row => rendered(row) && row.closest("table,[role='table'],[role='grid']") === table);
     const headings = content.filter(row => row.parentElement?.tagName === "THEAD" ||
       [...row.children].some(cell => cell.matches("th:not([scope='row']),[role='columnheader']")));
@@ -179,7 +179,7 @@ export function operateTemuSellerData({ expectedUrl, kind, action = "read", expe
 
   function financeBalances() {
     const label = /^(总金额|可用余额|账户预留金额|预留额度)(?:\s*[(（]\s*([A-Z]{3})\s*[)）])?\s*[:：]?\s*(.*)$/u;
-    const amount = /^(?:[¥￥$€]\s*)?[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?(?:\s*(?:[A-Z]{3}|元))?$|^(?:—|--|暂无)$/u;
+    const amount = /^(?:(?:[+-]\s*)?[¥￥$€]\s*|[¥￥$€]\s*[+-]\s*|[+-]\s*)?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?(?:\s*(?:[A-Z]{3}|元))?$|^(?:—|--|暂无)$/u;
     const values = new Map();
     let hasMerchandiseAccount = false;
 
@@ -226,9 +226,9 @@ export function operateTemuSellerData({ expectedUrl, kind, action = "read", expe
   const sectionHeadings = [...main.querySelectorAll("h1,h2,h3,[role='heading'],[class*='pageTitle']")]
     .filter(rendered).map(text).filter(Boolean).slice(0, 20);
   const filters = [...main.querySelectorAll("[role='tab'][aria-selected='true'],select")]
-    .filter(rendered).map(control => control instanceof HTMLSelectElement
+    .filter(rendered).map(control => control.tagName === "SELECT"
       ? text(control.selectedOptions[0]) : text(control)).filter(Boolean).slice(0, 25);
-  const pagers = [...main.querySelectorAll("[class*='pagination' i],[aria-label*='分页']")].filter(rendered);
+  const pagers = [...main.querySelectorAll("[data-testid='beast-core-pagination'],[class*='pagination' i],[aria-label*='分页']")].filter(rendered);
 
   function safePaginationTarget(node) {
     const submit = node.closest("button,input");
@@ -254,13 +254,14 @@ export function operateTemuSellerData({ expectedUrl, kind, action = "read", expe
   }
 
   const nextCandidates = [...new Set(pagers.flatMap(pager =>
-    [...pager.querySelectorAll("button,a,[role='button'],li[title]")]))].filter(node => {
+    [...pager.querySelectorAll("button,a,[role='button'],li[title],[data-testid='beast-core-pagination-next']")]))].filter(node => {
     const isNext = /^(下一页|Next page|Next|Go to next page)$/iu.test(compact(node.getAttribute("title") || node.getAttribute("aria-label") || text(node))) ||
-      /\bpagination[-_]+next\b/iu.test(String(node.className || ""));
+      /\bpagination[-_]+next\b/iu.test(String(node.className || "")) ||
+      node.getAttribute("data-testid") === "beast-core-pagination-next";
     return isNext && safePaginationTarget(node);
   });
   const nextButtons = nextCandidates.filter(candidate => !nextCandidates.some(other => other !== candidate && candidate.contains(other)));
-  const activePageNode = pagers.flatMap(pager => [...pager.querySelectorAll("[aria-current='page'],[class*='item-active']")])
+  const activePageNode = pagers.flatMap(pager => [...pager.querySelectorAll("[aria-current='page'],[class*='item-active'],[class*='PGT_pagerItemActive_']")])
     .find(node => rendered(node) && /^\d+$/u.test(text(node)));
   const page = activePageNode ? Number(text(activePageNode)) : null;
   const countLine = lines.find(line => /^共有?\s*[\d,]+\s*(条|个|笔)/u.test(line));

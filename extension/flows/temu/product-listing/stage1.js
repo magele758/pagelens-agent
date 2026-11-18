@@ -98,9 +98,14 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
 
   function pickedCategory(labels) {
     const exact = (element) => clean(element.textContent);
-    const textNodes = [...document.querySelectorAll('div,span')].filter((element) => shown(element) && element.childElementCount <= 2);
-    const displays = labels.every((label) => textNodes.some((element) => exact(element) === `> ${clean(label)}` || exact(element) === `>${clean(label)}`));
-    return displays && textNodes.some((element) => exact(element).replace(/\s+/gu, "") === `已选分类:${clean(labels.at(-1)).replace(/\s+/gu, "")}`);
+    const key = value => clean(value).replace(/\s+/gu, "").replace(/[＞›→]/gu, ">");
+    const textNodes = [...document.querySelectorAll('div,span')].filter((element) => shown(element) && element.childElementCount <= 6);
+    const picked = textNodes.some(element => key(exact(element)) === `已选分类:${key(labels.at(-1))}`);
+    const trail = labels.map(key).join(">");
+    const compact = textNodes.map(element => key(exact(element)));
+    const displays = compact.some(value => value === trail || value === ">" + trail) ||
+      labels.every(label => compact.includes(">" + key(label)));
+    return displays && picked;
   }
 
   if (!onPage() || modal()) return fail("Temu 页面已切换或有弹窗挡住，请返回目标页面后重试。");

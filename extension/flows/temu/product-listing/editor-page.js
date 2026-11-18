@@ -134,17 +134,23 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
 
   function uploads() {
     const list = [];
-    for (const area of root.querySelectorAll('[id="noCostumeCarouselImgsI18n.common"],[id$=".previewImgsI18n.common"]')) {
+    for (const area of root.querySelectorAll('[id="noCostumeCarouselImgsI18n.common"],[id$=".previewImgsI18n.common"],[id$=".carouselImgsI18n.common"]')) {
       const main = area.id === "noCostumeCarouselImgsI18n.common";
       const sku = /^productSkuMap\.[\w-]*\.previewImgsI18n\.common$/u.test(area.id);
-      if ((!main && !sku) || !visible(area) || !area.querySelector('[class^="upload-trigger_wrap__"]')) continue;
+      const skc = /^productSkcList\[(\d{1,3})\]\.carouselImgsI18n\.common$/u.exec(area.id);
+      if ((!main && !sku && !skc) || !visible(area) || !area.querySelector('[class^="upload-trigger_wrap__"]')) continue;
       const markers = [...area.querySelectorAll('img[src]')].filter(node => visible(node) &&
         !node.closest('[class^="upload-trigger_wrap__"],[aria-busy="true"],[class*="uploading" i]') &&
         /^https?:\/\//iu.test(node.src) && !node.matches('[class*="placeholder" i],[class*="icon" i]')).length;
       if (main) {
         list.push({ key: area.id, role: "main", mode: "material", multiple: true, markers, minimum: 3 });
-      } else {
+      } else if (sku) {
         list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, rowLabels: rowLabelSet(area) });
+      } else {
+        const color = document.getElementById(`productSkcList[${skc[1]}].mainSpec[0]`);
+        const variant = clean(color?.querySelector('[class*="ST_selectValueSingle_"]')?.textContent ||
+          color?.querySelector('input[placeholder="选择或自定义颜色"]')?.value);
+        if (variant) list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, variant });
       }
     }
     for (const input of root.querySelectorAll('input[type="file"]')) {

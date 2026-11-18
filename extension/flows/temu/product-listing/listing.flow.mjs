@@ -26,8 +26,11 @@ function skuValue(field, row, input) {
     inputWeight: row.weightG, quantity: row.quantity, stock: row.quantity,
     usSuggestSalesPrice: row.retailPrice ?? input.retailPrice,
     "productSkuSameReferPrice.url": input.referenceUrl,
+    sensitiveAttr: row.sensitiveAttribute ?? input.sensitiveAttribute,
+    "productSkuMultiPack.skuClassification": row.skuClassification ?? input.skuClassification,
   };
-  return field.skuMember.startsWith("siteSupplierPriceMap.") ? row.price : values[field.skuMember];
+  const result = field.skuMember.startsWith("siteSupplierPriceMap.") ? row.price : values[field.skuMember];
+  return field.multiple && hasValue(result) && !Array.isArray(result) ? [result] : result;
 }
 
 function matchingSku(field, rows, rowCount) {
@@ -99,6 +102,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     attempted.add(field.key);
     const outcome = await run(field.locator ? "temu_select" : "temu_write", { key: field.key, value });
     record(field.label, outcome, field.key);
+    return outcome;
   }
   async function chooseCurrentOption(field, wanted) {
     if (!field.locator || !wanted) return wanted;
@@ -109,10 +113,81 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       .some(value => aliases.includes(keyOf(value))));
     return matches.length === 1 ? matches[0].value : undefined;
   }
+  async function applyApparel(apparel, groups) {
+    const color = groups.find(group => optionAliases(group.name).includes("颜色"));
+    let rows = apparel.rows;
+    for (const option of color?.options || []) {
+      const exists = rows.some(row => keyOf(row.value) === keyOf(option.value));
+      if (exists) continue;
+      let blank = rows.find(row => !hasValue(row.value));
+      if (!blank) {
+        const added = await run("temu_apparel", { kind: "add-color" });
+        if (!added?.ok) { record("服装颜色", added); break; }
+        rows = added.rows;
+        blank = rows.find(row => !hasValue(row.value));
+      }
+      if (!blank) {
+        record(option.value, { code: "SPEC_CONTROL_MISSING", message: "服装颜色表没有空白可填写行。" });
+        break;
+      }
+      const applied = await run("temu_apparel", { kind: "set-color", key: blank.key, value: option.value });
+      record(option.value, applied, blank.key);
+      if (!applied?.ok) break;
+      const live = await run("temu_apparel", { kind: "inspect" });
+      if (!live?.ok) { record("服装颜色", live); break; }
+      rows = live.rows;
+    }
+    const sizeGroup = groups.find(group => optionAliases(group.name).includes("尺码"));
+    const sizes = [...new Set(input.sizes || sizeGroup?.options.map(option => option.value) || [])];
+    if (!sizes.length) return;
+    const system = input.sizeSystem || ((input.sites || [input.site]).includes("美国站") ? "欧美尺码" : "");
+    const outcome = await run("temu_apparel", { kind: "set-sizes", value: { system, sizes } });
+    for (const item of outcome?.items || []) items.push(item);
+    record("尺码", outcome);
+    if (outcome?.ok && input.sizeChartTemplate) {
+      record("尺码表模板", await run("temu_apparel", { kind: "select-size-chart", value: input.sizeChartTemplate }));
+    }
+  }
+  async function applyComposition() {
+    const entries = input.composition || [];
+    if (!entries.length) return;
+    if (entries.length > 8 || entries.some(entry => !entry.material || !(Number(entry.percent) > 0)) ||
+        Math.abs(entries.reduce((sum, entry) => sum + Number(entry.percent), 0) - 100) > 0.001) {
+      record("成分比例", { code: "COMPOSITION_INVALID", message: "请按商品资料提供总计 100% 的材料及比例。" });
+      return;
+    }
+    let current = await run("temu_apparel", { kind: "composition-inspect" });
+    for (const [index, entry] of entries.entries()) {
+      if (current?.ok && index >= current.rows.length) current = await run("temu_apparel", { kind: "composition-add" });
+      if (!current?.ok) { record("成分比例", current); return; }
+      const row = current.rows[index];
+      const fresh = await readEditor();
+      if (!fresh?.ok) { record("成分比例", fresh); return; }
+      const key = `composition-material-${row?.index}`;
+      const field = fresh.fields.find(field => field.key === key);
+      if (!field) {
+        record(entry.material, { code: "COMPOSITION_MISSING", message: "成分选项行尚未渲染。" });
+        return;
+      }
+      const applied = await applyField(field, entry.material);
+      if (!applied?.ok) return;
+      const percent = await run("temu_apparel", { kind: "composition-percentage", key: row.index, value: entry.percent });
+      record(`${entry.material} · ${entry.percent}%`, percent);
+      if (!percent?.ok) return;
+    }
+  }
   async function applyVariantGroups() {
-    if (!input.variantGroups?.length) return;
+    if (!input.variantGroups?.length && !input.sizes?.length) return;
     const parentFields = state => state.fields.filter(field => /^父规格\s*[12]/u.test(field.label));
-    const groups = input.variantGroups.slice(0, 2);
+    const groups = (input.variantGroups || []).slice(0, 2);
+    if (!parentFields(lastState).length) {
+      const apparel = await run("temu_apparel", { kind: "inspect" });
+      if (!apparel?.ok) { record("商品规格", apparel); return; }
+      if (apparel.rows.length) {
+        await applyApparel(apparel, groups);
+        return;
+      }
+    }
     for (const [index, group] of groups.entries()) {
       let live = await readEditor();
       if (!live?.ok) { record("商品规格", live); return; }
@@ -206,6 +281,9 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     if (/^(?:商家货号|商品货号)$/u.test(field.label)) return input.sku;
     if (/承诺发货时效/u.test(field.label)) return input.handlingTime;
     if (/运费模板/u.test(field.label)) return input.freightTemplate;
+    if (field.key === "manufacturingLocation" && input.manufacturingLocation) {
+      return field.multiple ? [input.manufacturingLocation] : input.manufacturingLocation;
+    }
     return undefined;
   }
 
@@ -247,6 +325,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     }
     const afterBasic = await readEditor();
     if (!afterBasic?.ok) return stop("已填商品复核", afterBasic);
+    await applyComposition();
     if (input.shipDays && !input.handlingTime) {
       const shippingFields = afterBasic.fields.filter(field => /承诺发货时效/u.test(field.label) &&
         !attempted.has(field.key) && !hasValue(field.value));
@@ -301,10 +380,18 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const galleryFiles = gallery.length < requiredGallerySize && input.variantImages?.length
       ? [...new Set([...gallery, ...input.variantImages])].slice(0, requiredGallerySize)
       : gallery;
-    await uploadImages("main", galleryFiles, beforeImages);
+    const apparelGalleries = beforeImages.uploads.filter(target => /^productSkcList\[/u.test(target.key) && target.role === "variant");
+    if (!apparelGalleries.length || beforeImages.uploads.some(target => target.role === "main")) {
+      await uploadImages("main", galleryFiles, beforeImages);
+    }
     const detailUpload = beforeImages.uploads.some(target => target.role === "detail");
     if (detailUpload) await uploadImages("detail", input.detailImages, beforeImages);
-    if (input.sizeChartImagePath) await uploadImages("size-chart", [input.sizeChartImagePath], beforeImages);
+    if (input.sizeChartImagePath && !input.sizeChartTemplate) {
+      if (apparelGalleries.length) {
+        record("尺码表模板", { code: "SIZE_CHART_TEMPLATE_REQUIRED",
+          message: "目录尺码图已保留。此类目需要选择现有的 Temu 尺码表模板。" });
+      } else await uploadImages("size-chart", [input.sizeChartImagePath], beforeImages);
+    }
     const groups = input.variantGroups || [];
     const skuImages = beforeImages.uploads.filter(target => target.role === "variant" && target.rowLabels);
     for (const target of skuImages) {
@@ -316,8 +403,10 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       if (image) await uploadImages("variant", [image], beforeImages, undefined, target.key);
     }
     for (const group of groups) for (const option of group.options || []) {
-      if (option.imagePath && beforeImages.uploads.some(target => target.role === "variant" && keyOf(target.variant) === keyOf(option.value))) {
-        await uploadImages("variant", [option.imagePath], beforeImages, option.value);
+      const matching = beforeImages.uploads.filter(target => target.role === "variant" && keyOf(target.variant) === keyOf(option.value));
+      if (matching.length === 1) {
+        const image = option.imagePath || (apparelGalleries.length === 1 && group.options.length === 1 ? gallery[0] : "");
+        if (image) await uploadImages("variant", [image], beforeImages, option.value, matching[0].key);
       }
     }
 
