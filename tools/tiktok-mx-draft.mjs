@@ -81,7 +81,11 @@ async function inbox(tool, job, timeoutMs = 75000) {
     try { return await nativeDispatch(job); }
     finally { bridgeCalls.push({ tool, start, end: Date.now() }); }
   }
-  const queue = path.join(home, "agent-inbox");
+  const extensionId = process.env.PAGELENS_EXTENSION_ID || (await fs.readFile(path.join(home, "agent-inbox-extension-id"), "utf8")
+    .catch(error => { if (error.code !== "ENOENT") throw error; return ""; })).trim();
+  if (extensionId && !/^[a-p]{32}$/.test(extensionId)) throw Error("Invalid PageLens inbox extension ID");
+  const queue = path.join(home, "agent-inbox", extensionId || "");
+  if (extensionId) await fs.mkdir(queue, { recursive: true, mode: 0o700 });
   const start = Date.now();
   calls++;
   await write(path.join(queue, id + ".json"), {
@@ -93,6 +97,8 @@ async function inbox(tool, job, timeoutMs = 75000) {
   while (Date.now() - start < timeoutMs) {
     try {
       const reply = await read(path.join(home, "agent-outbox", id + ".json"));
+      if (extensionId && reply.consumerExtensionId !== extensionId)
+        throw Error("PageLens inbox receipt came from a different extension");
       bridgeCalls.push({ tool, start, end: Date.now(), executionMs: reply.meta?.ms });
       if (!reply.ok) throw new Error(tool + ": " + JSON.stringify(reply.error));
       return reply.result;
@@ -573,9 +579,10 @@ async function recoverTitle(tab, link, state, copy, dir) {
   copy.title = translated;
   return true;
 }
-async function draftButton(tab, alreadyActive = false) {
+async function draftButton(tab, alreadyActive = false, expectedUrl = null) {
   if (!alreadyActive) await bridge("activate_tab", { tabId: tab });
-  const signal = await js(tab, async () => {
+  const signal = await js(tab, async (url) => {
+    if (url && location.href !== url) throw Error("Draft editor changed before saving");
     const button = [...document.querySelectorAll("button")].find(
       (e) => e.textContent.trim() === "另存为草稿",
     );
@@ -601,7 +608,7 @@ async function draftButton(tab, alreadyActive = false) {
     } finally {
       observer.disconnect();
     }
-  });
+  }, expectedUrl);
   const message = signal?.message ?? signal;
   let draftId = null;
   if (signal?.url && message?.includes("草稿保存成功")) {
@@ -719,6 +726,14 @@ async function sellerTab(url, forceReload = false) {
   if (forceReload) await bridge("reload_tab", { tabId: existing });
   return existing;
 }
+async function finishGalleryPrefix(tab, url, gallery, prefix) {
+  for (let i = prefix; i < gallery.length; i++) {
+    await bridge("upload_file", { tabId: tab, selector: 'input[type=file][accept=".jpg,.png,.jpeg"]', paths: [gallery[i]] });
+    await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
+      ")();if(s.url!==" + JSON.stringify(url) + "||s.captcha)throw Error('Unexpected draft or verification');if(s.gallery===" +
+      (i + 1) + ")return true;await new Promise(r=>setTimeout(r,200))}while(Date.now()<until);throw Error('Gallery upload pending')");
+  }
+}
 async function openCreateForm(sourceTab) {
   const tab = sourceTab == null
     ? group.tabs.get(createUrl) ?? await open(createUrl)
@@ -831,10 +846,10 @@ export async function save(
     let initialAcknowledged = true;
     if (!id) {
       if (readOnly) throw new Error("No existing draft ID to verify");
-      const retryRejectedCheckpoint = previous.partial && previous.saving &&
+      const retryRejectedSave = previous.saving &&
         ["提交失败", "保存失败"].includes(previous.saveMessage) && group.pendingForm === previous.startedTab &&
         Number.isInteger(previous.startedGroup);
-      if ((previous.saving && !retryRejectedCheckpoint && !replacing) || previous.id)
+      if ((previous.saving && !retryRejectedSave && !replacing) || previous.id)
         throw new Error(
           "Previous save pending or draft missing. Reconcile the draft list before retrying.",
         );
@@ -916,30 +931,43 @@ export async function save(
         if (checkpoint.url !== createUrl) throw Error("Unexpected draft checkpoint URL");
         if (!galleryCheckpoint && previous.startedTab && JSON.stringify(previous.galleryOrder) === JSON.stringify(copy.gallery) && checkpoint.gallery < gallery.length)
           await recordGalleryPrefix();
-        if (galleryCheckpoint) checkCopy(checkpoint, copy);
-        else check(checkpoint, copy);
+        checkCopy(checkpoint, copy);
+        if (galleryCheckpoint) {
+          await finishGalleryPrefix(tab, createUrl, gallery, galleryCheckpoint.confirmedPrefix);
+          checkpoint = await js(tab, formState);
+        }
+        if (!checkpoint.detailImages && details.length)
+          checkpoint = await restoreDetails(tab, checkpoint, copy, details);
+        check(checkpoint, copy);
         cat = { selected: Boolean(checkpoint.category), shown: checkpoint.category };
         if (checkpoint.category) {
           if (checkpoint.category?.replace(/\s*[-/>]\s*/g, "/") !== copy.category?.label?.replace(/\s*[-/>]\s*/g, "/"))
             throw Error("Retained draft category changed");
           await supplement(tab, { attributes: {} });
-          await ensureAttributes(tab, createUrl, checkpoint, data, copy, dir);
           await commercialState(tab, plan, true);
-          if (!galleryCheckpoint) checkpoint = null;
+          await ensureAttributes(tab, createUrl, checkpoint, data, copy, dir);
         }
       }
-      if (checkpoint) {
-        mark("partialFieldsReady");
-      } else mark("initialFieldsReady");
-      const submitting = {
-        ...pending,
-        saving: true,
-        partial: Boolean(checkpoint),
-        tab,
-        category: cat,
-      };
+      try {
+        const ready = await readyForm(tab, true);
+        if (ready.url !== createUrl) throw Error("Unexpected create form URL before saving");
+        check(ready, copy);
+        const categoryPath = value => value?.trim().replace(/\s*[-/>]\s*/g, "/");
+        if (!ready.category || categoryPath(ready.category) !== categoryPath(copy.category?.label))
+          throw Error("Category did not match before saving");
+        const differences = commercialDifferences(ready.salesAndShipping, plan);
+        if (differences.length) throw Error("Commercial fields differ before saving: " + differences.join(", "));
+        if (ready.hasCategoryAttributes || copy.attributePlan)
+          ready.attributeCatalog = await runCode(tab, attributeCode(createUrl));
+        checkDraftAttributes(copy, ready, { exact: true });
+      } catch (error) {
+        await write(resultFile, { ...pending, fillError: error.message });
+        throw error;
+      }
+      mark("initialFieldsReady");
+      const submitting = { ...pending, saving: true, tab, category: cat };
       await write(resultFile, submitting);
-      initialAcknowledged = await draftButton(tab, true);
+      initialAcknowledged = await draftButton(tab, true, createUrl);
       await write(resultFile, { ...submitting, saveMessage: saveSignals.at(-1).message });
       mark("initialSave");
       const signalId = saveSignals.at(-1).draftId;
@@ -957,7 +985,7 @@ export async function save(
         throw new Error(
           "Save sent; draft ID not yet confirmed. Check before retrying.",
         );
-      await write(resultFile, { ...pending, id, category: cat, saving: true, partial: Boolean(checkpoint) });
+      await write(resultFile, { ...pending, id, category: cat, saving: true });
       await write(recordFile, { dir, id, title: copy.title, link: seller + "/product/edit-draft/" + id + "?shop_region=MX" });
       group.pendingForm = null;
       savedFrom = tab;
@@ -1023,12 +1051,7 @@ export async function save(
     if (checkpoint && ownedRun.startedTab === checkpoint.tab && ownedRun.groupOwned &&
         checkpoint.title === copy.title && state.title === copy.title && !state.captcha &&
         state.gallery === checkpoint.confirmedPrefix && JSON.stringify(checkpoint.gallery) === JSON.stringify(copy.gallery)) {
-      for (let i = state.gallery; i < gallery.length; i++) {
-        await bridge("upload_file", { tabId: edit, selector: 'input[type=file][accept=".jpg,.png,.jpeg"]', paths: [gallery[i]] });
-        await runCode(edit, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
-          ")();if(s.url!==" + JSON.stringify(link) + "||s.captcha)throw Error('Unexpected draft or verification');if(s.gallery===" +
-          (i + 1) + ")return true;await new Promise(r=>setTimeout(r,200))}while(Date.now()<until);throw Error('Gallery upload pending')");
-      }
+      await finishGalleryPrefix(edit, link, gallery, state.gallery);
       state = await readyForm(edit, true, true);
       changed = true;
     }

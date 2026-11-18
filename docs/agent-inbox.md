@@ -2,7 +2,17 @@
 
 Zero-new-daemon bridge: drop a JSON job under `~/.pagelens/agent-inbox/`, PageLens service worker polls it (only when 设置 → “启用文件 inbox” is on, default **off**), executes, writes `~/.pagelens/agent-outbox/<id>.json`, and moves the job to `agent-inbox/processed/`.
 
-TikTok PTC requests require the matching Native Host. The host claims each request in `agent-inbox/processing/` before the extension opens any tabs. If Chrome or the host stops before the receipt is written, the claim stays there. Check the draft list and any retained editor before submitting a new request.
+Synchronous jobs can target an installed unpacked extension with `--extension-id <id>` on both `enqueue` and `wait`. The CLI puts the job in `agent-inbox/<id>/` and verifies the extension ID in the receipt. Existing clients may keep using the shared inbox. Agent prompts and cancellations use the shared inbox.
+
+Directed jobs and TikTok PTC jobs require the matching Native Host. The host claims a file in `processing/` before browser work. If the worker stops before writing a receipt, the claim stays on disk for reconciliation. Check the retained editor and draft list before submitting a replacement.
+
+```bash
+node tools/agent-inbox.mjs enqueue --extension-id "$PAGELENS_EXTENSION_ID" \
+  --action bridge_call --request-json '{"tool":"list_tabs","args":{}}'
+node tools/agent-inbox.mjs wait JOB_ID --extension-id "$PAGELENS_EXTENSION_ID"
+```
+
+For the installed TikTok draft runner, set `PAGELENS_EXTENSION_ID` or put the target ID in `~/.pagelens/agent-inbox-extension-id`. The file is a local routing preference.
 
 Poll interval: 30s for packaged installs (Chrome clamps alarms to ≥30s), ~6s when loaded unpacked. Each poll costs one Native Host process (`readdir`); if the host is unavailable, polling backs off from 1 to 30 minutes.
 
@@ -20,8 +30,9 @@ Then reload PageLens on `chrome://extensions`.
 
 | Path | Role |
 |------|------|
-| `~/.pagelens/agent-inbox/*.json` | Pending jobs |
-| `~/.pagelens/agent-inbox/processing/` | Claimed TikTok PTC requests awaiting a receipt |
+| `~/.pagelens/agent-inbox/*.json` | Shared pending jobs |
+| `~/.pagelens/agent-inbox/<extension-id>/*.json` | Directed pending jobs |
+| `processing/` in each inbox | Claimed requests awaiting a receipt |
 | `~/.pagelens/agent-inbox/processed/` | Completed job copies |
 | `~/.pagelens/agent-outbox/<id>.json` | Results |
 | `~/.pagelens/agent-payloads/` | Large HTML bodies (CLI auto-splits) |

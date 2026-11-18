@@ -129,7 +129,7 @@ assert.ok(!needsConfirmation("clipboard_write"));
 }
 
 // --- integration with a stubbed chrome: process count, backoff, allowlist, confirmation ---
-const native = { calls: [], down: false, files: {} };
+const native = { calls: [], down: false, files: {}, directed: {} };
 const store = { settings: {} };
 const alarms = new Map();
 let installType = "normal";
@@ -149,20 +149,23 @@ globalThis.chrome = {
       if (native.down) throw new Error("Specified native messaging host not found.");
       if (msg.op === "clipboard_write") return { ok: true };
       if (msg.action === "ensureDir") return { ok: true };
+      const entries = files => Object.keys(files || {}).filter(name => !name.includes("/")).map(name => ({ name, kind: "file" }));
+      const key = msg.root?.match(/\/([a-p]{32})$/)?.[1];
+      const files = key ? native.directed[key] : native.files;
       if (msg.action === "readdir") {
-        return { ok: true, entries: Object.keys(native.files).filter(name => !name.includes("/")).map((name) => ({ name, kind: "file" })) };
+        return { ok: true, entries: entries(files), directedEntries: entries(native.directed[msg.inboxId]) };
       }
-      if (msg.action === "readText") return Object.hasOwn(native.files, msg.rel)
-        ? { ok: true, text: native.files[msg.rel] } : { ok: false, code: "ENOENT" };
+      if (msg.action === "readText") return Object.hasOwn(files, msg.rel)
+        ? { ok: true, text: files[msg.rel] } : { ok: false, code: "ENOENT" };
       if (msg.action === "claimInboxJob") {
-        if (!Object.hasOwn(native.files, msg.rel)) return { ok: true, claimed: false };
+        if (!Object.hasOwn(files, msg.rel)) return { ok: true, claimed: false };
         const rel = `processing/${msg.rel}`;
-        native.files[rel] = native.files[msg.rel];
-        delete native.files[msg.rel];
+        files[rel] = files[msg.rel];
+        delete files[msg.rel];
         return { ok: true, claimed: true, rel };
       }
       if (msg.action === "deleteFile") {
-        delete native.files[msg.rel];
+        delete files[msg.rel];
         return { ok: true };
       }
       if (msg.action === "writeText") return { ok: true };
@@ -232,6 +235,34 @@ store.settings = { agentInboxEnabled: true, agentInboxVersion: 1, cdpInput: fals
   assert.equal(results.reduce((count, result) => count + result.processed, 0), 1);
   assert.equal(native.calls.filter(call => call.action === "writeText" && call.root === inbox.OUTBOX_ROOT).length, 1);
   assert.deepEqual(native.files, {}, "a finalized claim is removed from processing");
+}
+
+{
+  const target = "a".repeat(32), other = "b".repeat(32);
+  native.directed[target] = {
+    "probe.json": JSON.stringify({ id: "probe", action: "clipboard_write", text: "probe" }),
+    "mismatch.json": JSON.stringify({ id: "foreign", action: "clipboard_write", text: "bad" }),
+  };
+  const oldId = chrome.runtime.id;
+  try {
+    chrome.runtime.id = other;
+    native.calls.length = 0;
+    assert.equal((await inbox.pollAgentInboxOnce()).processed, 0);
+    assert.deepEqual(native.calls.map(call => call.action), ["readdir"]);
+    chrome.runtime.id = target;
+    const handled = await inbox.pollAgentInboxOnce();
+    assert.equal(handled.processed, 1);
+    assert.equal(handled.results[0].consumerExtensionId, target);
+    assert.equal(handled.results[0].id, "probe");
+    assert.equal(handled.results[0].ok, true);
+    assert.deepEqual(native.files, {});
+    assert.deepEqual(native.directed[target], {});
+    assert.equal(native.calls.filter(call => call.op === "clipboard_write").length, 1);
+    const bad = native.calls.find(call => call.root === inbox.OUTBOX_ROOT && call.rel === "mismatch.json");
+    assert.match(JSON.parse(bad.text).error, /must match its filename/);
+  } finally {
+    chrome.runtime.id = oldId;
+  }
 }
 
 {

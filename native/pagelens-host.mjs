@@ -343,16 +343,18 @@ export function handleFs(req) {
       if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
         return { ok: false, op: "fs", action, error: `不是目录：${abs}` };
       }
-      const names = fs.readdirSync(abs, { withFileTypes: true });
       const relParts = String(req.rel || "").trim() ? splitRelParts(req.rel) : [];
-      const entries = [];
-      for (const ent of names.slice(0, 200)) {
-        const kind = ent.isDirectory() ? "directory" : "file";
-        entries.push({
-          name: ent.name,
-          kind,
-          path: [...relParts, ent.name].join("/"),
-        });
+      const list = (directory, prefix) => sortEntries(fs.readdirSync(directory, { withFileTypes: true }).slice(0, 200).map(ent => ({
+        name: ent.name,
+        kind: ent.isDirectory() ? "directory" : "file",
+        path: [...prefix, ent.name].join("/"),
+      })));
+      const entries = list(abs, relParts);
+      let directedEntries;
+      if (!agentScope && /^[a-p]{32}$/.test(req.inboxId || "")) {
+        const directedDir = path.join(abs, req.inboxId);
+        try { directedEntries = list(directedDir, [req.inboxId]); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
       }
       return {
         ok: true,
@@ -361,7 +363,8 @@ export function handleFs(req) {
         folder: path.basename(abs),
         path: relParts.join("/"),
         count: entries.length,
-        entries: sortEntries(entries),
+        entries,
+        ...(directedEntries && { directedEntries }),
       };
     }
     if (action === "readText") {
@@ -415,6 +418,7 @@ export function handleFs(req) {
       fs.mkdirSync(path.dirname(processing), { recursive: true, mode: 0o700 });
       try {
         // Reserve the name even if another producer submits it while the job is running.
+        if (!fs.lstatSync(pending).isFile()) throw Error("Expected a regular inbox file");
         fs.linkSync(pending, processing);
       } catch (error) {
         if (error.code === "ENOENT" || error.code === "EEXIST") return { ok: true, claimed: false };

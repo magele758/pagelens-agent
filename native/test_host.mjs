@@ -100,6 +100,14 @@ try {
 
   const inbox = path.join(tmp, "inbox");
   fs.mkdirSync(inbox);
+  const extensionId = "a".repeat(32);
+  const directed = path.join(inbox, extensionId);
+  fs.mkdirSync(directed);
+  fs.writeFileSync(path.join(directed, "private.json"), "{}");
+  const listing = handleFs({ action: "readdir", root: inbox, inboxId: extensionId });
+  assert(listing.ok && listing.directedEntries.some(entry => entry.name === "private.json"), "targeted inbox has its own listing");
+  assert(!listing.entries.some(entry => entry.name === "private.json"), "legacy listing cannot consume targeted inbox files");
+  assert(handleFs({ action: "readdir", root: inbox, inboxId: "b".repeat(32) }).directedEntries === undefined, "another extension cannot list this route");
   const job = { action: "claimInboxJob", root: inbox, rel: "draft.json" };
   fs.writeFileSync(path.join(inbox, job.rel), '{"action":"ptc_create_mx_draft"}');
   assert(!handleFs({ ...job, scope: "agent" }).ok, "agents cannot claim inbox jobs via file tools");
