@@ -1,4 +1,4 @@
-import { chooseTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../flows/temu/product-listing/input.js";
+import { chooseTemuProductDirectory, createTemuSuggestionFilter, normalizeTemuListingInput, suggestTemuFields } from "../flows/temu/product-listing/input.js";
 import { replayTemuListing } from "../flows/temu/product-listing/listing.flow.mjs";
 import { isTemuCategoryPage } from "../flows/temu/product-listing/stage1.js";
 import { createTemuListingToolCaller } from "../flows/temu/product-listing/tool-adapter.js";
@@ -448,6 +448,7 @@ export function bindTemuListingPanel({
       });
       const result = await replay({
         tabId: tab.id, input, call, signal,
+        shouldSuggestField: createTemuSuggestionFilter(input, { useModel }),
         suggestFields: (product, schema, { signal }) =>
           suggestTemuFields(product, schema, { signal, settings: getSettings?.(), useModel }),
         onStep: ({ label, completed }) => tell(`${label} · 已核对 ${completed.length} 项`),

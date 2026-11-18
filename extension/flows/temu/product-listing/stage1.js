@@ -178,7 +178,8 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
     return { ok: true };
   }
 
-  const site = await until(() => field("经营站点", "请选择"), kind === "next" ? 2000 : 10000);
+  const siteField = () => field("经营站点", "请选择") || field("经营站点");
+  const site = await until(siteField, kind === "next" ? 2000 : 10000);
   if (!site) return fail("未找到经营站点，请等 Temu 第一步加载后重试。");
   if (kind === "sites") {
     const opened = await open(site);
@@ -209,11 +210,13 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
     }
     option.click();
     if (!await until(() => {
-      const fresh = field("经营站点", "请选择");
+      const fresh = siteField();
       return fresh && selected(fresh) === clean(siteId);
     })) return fail(`Temu 尚未确认经营站点「${siteId}」。`);
     if (!await close(site, opened.menu)) return fail("经营站点已选择，下拉尚未关闭。");
   }
+  const siteMenu = relatedMenu(site);
+  if (siteMenu && !await close(site, siteMenu)) return fail("请关闭当前经营站点菜单后再选类目。");
   if (!pickedCategory(category)) {
     for (const [index, label] of category.entries()) {
       const column = await until(() => categoryColumns()[index], 3500);

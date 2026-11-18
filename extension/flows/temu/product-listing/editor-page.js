@@ -292,7 +292,9 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
       return fail("VALUE_INVALID", `「${field.label}」超出平台校验范围。`);
     }
   }
-  if (field.value === wanted) return { ok: true, status: "unchanged", ...defaultOutcome };
+  const sameValue = actual => actual === wanted || key === "productEnName" &&
+    typeof actual === "string" && typeof wanted === "string" && actual.toLowerCase() === wanted.toLowerCase();
+  if (sameValue(field.value)) return { ok: true, status: "unchanged", ...defaultOutcome };
   if (!ready()) return fail("PAGE_CHANGED", "当前商品或弹窗已变化。");
   if (typeof wanted === "boolean") input.click();
   else {
@@ -308,7 +310,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
   await new Promise(resolve => setTimeout(resolve, 35));
   if (!scope() || blocked()) return fail("PAGE_CHANGED", "写入后页面发生变化，请检查结果。");
   const readback = getField(key);
-  if (readback?.field.value !== wanted || readback?.input.getAttribute("aria-invalid") === "true" ||
+  if (!readback || !sameValue(readback.field.value) || readback.input.getAttribute("aria-invalid") === "true" ||
       readback?.input.validity?.valid === false) return fail("READBACK_MISMATCH", `「${field.label}」的填写结果未能核对。`);
   return { ok: true, status: "filled", ...defaultOutcome };
 }
