@@ -74,6 +74,9 @@ for (const width of [400, 900]) {
     check('boot');
     click('btn-settings');
     assert.equal(check('settings').view, 'settings');
+    click('settings-tab-advanced');
+    document.querySelector('#settings-group-native > summary').click();
+    await until(() => visits.has('settings-consent'), 'open native authorization in advanced settings');
     click('btn-back');
     await until(() => state().view === 'chat', 'return from settings');
     const workflow = document.getElementById('workflow-catalog-dialog');

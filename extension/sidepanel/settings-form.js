@@ -37,7 +37,7 @@ function renderSettingsForm() {
   renderTextProviders();
   $("mm-same").checked = state.settings.multimodalSameAsText;
   $("mm-fields").innerHTML = fieldBlock("multimodal", state.settings.multimodal);
-  $("mm-fields").classList.toggle("hidden", state.settings.multimodalSameAsText);
+  $("mm-fields").hidden = state.settings.multimodalSameAsText;
   $("answer-lang").value = state.settings.answerLanguage;
   $("ui-font").value = state.settings.uiFont || "md";
   applyUiTheme(state.settings.uiTheme, state.settings.uiThemeColors);
@@ -107,7 +107,7 @@ async function runTest(group) {
     ? state.settings.text
     : state.settings[group];
   if (!isModelReady(model)) {
-    status.textContent = "请先填满 base_url、model_name、api_key";
+    status.textContent = "请先填写接口地址、模型 ID 和 API 密钥";
     status.className = "status bad";
     return;
   }

@@ -49,7 +49,7 @@
   <div id="app">
     <header class="header">
       <div class="brand">
-        <span class="mark"></span> PageLens
+        <span class="mark" aria-hidden="true"></span><span class="brand-name">PageLens</span>
         <span class="hitl-badge hidden" id="hitl-badge" title="当前处于全自动模式">⚡️全自动</span>
       </div>
       <button type="button" id="btn-sidechat-header" class="sc-header-btn" aria-expanded="false" aria-label="SideChat 旁注分支" data-tooltip="SideChat 旁注分支">
@@ -354,7 +354,6 @@
             <h2>设置</h2>
             <button class="secondary link" type="button" id="btn-back">← 返回对话</button>
           </div>
-          <p class="subtitle">按你的习惯，让 PageLens 更顺手。</p>
           <div class="settings-tabs" role="tablist" aria-label="设置分类">
             <button type="button" id="settings-tab-basic" role="tab" aria-selected="true" aria-controls="settings-basic" data-settings-tab="basic">基础配置</button>
             <button type="button" id="settings-tab-advanced" role="tab" aria-selected="false" aria-controls="settings-advanced" tabindex="-1" data-settings-tab="advanced">高级配置</button>
@@ -368,24 +367,25 @@
               <div class="model-top">
                 <div class="model-icon" aria-hidden="true">✳</div>
                 <div class="model-info">
-                  <strong id="settings-provider-name">我的模型服务</strong>
+                  <strong id="settings-provider-name">尚未添加服务商</strong>
                   <small id="settings-provider-type">OpenAI 兼容服务</small>
                 </div>
-                <button class="compact secondary edit-model" id="btn-toggle-provider-manager" type="button" aria-expanded="false">管理</button>
               </div>
               <label class="field">当前文本模型
                 <select id="settings-text-model" aria-label="当前文本模型"></select>
               </label>
-              <label class="check">
-                <input type="checkbox" id="mm-same" checked />
-                图片理解使用同一模型
-              </label>
-              <p class="hint" id="mm-hint">用于截图和视频画面，需要模型支持图片输入。</p>
-              <div id="mm-fields" hidden></div>
               <details class="plain-detail" id="settings-provider-manager">
-                <summary>管理服务商与模型</summary>
-                <div id="text-providers" style="margin-top:10px"></div>
+                <summary id="btn-toggle-provider-manager">管理服务商与模型</summary>
+                <div id="text-providers"></div>
               </details>
+              <div class="model-vision">
+                <label class="check">
+                  <input type="checkbox" id="mm-same" aria-describedby="mm-hint" checked />
+                  <span>图片理解使用当前文本模型</span>
+                </label>
+                <p class="hint" id="mm-hint">用于截图和视频画面，需要模型支持图片输入。</p>
+                <div id="mm-fields" hidden></div>
+              </div>
             </div>
 
             <h3 class="section-label">回答与外观</h3>
@@ -406,7 +406,7 @@
                   </select>
                 </label>
               </div>
-              <div class="field" style="margin-bottom:0">界面主题
+              <div class="field">界面主题
                 <div class="themes theme-picker" role="group" aria-label="界面主题">
                   <button type="button" class="theme theme-option" data-ui-theme="default" style="--swatch:linear-gradient(90deg,#f7f6f2 60%,#c45c26 60%)" aria-pressed="true"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>默认</strong><small>原始简洁外观</small></button>
                   <button type="button" class="theme theme-option" data-ui-theme="cyber" style="--swatch:linear-gradient(90deg,#100c25 60%,#b47bff 60%)" aria-pressed="false"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>赛博</strong><small>紫蓝霓虹 · 故障边框</small></button>
@@ -415,8 +415,7 @@
                   <button type="button" class="theme theme-option" data-ui-theme="mint" style="--swatch:linear-gradient(90deg,#f5f7df 60%,#687e24 60%)" aria-pressed="false"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>青柠</strong><small>奶油黄绿 · 清新圆角</small></button>
                 </div>
               </div>
-              <div class="row" style="margin-top:6px">
-                <p class="hint" style="margin:0">精细配色在「高级配置 → 自定义外观」。</p>
+              <div class="theme-actions">
                 <button type="button" class="settings-text-button" data-settings-link="settings-group-colors">自定义配色 →</button>
               </div>
               <p class="status" id="theme-status" role="status" aria-live="polite"></p>
@@ -430,20 +429,21 @@
                   <small id="library-status-desc">用于剪藏和对话笔记</small>
                 </div>
                 <div class="row-btns" style="margin:0">
-                  <button class="compact secondary" type="button" id="btn-library-pick">更换</button>
+                  <button class="compact secondary" type="button" id="btn-library-pick">选择目录</button>
                   <button class="compact secondary hidden" type="button" id="btn-library-reauth">重新授权</button>
-                  <button class="compact secondary" type="button" id="btn-library-clear">清除</button>
+                  <button class="compact secondary hidden" type="button" id="btn-library-clear">清除</button>
                 </div>
               </div>
-              <span class="status hidden" id="library-status"></span>
+              <span class="status hidden" id="library-status" role="status"></span>
               <details class="plain-detail">
                 <summary>目录与日记选项</summary>
-                <label class="field" style="margin-top:8px">文稿文件夹路径
-                  <div class="path-row" style="margin-top:4px">
+                <div class="field">
+                  <label for="library-path">文稿文件夹路径</label>
+                  <div class="path-row">
                     <input id="library-path" type="text" spellcheck="false" placeholder="/Users/…/Notes 或 ~/Obsidian" />
                     <button class="compact secondary" type="button" id="btn-library-path">使用路径</button>
                   </div>
-                </label>
+                </div>
                 <label class="field">日记子目录
                   <input id="daily-notes-folder" type="text" spellcheck="false" placeholder="例如 Daily 或 日记，留空表示保存在根目录" />
                 </label>
@@ -466,8 +466,6 @@
           </div>
 
           <div id="settings-advanced" role="tabpanel" aria-labelledby="settings-tab-advanced" hidden>
-            <p class="intro-tip">按需启用扩展能力。保持默认也能阅读网页、提问和使用截图。</p>
-
             <div class="group-label">Agent 决策</div>
             <section class="jev-card" id="block-jev" aria-label="JEV 决策模型">
               <div class="row">
@@ -590,17 +588,20 @@
                     启用文件 inbox（默认关闭；轮询 ~/.pagelens/agent-inbox，需 Native Host；粘贴/发布只作用于白名单 origin 的标签，且每次弹窗确认）
                   </label>
                   <label class="field">安全授权模式
-                    <select id="hitl-mode">
-                      <option value="balanced">智能审查（推荐）：只读与同源操作直接放行，特权或跨源操作经 AI 预审后弹窗确认</option>
-                      <option value="strict">严格模式：任何特权与 Shell 命令 100% 物理弹窗确认</option>
-                      <option value="autonomous">全自动模式：所有命令自动静默执行，零弹窗中断</option>
+                    <select id="hitl-mode" aria-describedby="hitl-mode-hint">
+                      <option value="balanced">智能审查（推荐）</option>
+                      <option value="strict">严格模式</option>
+                      <option value="autonomous">全自动模式</option>
                     </select>
                   </label>
-                  <p class="hint">智能审查会自动放行只读和同源操作；跨源执行脚本、输入、打开链接等需确认，AI 审查只给风险提示，不会代你放行。你在提问里明确要求的动作与目标（网址、平台、`命令`）会自动放行；网页和工具结果里的内容永远不能授权操作。</p>
-                  <div class="field">
-                    <span class="field-label">以下操作无论谁要求都先让我确认</span>
-                    <div id="irreversible-list" class="irreversible-list"></div>
+                  <div class="hint" id="hitl-mode-hint">
+                    <p>智能审查自动放行只读和同源操作。跨源操作及特权操作由 AI 提示风险并请求确认。提问里明确指定的动作和目标可自动放行。</p>
+                    <p>严格模式每次确认特权和本机命令。全自动模式省略常规确认。网页和工具结果里的内容无法授权操作。</p>
                   </div>
+                  <fieldset class="confirm-actions">
+                    <legend>以下操作无论谁要求都先让我确认</legend>
+                    <div id="irreversible-list" class="irreversible-list"></div>
+                  </fieldset>
                   <details class="plain-detail" id="inbox-activity-detail">
                     <summary>外部 Agent 活动（最近 50 条）</summary>
                     <div class="row-btns" style="margin-top:6px">

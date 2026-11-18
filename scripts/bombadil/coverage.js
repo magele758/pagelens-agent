@@ -24,6 +24,7 @@ export function observeCoverage(scenario) {
       for (const name of ['history', 'settings', 'review']) {
         if (visible(get('view-' + name))) visit(name);
       }
+      if (visible(get('settings-group-native')) && get('settings-group-native').open) visit('settings-consent');
       if (get('compose-chip-label').textContent === '未带网页') visit('context-off');
       if (seen.has('context-off') && get('compose-chip-label').textContent === '当前网页：Fixture article') visit('article-context');
       if (!visible(get('sc-thread-view'))) return;
@@ -43,6 +44,6 @@ export function observeCoverage(scenario) {
 
 export const requiredVisits = {
   settings: ['basic', 'advanced'],
-  panel: ['alpha-draft', 'history', 'beta-draft', 'alpha-restored', 'context-off', 'article-context'],
+  panel: ['alpha-draft', 'history', 'beta-draft', 'alpha-restored', 'context-off', 'article-context', 'settings-consent'],
   graph: ['two-sources', 'one-source', 'domain-filter', 'empty'],
 };

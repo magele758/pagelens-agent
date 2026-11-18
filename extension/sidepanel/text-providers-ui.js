@@ -25,13 +25,13 @@ function fieldBlock(prefix, model, hints = {}) {
     <label class="field">预设
       <select data-k="${prefix}.preset">${presetOpts}</select>
     </label>
-    <label class="field">base_url
-      <input data-k="${prefix}.baseUrl" value="${escapeAttr(model.baseUrl)}" placeholder="${escapeAttr(hints.baseUrl || "https://api.example.com/v1")}" />
+    <label class="field">接口地址
+      <input data-k="${prefix}.baseUrl" type="url" value="${escapeAttr(model.baseUrl)}" placeholder="${escapeAttr(hints.baseUrl || "https://api.example.com/v1")}" />
     </label>
-    <label class="field">model_name
+    <label class="field">模型 ID
       <input data-k="${prefix}.model" value="${escapeAttr(model.model)}" placeholder="${escapeAttr(hints.model || "gpt-4o-mini")}" />
     </label>
-    <label class="field">api_key
+    <label class="field">API 密钥
       <input data-k="${prefix}.apiKey" type="password" value="${escapeAttr(model.apiKey)}" placeholder="${escapeAttr(hints.key || "sk-…")}" autocomplete="off" />
     </label>
     ${prefix === 'text' ? `<label class="field">视频总结：单次正文上限（token）
@@ -142,6 +142,26 @@ function visibleProviderModelIds(provider) {
     .map((m) => m.id);
 }
 
+function refreshProviderFilter(root) {
+  const query = state.textProviderUi.query;
+  for (const input of root.querySelectorAll("[data-tp-query]")) {
+    if (input.value !== query) input.value = query;
+  }
+  for (const card of root.querySelectorAll("[data-tp-provider]")) {
+    const provider = providerById(card.dataset.tpProvider);
+    const bulk = card.querySelector(".model-bulk");
+    if (!provider || !bulk) continue;
+    const visible = new Set(visibleProviderModelIds(provider));
+    for (const row of card.querySelectorAll("[data-tp-model-item]")) {
+      row.hidden = !visible.has(row.dataset.tpModelItem);
+    }
+    const enabled = provider.models.filter((model) => model.enabled && visible.has(model.id)).length;
+    card.querySelector(".model-count").textContent = `${enabled}/${visible.size}${query.trim() ? "（当前筛选）" : ""}`;
+    card.querySelector(".model-empty").hidden = visible.size !== 0;
+    bulk.hidden = visible.size === 0;
+  }
+}
+
 function renderTextProviders() {
   const root = $("text-providers");
   if (!root) return;
@@ -151,15 +171,12 @@ function renderTextProviders() {
   const ui = state.textProviderUi;
   const current = state.settings.textRef;
   const presetOpts = presetsFor("text").map((p) => `<option value="${escapeAttr(p.id)}">${escapeAttr(p.name)}</option>`).join("");
-  const q = String(ui.query || "").trim().toLowerCase();
   const cards = providers.map((p) => {
-    const models = q
-      ? p.models.filter((m) => m.id.toLowerCase().includes(q) || String(m.ownedBy || "").toLowerCase().includes(q))
-      : p.models;
     const editing = ui.editingId === p.id;
-    const modelRows = models.map((m) => {
+    const modelInputId = `provider-model-${escapeAttr(p.id)}`;
+    const modelRows = p.models.map((m) => {
       const isCurrent = current?.providerId === p.id && current?.modelId === m.id;
-      return `<li>
+      return `<li data-tp-model-item="${escapeAttr(m.id)}">
         <label class="check">
           <input type="checkbox" data-tp="toggle" data-id="${escapeAttr(p.id)}" data-model="${escapeAttr(m.id)}" ${m.enabled ? "checked" : ""} />
           <span><code>${escapeAttr(m.id)}</code>${m.ownedBy ? ` <span class="muted">· ${escapeAttr(m.ownedBy)}</span>` : ""}${isCurrent ? " · 当前" : ""}</span>
@@ -167,57 +184,64 @@ function renderTextProviders() {
         <button type="button" class="secondary" data-tp="current" data-id="${escapeAttr(p.id)}" data-model="${escapeAttr(m.id)}" ${m.enabled ? "" : "disabled"}>设为当前</button>
       </li>`;
     }).join("");
-    return `<article class="provider-card">
+    return `<article class="provider-card" data-tp-provider="${escapeAttr(p.id)}">
       <div class="provider-head">
         <strong>${escapeAttr(p.name)}</strong>
         <span class="muted">${escapeAttr(p.preset)} · ${p.apiKey ? "已填密钥" : "无密钥"}</span>
       </div>
       <div class="muted provider-url">${escapeAttr(p.baseUrl || "—")}${p.scannedAt ? ` · 扫描于 ${escapeAttr(p.scannedAt.slice(0, 19).replace("T", " "))}` : ""}</div>
       ${p.scanError ? `<div class="status bad">${escapeAttr(p.scanError)}</div>` : ""}
-      <div class="row-btns">
+      <div class="row-btns provider-actions">
         <button type="button" class="secondary" data-tp="scan" data-id="${escapeAttr(p.id)}">扫描模型</button>
-        <button type="button" class="secondary" data-tp="edit" data-id="${escapeAttr(p.id)}">${editing ? "取消编辑" : "改地址/密钥"}</button>
+        <button type="button" class="secondary" data-tp="edit" data-id="${escapeAttr(p.id)}" aria-expanded="${editing}">${editing ? "取消编辑" : "编辑连接"}</button>
         <button type="button" class="secondary" data-tp="delete" data-id="${escapeAttr(p.id)}">删除</button>
       </div>
       ${editing ? `<div class="provider-edit">
-        <label class="field">base_url<input data-tp-edit="baseUrl" data-id="${escapeAttr(p.id)}" value="${escapeAttr(p.baseUrl)}" /></label>
-        <label class="field">api_key<input data-tp-edit="apiKey" data-id="${escapeAttr(p.id)}" type="password" value="" placeholder="留空则不改" autocomplete="off" /></label>
-        <button type="button" class="secondary" data-tp="save-edit" data-id="${escapeAttr(p.id)}">保存并扫描</button>
+        <label class="field">接口地址<input data-tp-edit="baseUrl" data-id="${escapeAttr(p.id)}" type="url" value="${escapeAttr(p.baseUrl)}" /></label>
+        <label class="field">API 密钥<input data-tp-edit="apiKey" data-id="${escapeAttr(p.id)}" type="password" value="" placeholder="留空则不改" autocomplete="off" /></label>
+        <div class="row-btns">
+          <button type="button" class="primary provider-submit" data-tp="save-edit" data-id="${escapeAttr(p.id)}">保存并扫描</button>
+        </div>
       </div>` : ""}
-      <div class="path-row">
-        <input data-tp-add-model="${escapeAttr(p.id)}" value="${escapeAttr(ui.addModel[p.id] || "")}" placeholder="手填模型名后添加" />
-        <button type="button" class="secondary" data-tp="add-model" data-id="${escapeAttr(p.id)}">添加</button>
+      <div class="provider-model-input">
+        <label class="field" for="${modelInputId}">手动添加模型</label>
+        <div class="path-row">
+          <input id="${modelInputId}" data-tp-add-model="${escapeAttr(p.id)}" value="${escapeAttr(ui.addModel[p.id] || "")}" placeholder="输入模型 ID" />
+          <button type="button" class="secondary" data-tp="add-model" data-id="${escapeAttr(p.id)}">添加</button>
+        </div>
       </div>
       ${p.models.length > 8 ? `<label class="field">筛选模型<input data-tp-query="1" value="${escapeAttr(ui.query)}" placeholder="搜索模型名" /></label>` : ""}
       ${modelRows ? `<div class="row-btns model-bulk">
         <button type="button" class="secondary" data-tp="select-all" data-id="${escapeAttr(p.id)}">全选</button>
         <button type="button" class="secondary" data-tp="invert" data-id="${escapeAttr(p.id)}">反选</button>
-        <span class="muted">${models.filter((m) => m.enabled).length}/${models.length}${q ? "（当前筛选）" : ""}</span>
+        <span class="muted model-count"></span>
       </div>
-      <ul class="model-scan-list">${modelRows}</ul>` : `<p class="muted">尚未发现模型，可扫描或手填。</p>`}
+      <ul class="model-scan-list">${modelRows}</ul>
+      <p class="muted model-empty" hidden>没有匹配的模型。</p>` : `<p class="muted">尚未发现模型，可扫描或手填。</p>`}
     </article>`;
   }).join("");
   root.innerHTML = `
-    <div class="row-btns">
-      <button type="button" class="secondary" data-tp="toggle-add">${ui.adding ? "收起新增" : "新增服务商"}</button>
-      <span class="muted">已有 ${providers.length} 条</span>
+    <div class="row-btns provider-toolbar">
+      <button type="button" class="${ui.adding ? "secondary" : "primary provider-submit"}" data-tp="toggle-add" aria-expanded="${ui.adding}">${ui.adding ? "取消新增" : "新增服务商"}</button>
+      ${providers.length ? `<span class="muted">${providers.length} 家服务商</span>` : ""}
     </div>
-    ${ui.msg ? `<p class="status ok">${escapeAttr(ui.msg)}</p>` : ""}
-    ${ui.err ? `<p class="status bad">${escapeAttr(ui.err)}</p>` : ""}
+    ${ui.msg ? `<p class="status ok" role="status">${escapeAttr(ui.msg)}</p>` : ""}
+    ${ui.err ? `<p class="status bad" role="alert">${escapeAttr(ui.err)}</p>` : ""}
     ${ui.adding ? `<div class="provider-add">
       <label class="field">预设<select data-tp-draft="preset">${presetOpts}</select></label>
-      <label class="field">名称<input data-tp-draft="name" placeholder="可空，自动从地址生成" /></label>
-      <label class="field">base_url<input data-tp-draft="baseUrl" placeholder="https://api.example.com/v1" /></label>
-      <label class="field">api_key<input data-tp-draft="apiKey" type="password" placeholder="sk-…" autocomplete="off" /></label>
-      <label class="field">先手填一个模型（可选）<input data-tp-draft="model" placeholder="gpt-4o-mini" /></label>
+      <label class="field">服务商名称（选填）<input data-tp-draft="name" placeholder="默认使用接口域名" /></label>
+      <label class="field">接口地址<input data-tp-draft="baseUrl" type="url" placeholder="https://api.example.com/v1" required /></label>
+      <label class="field">API 密钥<input data-tp-draft="apiKey" type="password" placeholder="sk-…" autocomplete="off" /></label>
+      <label class="field">模型 ID（选填）<input data-tp-draft="model" placeholder="gpt-4o-mini" /></label>
       <div class="row-btns">
-        <button type="button" class="primary" data-tp="add">添加并扫描</button>
+        <button type="button" class="primary provider-submit" data-tp="add">添加并扫描</button>
       </div>
     </div>` : ""}
-    ${cards || `<p class="muted">还没有服务商。点「新增服务商」加入 OpenAI / OpenRouter / 本地 Ollama 等。</p>`}
+    ${cards || (!ui.adding ? '<p class="hint">支持 OpenAI 兼容服务，例如 OpenRouter 和本地 Ollama。</p>' : "")}
   `;
   const draftPreset = root.querySelector("[data-tp-draft=preset]");
   if (draftPreset && ui.draftPreset) draftPreset.value = ui.draftPreset;
+  refreshProviderFilter(root);
   settingsPage?.refreshModels();
 }
 
@@ -254,7 +278,10 @@ function bindTextProvidersOnce() {
   root.addEventListener("input", (e) => {
     const add = e.target.closest("[data-tp-add-model]");
     if (add) state.textProviderUi.addModel[add.getAttribute("data-tp-add-model")] = add.value;
-    if (e.target.closest("[data-tp-query]")) state.textProviderUi.query = e.target.value;
+    if (e.target.closest("[data-tp-query]")) {
+      state.textProviderUi.query = e.target.value;
+      refreshProviderFilter(root);
+    }
   });
   root.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
@@ -271,7 +298,7 @@ function bindTextProvidersOnce() {
 async function scanTextProvider(id) {
   const provider = providerById(id);
   if (!provider) throw new Error("找不到服务商");
-  if (!provider.baseUrl.trim()) throw new Error("请先填 base_url");
+  if (!provider.baseUrl.trim()) throw new Error("请填写接口地址");
   const result = await listRemoteModels({ baseUrl: provider.baseUrl, apiKey: provider.apiKey });
   replaceProvider({
     ...provider,
@@ -291,15 +318,20 @@ async function handleTextProviderAction(action, id, modelId, enabled) {
     ui.adding = !ui.adding;
     ui.err = "";
     renderTextProviders();
+    root.querySelector(ui.adding ? "[data-tp-draft=preset]" : "[data-tp=toggle-add]")?.focus();
     return;
   }
   if (action === "add") {
     const preset = root.querySelector("[data-tp-draft=preset]")?.value || "custom";
-    const baseUrl = root.querySelector("[data-tp-draft=baseUrl]")?.value.trim() || "";
+    const address = root.querySelector("[data-tp-draft=baseUrl]");
+    const baseUrl = address.value.trim();
+    if (!baseUrl) {
+      address.reportValidity();
+      return;
+    }
     const apiKey = root.querySelector("[data-tp-draft=apiKey]")?.value || "";
     const model = root.querySelector("[data-tp-draft=model]")?.value.trim() || "";
     const name = root.querySelector("[data-tp-draft=name]")?.value.trim() || suggestProviderName(baseUrl, preset);
-    if (!baseUrl) throw new Error("请填写 base_url");
     const provider = normalizeProvider({
       id: newProviderId(),
       name,
@@ -328,6 +360,8 @@ async function handleTextProviderAction(action, id, modelId, enabled) {
   if (action === "edit") {
     ui.editingId = ui.editingId === id ? "" : id;
     renderTextProviders();
+    const control = ui.editingId ? "[data-tp-edit=baseUrl]" : "[data-tp=edit]";
+    [...root.querySelectorAll(control)].find((node) => node.dataset.id === id)?.focus();
     return;
   }
   if (action === "save-edit") {
