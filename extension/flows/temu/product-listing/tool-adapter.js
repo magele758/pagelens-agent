@@ -182,7 +182,7 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
     const denied = paths?.length ? await approveFiles("detail", paths) : null;
     const files = denied ? [] : paths || [];
     if (!files.length && !description?.trim()) return denied || failure("VALUE_INVALID", "没有可填写的详情资料。");
-    const edit = (kind, text) => runInPage(temuDecorationPage, { href, kind, description: text });
+    const edit = (kind, text) => runInPage(temuDecorationPage, { href, kind, description: text, hasImages: files.length > 0 });
     const prepared = await edit("prepare", description);
     if (!prepared.ok) return prepared;
     let verified;
