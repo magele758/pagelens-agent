@@ -10,6 +10,11 @@ const sizesByAlias = new Map([
   ["xxx-large", "XXXL"], ["3xl", "XXXL"], ["3x", "XXXL"],
 ].map(([name, value]) => [keyOf(name), keyOf(value)]));
 const sizeKey = value => sizesByAlias.get(keyOf(value)) || keyOf(value);
+const standardColors = new Map([
+  ["black", "黑色"], ["white", "白色"], ["red", "红色"], ["blue", "蓝色"], ["green", "绿色"],
+  ["pink", "粉色"], ["yellow", "黄色"], ["orange", "橙色"], ["purple", "紫色"], ["gray", "灰色"], ["grey", "灰色"],
+]);
+const standardColor = label => standardColors.get(keyOf(label.replace(/^[a-z]\s+-\s+/iu, "")));
 
 function fieldMap(values) {
   return new Map(Object.entries(values || {}).map(([key, value]) => [keyOf(key), value]));
@@ -39,13 +44,16 @@ function skuValue(field, row, input) {
   return field.multiple && hasValue(result) && !Array.isArray(result) ? [result] : result;
 }
 
-function matchingSku(field, rows, rowCount) {
+function matchingSku(field, rows, rowCount, colors) {
   const labels = new Set((field.rowLabels || []).map(keyOf));
   if (rows.length === 1 && rowCount === 1 && (!Object.keys(rows[0].options || {}).length || !labels.size)) return rows[0];
   const matches = rows.filter(row => {
     const values = Object.entries(row.options || {});
-    return values.length > 0 && values.every(([kind, value]) => labels.has(keyOf(value)) ||
-      optionAliases(kind).includes("尺码") && [...labels].some(label => sizeKey(label) === sizeKey(value)));
+    return values.length > 0 && values.every(([kind, value]) => {
+      const aliases = optionAliases(kind);
+      if (aliases.includes("颜色") && colors.has(keyOf(value))) return labels.has(keyOf(colors.get(keyOf(value))));
+      return labels.has(keyOf(value)) || aliases.includes("尺码") && [...labels].some(label => sizeKey(label) === sizeKey(value));
+    });
   });
   if (matches.length === 1) return matches[0];
   return null;
@@ -56,10 +64,12 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   const items = [];
   const issues = [];
   const attempted = new Set();
+  const colorLabels = new Map();
   let step = "validate";
   let draftUrl;
   let missing = [];
   let verificationComplete = false;
+  let verifiedSkuCount;
   let lastState;
   const run = (tool, args) => {
     signal?.throwIfAborted();
@@ -74,7 +84,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     label, code: result?.code || "UNVERIFIED", message: result?.message || "没有收到可核对的结果。",
   });
   const result = (status, code) => ({
-    status, step, ...(code && { code }), ...(draftUrl && { draftUrl }), items, issues, missing, verificationComplete,
+    status, step, ...(code && { code }), ...(draftUrl && { draftUrl }), items, issues, missing, verificationComplete, verifiedSkuCount,
     elapsedMs: Date.now() - start, fieldCount: lastState?.fields.length || 0,
   });
   const stop = (label, failure) => {
@@ -142,9 +152,13 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
         record(option.value, { code: "SPEC_CONTROL_MISSING", message: "服装颜色表没有空白可填写行。" });
         break;
       }
-      const applied = await run("temu_apparel", { kind: "set-color", key: blank.key, value: option.value });
+      const candidate = standardColor(option.value);
+      const alternate = candidate && !colors.some(other => other !== option &&
+        (keyOf(other.value) === keyOf(candidate) || standardColor(other.value) === candidate)) ? candidate : undefined;
+      const applied = await run("temu_apparel", { kind: "set-color", key: blank.key, value: option.value, alternate });
       record(option.value, applied, blank.key);
       if (!applied?.ok) continue;
+      colorLabels.set(keyOf(option.value), applied.value || option.value);
       const live = await run("temu_apparel", { kind: "inspect" });
       if (!live?.ok) { record("服装颜色", live); break; }
       rows = live.rows;
@@ -282,7 +296,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     if (field.skuMember) {
       const rows = input.skus?.length ? input.skus : [input];
       const keys = new Set(lastState.fields.filter(entry => entry.skuMember).map(entry => entry.skuGroup));
-      const row = matchingSku(field, rows, keys.size);
+      const row = matchingSku(field, rows, keys.size, colorLabels);
       return row && skuValue(field, row, input);
     }
     if (/^productEnName$|^英文(?:商品)?名称$/u.test(field.key === "productEnName" ? field.key : field.label)) {
@@ -383,8 +397,16 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     if (input.skus?.length && !input.price && input.skus.every(row => !row.price)) {
       issues.push(asIssue("申报价格", { code: "SKU_PRICE_MISSING", message: "该商品资料没有卖家申报价。请使用实际的人民币申报价，来源平台售价不会作为申报价。" }));
     }
-    if (input.skus?.length && !afterVariants.fields.some(field => field.skuMember)) {
-      issues.push(asIssue("SKU", { code: "SKU_NOT_RENDERED", message: "当前类目没有生成可填写的 SKU 行。" }));
+    const skuRows = afterVariants.skuRows;
+    if (input.skus?.length && (Array.isArray(skuRows) ? !skuRows.length : !afterVariants.fields.some(field => field.skuMember && field.skuGroup))) {
+      verifiedSkuCount = 0;
+      issues.push(asIssue("SKU", { code: "SKU_NOT_RENDERED", message: "当前类目没有生成可填写的 SKU 行。请核对规格是否已被 Temu 接受。" }));
+    } else if (input.skus?.length && Array.isArray(skuRows)) {
+      const missingRows = input.skus.filter(source => !skuRows.some(row =>
+        matchingSku({ rowLabels: row.labels }, [source], skuRows.length, colorLabels)));
+      verifiedSkuCount = input.skus.length - missingRows.length;
+      if (missingRows.length) issues.push(asIssue("SKU", { code: "SKU_ROWS_MISSING",
+        message: `有 ${missingRows.length} 个源 SKU 未在 Temu 表格中匹配到，请核对规格。` }));
     }
 
     report("images", "上传本商品图片并核对页面回显");
@@ -410,7 +432,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const groups = input.variantGroups || [];
     const skuImages = beforeImages.uploads.filter(target => target.role === "variant" && target.rowLabels);
     for (const target of skuImages) {
-      const row = matchingSku(target, input.skus?.length ? input.skus : [input], skuImages.length);
+      const row = matchingSku(target, input.skus?.length ? input.skus : [input], skuImages.length, colorLabels);
       if (!row) continue;
       const optionImages = groups.flatMap(group => group.options.filter(option =>
         option.imagePath && Object.values(row.options || {}).some(value => keyOf(value) === keyOf(option.value))).map(option => option.imagePath));
@@ -418,10 +440,11 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       if (image) await uploadImages("variant", [image], beforeImages, undefined, target.key);
     }
     for (const group of groups) for (const option of group.options || []) {
-      const matching = beforeImages.uploads.filter(target => target.role === "variant" && keyOf(target.variant) === keyOf(option.value));
+      const label = colorLabels.get(keyOf(option.value)) || option.value;
+      const matching = beforeImages.uploads.filter(target => target.role === "variant" && keyOf(target.variant) === keyOf(label));
       if (matching.length === 1) {
         const image = option.imagePath || (apparelGalleries.length === 1 && group.options.length === 1 ? gallery[0] : "");
-        if (image) await uploadImages("variant", [image], beforeImages, option.value, matching[0].key);
+        if (image) await uploadImages("variant", [image], beforeImages, label, matching[0].key);
       }
     }
 
@@ -441,6 +464,18 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     if (!final?.ok) return stop("试填回读", final);
     missing = listMissing();
     verificationComplete = !final.truncated;
+    const unsupportedRequired = final.unsupported?.filter(field => field.required) || [];
+    for (const [index, field] of unsupportedRequired.entries()) {
+      if (field.valuePresent === false && !missing.some(item => item.label === field.label)) {
+        missing.push({ key: `unsupported-required-${index}`, label: field.label });
+      }
+    }
+    const unknownRequired = unsupportedRequired.filter(field => field.valuePresent == null);
+    if (unknownRequired.length) {
+      verificationComplete = false;
+      issues.push(asIssue("必填控件", { code: "REQUIRED_CONTROL_UNKNOWN",
+        message: `有 ${unknownRequired.length} 个必填控件无法核对，请在 Temu 表单检查。` }));
+    }
     for (const upload of final.uploads || []) {
       if (upload.minimum && upload.markers < upload.minimum) {
         missing.push({ key: upload.key, label: `商品轮播图需至少 ${upload.minimum} 张，已显示 ${upload.markers} 张` });

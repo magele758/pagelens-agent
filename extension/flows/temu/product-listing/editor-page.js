@@ -136,6 +136,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
         input.closest('[aria-disabled="true"],[aria-readonly="true"]')) return null;
     const section = input.closest('[data-testid="beast-core-form-item"],[class*="Form_item_"]');
     const sku = skuId(id);
+    if (sku && input.closest('[data-placeholder="true"],[class*="skeleton" i]')) return null;
     const label = names[id] || shipping[sku?.[2]] || skuNames[sku?.[2]] ||
       (sku?.[2]?.startsWith("siteSupplierPriceMap.") ? "申报价格（CNY）" : "") ||
       (/^productSkcList\[\d+\]\.extCode$/u.test(id) ? "颜色货号" : "") || nearby(input);
@@ -252,8 +253,20 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
   }
 
   if (kind === "inspect") {
-    const list = fields().map(item => item.field).filter((field, _i, all) => all.filter(item => item.key === field.key).length === 1);
-    return { ok: true, fields: list.slice(0, 400), uploads: uploads(), issues: issues(), truncated: list.length > 400 };
+    const entries = fields();
+    const counts = new Map();
+    for (const { field: { key } } of entries) counts.set(key, (counts.get(key) || 0) + 1);
+    const uniqueFields = entries.filter(({ field }) => counts.get(field.key) === 1);
+    const list = uniqueFields.map(({ field }) => field);
+    const rows = new Map();
+    for (const { input, field } of uniqueFields) {
+      if (!field.skuGroup || !/^(?:siteSupplierPriceMap\.[\w-]+|stock|quantity)$/u.test(field.skuMember) ||
+          !visible(input.closest("tbody tr"))) continue;
+      const prior = rows.get(field.skuGroup) || [];
+      rows.set(field.skuGroup, [...new Set([...prior, ...field.rowLabels])]);
+    }
+    const skuRows = rows.size ? [...rows].map(([id, labels]) => ({ id, labels })) : null;
+    return { ok: true, fields: list.slice(0, 400), skuRows, uploads: uploads(), issues: issues(), truncated: list.length > 400 };
   }
   if (kind === "upload-target") {
     const matches = uploads().filter(item => item.role === role && item.key === key && (identifier == null || item.variant === identifier));

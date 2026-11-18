@@ -7,6 +7,8 @@ export async function temuControls(request) {
   const FORM_CONTROLS = 'input,textarea,select,[role="combobox"],[role="radio"],[role="checkbox"],[contenteditable="true"]';
   const MENU = '[data-testid="beast-core-portal"] [role="listbox"],[class*="ST_dropdown_"] [role="listbox"]';
   const LABEL = 'label,[data-field-label],[class*="Form_itemLabelContent_"]';
+  const FORM_ITEM = '[data-testid="beast-core-form-item"],[class*="Form_item_"]';
+  const REQUIRED = '[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]';
   const MODAL = 'dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]';
   const MAX_FIELDS = 100;
   const MAX_OPTIONS = 400;
@@ -106,16 +108,30 @@ export async function temuControls(request) {
     return { holder, selector, fieldKey, label, requiredHint: true };
   }
 
+  const readSelected = wrapper => [...wrapper.querySelectorAll('[class*="ST_selectValueSingle_"],[class*="ST_selectValueMultipleItem_"]')]
+    .filter(visible).map(node => clean(node.textContent)).filter(Boolean);
+  const labelItems = area => [...area?.querySelectorAll(LABEL) || []].filter(node => visible(node) &&
+    !node.closest(WRAPPER) && !node.querySelector(FORM_CONTROLS));
+  const requiredMarker = area => [...area?.querySelectorAll(REQUIRED) || []].some(node =>
+    node.getClientRects().length && !node.closest('[hidden],[inert]') && getComputedStyle(node).visibility !== "hidden");
+
+  function isRequired(input, area, label) {
+    if (input.required || input.getAttribute("aria-required") === "true" || area?.matches('[data-required="true"]')) return true;
+    const labels = labelItems(area);
+    const match = labels.filter(node => key(labelText(node)) === key(label));
+    if (match.some(node => /^[*＊]/u.test(clean(node.textContent)) || node.matches(REQUIRED) || requiredMarker(node))) return true;
+    return Boolean(area && labels.length <= 1 && area.querySelectorAll(`${WRAPPER} ${HEAD} input`).length === 1 &&
+      requiredMarker(area));
+  }
+
   function describe(input, wrapper, { holder: group, selector, fieldKey, label, requiredHint = false }) {
-    const item = group.closest('[data-testid="beast-core-form-item"],[class*="Form_item_"]');
-    const required = requiredHint || input.required || input.getAttribute("aria-required") === "true" ||
+    const item = group.closest(FORM_ITEM) || input.closest(FORM_ITEM) || group;
+    const required = requiredHint || isRequired(input, item, label) ||
       /^(?:productOriginCode|manufacturingLocation|shipmentLimitSecond|freightTemplateId)$/u.test(group.id) ||
-      /^productSkuMap\.[\w-]*\.sensitiveAttr$/u.test(group.id) ||
-      Boolean((item || group).querySelector('[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]'));
+      /^productSkuMap\.[\w-]*\.sensitiveAttr$/u.test(group.id);
     const multiple = Boolean(wrapper.querySelector('[class*="ST_selectValueMultiple_"]') || input.getAttribute("aria-multiselectable") === "true");
     const locator = { adapter: "temu-select", tag: "input", type: input.type, role: "combobox", selector, label };
-    const selected = [...wrapper.querySelectorAll('[class*="ST_selectValueSingle_"],[class*="ST_selectValueMultipleItem_"]')]
-      .filter(visible).map(node => clean(node.textContent)).filter(Boolean);
+    const selected = readSelected(wrapper);
     const sku = /^productSkuMap\.([\w-]*)\.(sensitiveAttr|productSkuMultiPack\.skuClassification)$/u.exec(group.id);
     return { input, wrapper, field: {
       key: fieldKey || group.id, kind: "select", label, locator, required: Boolean(required), multiple, value: multiple ? selected : selected[0] || "",
@@ -143,8 +159,9 @@ export async function temuControls(request) {
   }
 
   function scan() {
-    const candidates = Array.from(document.querySelectorAll(`${WRAPPER} ${HEAD} input`)).filter(visible);
-    const order = new Map(Array.from(document.querySelectorAll(FORM_CONTROLS), (element, index) => [element, index]));
+    const root = document.getElementById("page_container_id");
+    const candidates = [...root?.querySelectorAll(`${WRAPPER} ${HEAD} input`) || []].filter(visible);
+    const order = new Map([...root?.querySelectorAll(FORM_CONTROLS) || []].map((element, index) => [element, index]));
     const controls = [];
     const unsupported = [];
     for (const input of candidates) {
@@ -152,10 +169,17 @@ export async function temuControls(request) {
       if (candidate) {
         candidate.field.order = order.get(input);
         controls.push(candidate);
+      } else if (editable(input)) {
+        const item = input.closest(FORM_ITEM);
+        const labels = [...new Set(labelItems(item).map(labelText).filter(Boolean))];
+        const label = clean(input.getAttribute("aria-label")) || (labels.length === 1 ? labels[0] : "未命名下拉");
+        const selected = readSelected(input.closest(WRAPPER));
+        unsupported.push({ label, kind: "custom-select", reason: "无法唯一定位此下拉控件。",
+          required: isRequired(input, item, label), valuePresent: selected.length ? true : input.value ? null : false });
       }
-      else if (editable(input)) unsupported.push({ label: clean(input.getAttribute("aria-label") || input.placeholder || "未命名下拉"), kind: "custom-select", reason: "无法唯一定位此下拉控件。" });
     }
-    return { controls: controls.slice(0, MAX_FIELDS), unsupported: unsupported.slice(0, MAX_FIELDS) };
+    return { controls: controls.slice(0, MAX_FIELDS), unsupported: unsupported.slice(0, MAX_FIELDS),
+      truncated: controls.length > MAX_FIELDS || unsupported.length > MAX_FIELDS };
   }
 
   function locate(field) {
@@ -392,8 +416,8 @@ export async function temuControls(request) {
   if (!validPage()) return fail("PAGE_CHANGED", "当前 Temu 商品草稿已变化。");
   if (!document.body || blocked()) return fail("MODAL_BLOCKED", "目标表单未就绪或有弹窗遮挡。");
   if (request.kind === "inspect") {
-    const { controls, unsupported } = scan();
-    return { ok: true, fields: controls.map(({ field }) => field), unsupported };
+    const { controls, unsupported, truncated } = scan();
+    return { ok: true, fields: controls.map(({ field }) => field), unsupported, truncated };
   }
 
   const { field, value } = request;

@@ -454,9 +454,11 @@ export function bindTemuListingPanel({
         onStep: ({ label, completed }) => tell(`${label} · 已核对 ${completed.length} 项`),
       });
       const completed = result.items.filter(item => /^(?:filled|verified|unchanged)$/u.test(item.status)).length;
-      const verified = result.verificationComplete === false ? "最终回读未完成。" : `必填待补 ${result.missing.length} 项。`;
+      const sku = Number.isInteger(result.verifiedSkuCount) && input.skus?.length
+        ? `SKU 已匹配 ${result.verifiedSkuCount}/${input.skus.length}。` : "";
+      const verified = result.verificationComplete === false ? "最终回读未完成。" : `已识别的必填待补 ${result.missing.length} 项。`;
       tell(result.status === "cancelled" ? "试填已停止。" :
-        `试填${result.status === "needs-review" ? "待核对" : "已完成"}，已核对 ${completed} 项，${verified}`, result.status === "needs-review");
+        `试填${result.status === "needs-review" ? "待核对" : "已完成"}，已核对 ${completed} 项，${verified}${sku}`, result.status === "needs-review");
       renderIssues([...result.issues.map(({ label, message }) => `${label}：${message}`), ...result.missing.map(({ label }) => `待填：${label}`)]);
     } catch (error) {
       tell(signal.aborted ? "试填已停止。" : error.message || "Temu 试填失败。", !signal.aborted);

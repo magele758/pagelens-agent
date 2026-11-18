@@ -1,5 +1,5 @@
 /** The apparel editor renders SKC colors separately from its size selector. */
-export async function temuApparelPage({ href, kind, key, value }) {
+export async function temuApparelPage({ href, kind, key, value, alternate }) {
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
   const visible = node => Boolean(node?.isConnected && node.getClientRects().length &&
@@ -72,8 +72,9 @@ export async function temuApparelPage({ href, kind, key, value }) {
     const input = colorField(holder);
     if (!holder) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
     const wanted = clean(value);
+    const alternateLabel = typeof alternate === "string" && alternate.length <= 80 ? clean(alternate) : "";
     const prior = selectedColor(holder);
-    if (prior === wanted) return { ok: true, status: "unchanged" };
+    if (prior && (prior === wanted || prior === alternateLabel)) return { ok: true, status: "unchanged", value: prior };
     if (prior) return fail("SPEC_VALUES_OCCUPIED", "目标服装颜色行已有内容。");
     if (!input || input.disabled) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
     if (input.maxLength > 0 && value.length > input.maxLength) return fail("VALUE_INVALID", "颜色值超过 Temu 字数限制。");
@@ -84,9 +85,11 @@ export async function temuApparelPage({ href, kind, key, value }) {
       if (input.isConnected && onPage()) input.dispatchEvent(new Event("change", { bubbles: true }));
     };
     const wrapper = colorWrapper(input);
+    let committed = wanted;
     if (wrapper) {
       const picked = await pickColor();
       if (!picked.ok) return picked;
+      committed = picked.value;
     } else {
       if (input.readOnly) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
       input.focus();
@@ -94,14 +97,16 @@ export async function temuApparelPage({ href, kind, key, value }) {
       input.blur();
     }
     const deadline = Date.now() + 1900;
+    let sawCommit = false;
     do {
       if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
       const current = target();
       const field = colorField(current);
-      if (current && selectedColor(current) === wanted &&
+      if (current && selectedColor(current) === committed &&
           field?.getAttribute("aria-invalid") !== "true" && field?.validity?.valid !== false) {
-        return { ok: true, status: "filled" };
-      }
+        if (sawCommit) return { ok: true, status: "filled", value: committed };
+        sawCommit = true;
+      } else sawCommit = false;
       await new Promise(resolve => setTimeout(resolve, 80));
     } while (Date.now() < deadline);
     return fail("READBACK_MISMATCH", "Temu 未保留输入的服装颜色。");
@@ -123,43 +128,56 @@ export async function temuApparelPage({ href, kind, key, value }) {
       if (menus().length) return fail("MENU_STILL_OPEN", "页面已有下拉选项打开。");
       input.focus({ preventScroll: true });
       if (!related() && input.isConnected && onPage() && !blocked()) input.click();
-      if (!input.readOnly && input.isConnected && onPage() && !blocked()) setText();
 
-      let unavailable = false;
-      const until = Date.now() + 1700;
-      do {
-        if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
+      function exactChoice() {
         const menu = related();
-        const matches = [...menu?.querySelectorAll('[role="option"],[data-testid="beast-core-select-option"]') || []]
-          .filter(node => visible(node) && clean(node.textContent) === wanted);
-        if (matches.length === 1) {
-          const [option] = matches;
+        const options = [...menu?.querySelectorAll('[role="option"],[data-testid="beast-core-select-option"]') || []].filter(visible);
+        for (const label of new Set([wanted, ...(alternateLabel ? [alternateLabel] : [])])) {
+          const matches = options.filter(node => clean(node.textContent) === label);
+          if (!matches.length) continue;
+          if (matches.length !== 1) return false;
+          const option = matches[0];
           if (!option.matches('[aria-disabled="true"],[data-disabled="true"],[disabled],a[href]') && !option.querySelector('a[href]')) {
             option.click();
-            return { ok: true };
+            return { ok: true, value: label };
           }
+          return false;
         }
-        if (matches.length) {
-          unavailable = true;
-          break;
-        }
+        return null;
+      }
+      let pick;
+      if (alternateLabel) {
+        await new Promise(resolve => setTimeout(resolve, 180));
+        if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
+        pick = exactChoice();
+        if (pick) return pick;
+      }
+      if (pick !== false && !input.readOnly && input.isConnected && onPage() && !blocked()) setText();
+      const until = Date.now() + 1700;
+      while (pick !== false && Date.now() < until) {
+        if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
+        pick = exactChoice();
+        if (pick) return pick;
         await new Promise(resolve => setTimeout(resolve, 60));
-      } while (Date.now() < until);
+      }
 
       const menu = related();
       const current = colorField(target());
-      if (!unavailable && current && !current.readOnly && !current.disabled && current.placeholder === emptyColor &&
+      if (pick !== false && current && !current.readOnly && !current.disabled && current.placeholder === emptyColor &&
           clean(current.value) === wanted && onPage() && !blocked()) {
         current.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true }));
         current.blur();
         // Complete the click-away on the page without invoking another form control.
-        if (visible(menu) && onPage() && !blocked()) {
-          for (const type of ["mousedown", "mouseup", "click"]) {
-            if (!visible(menu)) break;
-            document.body.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
-          }
+        const neutral = [...root.querySelectorAll('[class*="STP_stepsItemTitle_"]')]
+          .filter(node => visible(node) && !node.childElementCount && clean(node.textContent) === "基本信息" &&
+            !node.closest('a,button,input,label,[role="button"],[role="link"],[tabindex]'));
+        const outside = neutral.length === 1 ? neutral[0] : document.body;
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+          if (!onPage() || blocked()) return fail("PAGE_CHANGED", "确认自定义颜色时页面已切换。");
+          const EventType = type.startsWith("pointer") ? globalThis.PointerEvent || MouseEvent : MouseEvent;
+          outside.dispatchEvent(new EventType(type, { bubbles: true, cancelable: true, composed: true, pointerType: "mouse" }));
         }
-        return { ok: true };
+        return { ok: true, value: wanted };
       }
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
       input.blur();
