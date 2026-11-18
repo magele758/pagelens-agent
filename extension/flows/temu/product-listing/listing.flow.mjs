@@ -4,6 +4,12 @@ export const version = 1;
 const keyOf = value => String(value ?? "").trim().normalize("NFKC").replace(/\s+/gu, "").toLowerCase();
 const hasValue = value => Array.isArray(value) ? value.length > 0 : value != null && (typeof value !== "string" || value.trim() !== "");
 const fatal = new Set(["PAGE_CHANGED", "MODAL_BLOCKED", "EDITOR_LOADING", "FLOW_BUSY", "MENU_STILL_OPEN"]);
+const sizesByAlias = new Map([
+  ["extra small", "XS"], ["x-small", "XS"], ["small", "S"], ["medium", "M"], ["large", "L"],
+  ["extra large", "XL"], ["x-large", "XL"], ["xx-large", "XXL"], ["2xl", "XXL"], ["2x", "XXL"],
+  ["xxx-large", "XXXL"], ["3xl", "XXXL"], ["3x", "XXXL"],
+].map(([name, value]) => [keyOf(name), keyOf(value)]));
+const sizeKey = value => sizesByAlias.get(keyOf(value)) || keyOf(value);
 
 function fieldMap(values) {
   return new Map(Object.entries(values || {}).map(([key, value]) => [keyOf(key), value]));
@@ -37,8 +43,9 @@ function matchingSku(field, rows, rowCount) {
   const labels = new Set((field.rowLabels || []).map(keyOf));
   if (rows.length === 1 && rowCount === 1 && (!Object.keys(rows[0].options || {}).length || !labels.size)) return rows[0];
   const matches = rows.filter(row => {
-    const values = Object.values(row.options || {}).map(keyOf);
-    return values.length > 0 && values.every(value => labels.has(value));
+    const values = Object.entries(row.options || {});
+    return values.length > 0 && values.every(([kind, value]) => labels.has(keyOf(value)) ||
+      optionAliases(kind).includes("尺码") && [...labels].some(label => sizeKey(label) === sizeKey(value)));
   });
   if (matches.length === 1) return matches[0];
   return null;
@@ -52,6 +59,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   let step = "validate";
   let draftUrl;
   let missing = [];
+  let verificationComplete = false;
   let lastState;
   const run = (tool, args) => {
     signal?.throwIfAborted();
@@ -66,7 +74,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     label, code: result?.code || "UNVERIFIED", message: result?.message || "没有收到可核对的结果。",
   });
   const result = (status, code) => ({
-    status, step, ...(code && { code }), ...(draftUrl && { draftUrl }), items, issues, missing,
+    status, step, ...(code && { code }), ...(draftUrl && { draftUrl }), items, issues, missing, verificationComplete,
     elapsedMs: Date.now() - start, fieldCount: lastState?.fields.length || 0,
   });
   const stop = (label, failure) => {
@@ -116,7 +124,11 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   async function applyApparel(apparel, groups) {
     const color = groups.find(group => optionAliases(group.name).includes("颜色"));
     let rows = apparel.rows;
-    for (const option of color?.options || []) {
+    const colors = color?.options || [];
+    if (colors.length > 20) {
+      record("服装颜色", { code: "COLOR_LIMIT", message: `商品资料有 ${colors.length} 个颜色，超过当前试填的 20 色上限。已保留原始规格，请精简该商品的颜色后再试填规格。` });
+    }
+    for (const option of colors.length <= 20 ? colors : []) {
       const exists = rows.some(row => keyOf(row.value) === keyOf(option.value));
       if (exists) continue;
       let blank = rows.find(row => !hasValue(row.value));
@@ -132,7 +144,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       }
       const applied = await run("temu_apparel", { kind: "set-color", key: blank.key, value: option.value });
       record(option.value, applied, blank.key);
-      if (!applied?.ok) break;
+      if (!applied?.ok) continue;
       const live = await run("temu_apparel", { kind: "inspect" });
       if (!live?.ok) { record("服装颜色", live); break; }
       rows = live.rows;
@@ -244,7 +256,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     }
   }
   async function uploadImages(role, paths, state, variant, targetKey) {
-    if (!paths?.length) return;
+    if (input.uploadImages === false || !paths?.length) return;
     const label = { main: "商品轮播图", detail: "详情图", "size-chart": "尺码图", variant: "规格图" }[role];
     const targets = state.uploads.filter(target => target.role === role &&
       (!targetKey || target.key === targetKey) && (!variant || keyOf(target.variant) === keyOf(variant)));
@@ -368,6 +380,9 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const afterVariants = await readEditor();
     if (!afterVariants?.ok) return stop("商品规格", afterVariants);
     for (const field of afterVariants.fields.filter(field => field.skuMember)) await applyField(field, explicitValue(field));
+    if (input.skus?.length && !input.price && input.skus.every(row => !row.price)) {
+      issues.push(asIssue("申报价格", { code: "SKU_PRICE_MISSING", message: "该商品资料没有卖家申报价。请使用实际的人民币申报价，来源平台售价不会作为申报价。" }));
+    }
     if (input.skus?.length && !afterVariants.fields.some(field => field.skuMember)) {
       issues.push(asIssue("SKU", { code: "SKU_NOT_RENDERED", message: "当前类目没有生成可填写的 SKU 行。" }));
     }
@@ -386,7 +401,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     }
     const detailUpload = beforeImages.uploads.some(target => target.role === "detail");
     if (detailUpload) await uploadImages("detail", input.detailImages, beforeImages);
-    if (input.sizeChartImagePath && !input.sizeChartTemplate) {
+    if (input.uploadImages !== false && input.sizeChartImagePath && !input.sizeChartTemplate) {
       if (apparelGalleries.length) {
         record("尺码表模板", { code: "SIZE_CHART_TEMPLATE_REQUIRED",
           message: "目录尺码图已保留。此类目需要选择现有的 Temu 尺码表模板。" });
@@ -412,18 +427,20 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
 
     const hasDirectDescription = beforeImages.fields.some(field =>
       /^(?:中文|英文)?商品(?:描述|详情描述)$/u.test(field.label) && field.value === input.description);
-    const decorImages = !detailUpload ? [...new Set(input.detailImages || [])].slice(0, 10) : [];
+    const decorImages = !detailUpload && input.uploadImages !== false ? [...new Set(input.detailImages || [])].slice(0, 10) : [];
     if (input.description && !hasDirectDescription || decorImages.length) {
       report("description", "填写商品详情图文");
       const description = await run("temu_description", { description: hasDirectDescription ? "" : input.description, paths: decorImages });
       record("详情图文", description);
       if (description?.imageIssue) record("详情图", description.imageIssue);
+      if (description?.detailIssue) record("详情文字", description.detailIssue);
     }
 
     report("verify", "复核试填表单");
     const final = await readEditor();
     if (!final?.ok) return stop("试填回读", final);
     missing = listMissing();
+    verificationComplete = !final.truncated;
     for (const upload of final.uploads || []) {
       if (upload.minimum && upload.markers < upload.minimum) {
         missing.push({ key: upload.key, label: `商品轮播图需至少 ${upload.minimum} 张，已显示 ${upload.markers} 张` });
