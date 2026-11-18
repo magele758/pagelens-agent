@@ -503,13 +503,17 @@ console.log(
 
 // Bilingual option text and a localized, nonempty control can describe different choices.
 {
-  const fixture = new JSDOM('<body><section>Material\n<div><div><div><div role="combobox" aria-haspopup="listbox" aria-controls="materials" aria-expanded="false"><button class="core-select-view">Vidrio</button></div></div></div></div></section><ul id="materials"><li role="option" aria-selected="true">Glass\nVidrio</li><li role="option">Metal</li></ul></body>',
+  const fixture = new JSDOM('<body><section>Material\n<div><div><div><div role="combobox" aria-haspopup="listbox" aria-controls="materials" aria-expanded="false"><button class="core-select-view">Vidrio</button></div></div></div></div></section><ul id="materials" hidden><li role="option" aria-selected="true">Glass\nVidrio</li><li role="option">Metal</li></ul></body>',
     { url: "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX", runScripts: "outside-only" });
   const win = fixture.window, doc = win.document;
   Object.defineProperty(win.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
-  win.HTMLElement.prototype.getClientRects = () => [{}];
+  win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
   const box = doc.querySelector('[role=combobox]');
-  box.querySelector("button").onclick = () => box.setAttribute("aria-expanded", String(box.getAttribute("aria-expanded") !== "true"));
+  box.querySelector("button").onclick = () => {
+    const open = box.getAttribute("aria-expanded") !== "true";
+    box.setAttribute("aria-expanded", String(open));
+    doc.querySelector("#materials").hidden = !open;
+  };
   let clicks = 0;
   for (const li of doc.querySelectorAll("li")) li.onclick = () => {
     clicks++;
@@ -536,5 +540,74 @@ console.log(
     dialog.querySelector("button").onclick = () => { doc.querySelector("#product-cascader-select-view").textContent="Kitchen - Racks"; dialog.remove(); };
   };
   assert.equal((await driver.category(1, { label:"Kitchen / Racks",search:"Racks" })).selected,true);
+  fixture.window.close();
+}
+
+// Seller updates can replace a single-select control while its portal fades out.
+// The next control must wait for that old portal, and a foreign menu stays untouched.
+{
+  const url = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
+  const fixture = new JSDOM('<body><ul id="foreign"><li role="option">Unrelated</li></ul></body>',
+    { url, runScripts: "outside-only" });
+  const win = fixture.window, doc = win.document;
+  Object.defineProperty(win.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
+  win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
+  const portals = [];
+  const opens = [];
+  const control = (name, choices, multiple) => {
+    const section = doc.createElement("section");
+    section.innerHTML = name + "\n<div><div><div></div></div></div>";
+    doc.body.append(section);
+    const selected = new Set();
+    const render = () => {
+      const holder = section.querySelector("div > div > div");
+      holder.innerHTML = '<div role="combobox" aria-haspopup="listbox" aria-expanded="false"><button class="core-select-view"></button></div>';
+      const box = holder.firstChild;
+      if (multiple) box.className = "core-select-multiple";
+      const portal = doc.createElement("ul");
+      portal.id = `attribute-popup-${portals.length}`;
+      portal.hidden = true;
+      portals.push(portal);
+      doc.body.append(portal);
+      box.setAttribute("aria-controls", portal.id);
+      const close = () => {
+        box.setAttribute("aria-expanded", "false");
+        win.setTimeout(() => { portal.hidden = true; }, 35);
+      };
+      for (const choice of choices) {
+        const item = doc.createElement("li");
+        item.setAttribute("role", "option");
+        item.textContent = choice;
+        item.setAttribute("aria-selected", String(selected.has(choice)));
+        item.onclick = () => {
+          selected.add(choice);
+          item.setAttribute("aria-selected", "true");
+          if (!multiple) { close(); render(); }
+        };
+        portal.append(item);
+      }
+      box.firstChild.onclick = () => {
+        if (box.getAttribute("aria-expanded") === "true") close();
+        else {
+          opens.push({ name, overlapping: portals.some(menu => !menu.hidden) });
+          box.setAttribute("aria-expanded", "true");
+          portal.hidden = false;
+        }
+      };
+    };
+    render();
+  };
+  control("Function", ["Durable", "Reusable"], false);
+  control("Material", ["Glass", "Plastic"], true);
+  const plan = { Function: ["Reusable"], Material: ["Glass", "Plastic"] };
+  const catalog = await win.eval("(async()=>{" + attributeCode(url, plan) + "})()");
+  assert.deepEqual(opens, [
+    { name: "Function", overlapping: false },
+    { name: "Function", overlapping: false },
+    { name: "Material", overlapping: false },
+  ]);
+  assert.ok(portals.every(menu => menu.hidden), "the final delayed close must finish before returning");
+  assert.equal(doc.querySelector("#foreign").hidden, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(catalog.map(({ name, selected }) => [name, selected]))), Object.entries(plan));
   fixture.window.close();
 }
