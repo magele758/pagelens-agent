@@ -20,7 +20,16 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
   const colorOption = '[class*="colour-spec-select_selectItem__"]';
   const triggerSelector = '[class*="ST_head_"],[data-testid="beast-core-popover-trigger-wrapper"]';
   const colorWrapper = input => input?.closest(colorComponent) || input?.closest('[class*="ST_outerWrapper_"]');
-  const visiblePopup = node => visible(node) && (getComputedStyle(node).opacity || "1") !== "0";
+  const visiblePopup = node => {
+    if (!visible(node)) return false;
+    const host = node.closest('[data-testid="beast-core-portal"]') || node;
+    return [node, host].every(element => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return (style.opacity || "1") !== "0" && style.pointerEvents !== "none" &&
+        (!rect.width || !rect.height || rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth);
+    });
+  };
   const standardMenus = () => {
     const listboxes = [...document.querySelectorAll('[role="listbox"]')].filter(visiblePopup);
     const fallbacks = [...document.querySelectorAll('[class*="ST_dropdown_"]')].filter(menu => visiblePopup(menu) &&
@@ -190,7 +199,9 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
         menu = await waitFor(related, 1250);
         if (!menu && menus().length) return fail("MENU_STILL_OPEN", "无法确认已打开的颜色菜单属于当前行。");
       } else {
-        if (menus().length || nativePopover && standardMenus().length) return fail("MENU_STILL_OPEN", "页面已有下拉选项打开。");
+        if (!await waitFor(() => !menus().length && (!nativePopover || !standardMenus().length), 600)) {
+          return fail("MENU_STILL_OPEN", "页面已有下拉选项打开。");
+        }
         input.focus({ preventScroll: true });
         menu = await waitFor(related, 180);
         if (!menu && !menus().length && onPage() && !blocked()) {
@@ -218,7 +229,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
           const option = matches[0];
           if (!option.matches('[aria-disabled="true"],[data-disabled="true"],[disabled],a[href]') && !option.querySelector('a[href]')) {
             option.click();
-            return { ok: true, value: label };
+            return { ok: true, value: label, selectedMenu: menu };
           }
           return false;
         }
@@ -254,10 +265,29 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
         return null;
       }
 
+      async function finish(pick) {
+        if (!pick.ok) return pick;
+        const portal = pick.selectedMenu?.closest('[data-testid="beast-core-portal"]');
+        const sameMenu = () => menus().find(mode => mode === pick.selectedMenu || portal?.contains(mode));
+        if (!await waitFor(() => !sameMenu(), 420) && menus().length === 1) {
+          const label = [...root.querySelectorAll('th,[role="columnheader"]')].filter(element =>
+            visible(element) && /^\*?\s*色值$/u.test(clean(element.textContent)) && !element.querySelector('input,button,a'));
+          const outside = label.length === 1 && label[0];
+          if (outside) for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+            if (!onPage() || blocked() || !sameMenu() || menus().length !== 1) break;
+            const EventType = type.startsWith("pointer") ? globalThis.PointerEvent || MouseEvent : MouseEvent;
+            outside.dispatchEvent(new EventType(type, { bubbles: true, cancelable: true, composed: true, pointerType: "mouse" }));
+          }
+        }
+        if (!await waitFor(() => !sameMenu(), 650)) {
+          return fail("MENU_STILL_OPEN", "已选色值，当前颜色菜单尚未收起。");
+        }
+        return { ok: true, value: pick.value };
+      }
       let pick = alternateLabel ? await search(alternateLabel, 1000) : null;
-      if (pick) return pick;
+      if (pick) return finish(pick);
       if (pick !== false) pick = await search(value, 1450);
-      if (pick) return pick;
+      if (pick) return finish(pick);
 
       menu = related();
       const current = colorField(target());
