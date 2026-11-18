@@ -385,8 +385,13 @@ const { result, artifacts } = await pl.call("list_tabs");
 | `run_agent_task {prompt, capsule?, tabId?, maxSteps?, model?}` | agent:delegate | 把高层任务交给扩展内 Agent 在后台跑，立即返回 `taskId` | 见 §15；胶囊外副作用 `NEEDS_WIDER_AUTHORIZATION`，不可逆动作 `CONFIRMATION_REQUIRED` + `pendingId` |
 | `agent_task_status {taskId, sinceStep?}` | agent:delegate | 任务状态、步骤、最终回答 | `sinceStep` 做增量轮询 |
 | `agent_task_cancel {taskId}` | agent:delegate | 取消任务 | 已结束的返回 `alreadyFinished:true` |
+| `list_flows {}` | page:read | 列出 token 站点范围内的确定性流程 | 外部 Agent token 会话 |
+| `run_flow {flowId, tabId, input}` | page:act + page:read | 按参数执行内置流程并回读校验 | 提供 `imagePath` 时另需 upload |
+| `flow_page_state {tabId, category}` | page:read | 读取 Shopee 上架页的结构化表单状态 | 使用内置的固定读取函数 |
 | `job_status` / `audit_log` / `list_tools` | — | 元工具 | |
 | `events_subscribe` / `events_unsubscribe` / `events_poll` / `tab_claim` / `tab_release` | —（仅网关会话） | 事件订阅、标签租约 | 见 §0.8 |
+
+确定性流程使用已准备好的 JSON 参数，沿用各页面工具的授权。运行时绑定原标签和完整 URL。使用 `async:true` 时，`job.progress` 提供流程 ID、标签、步骤和状态，`job_status` 返回最终回执。流程回执出现 `needs-review` 时可检查步骤和说明。上传本机图片或新建店铺尺码表会按 token 的不可逆动作设置进入待批准队列。收到 `CONFIRMATION_REQUIRED` 时，在侧栏处理后用新请求 ID 和相同参数运行，流程会先回读已填内容。尺码表参数由调用方准备，固定流程仅运行当前标签上的表单步骤。
 
 ## 11. 参考 recipe：把 Doocs 简报写入微信公众号编辑器
 
