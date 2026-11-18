@@ -15,10 +15,13 @@ export async function browserFixture(name) {
   const dom = new JSDOM(await readFile(new URL(graph ? 'graph.html' : 'index.html', sidepanel), 'utf8'));
   const { document } = dom.window;
   for (const node of document.querySelectorAll('script, link')) node.remove();
-  const styles = graph ? ['graph'] : ['styles', 'themes', 'sidechat', 'settings'];
+  const styles = graph ? ['graph.css'] : [
+    'styles.css', 'themes.css', 'sidechat.css', 'settings.css', 'workflow-catalog.css',
+    '../flows/shopee/marketing-panel.css',
+  ];
   for (const file of styles) {
     const style = document.createElement('style');
-    style.textContent = await readFile(new URL(file + '.css', sidepanel), 'utf8');
+    style.textContent = await readFile(new URL(file, sidepanel), 'utf8');
     document.head.append(style);
   }
   const entry = graph ? 'graph.js' : 'app.js';

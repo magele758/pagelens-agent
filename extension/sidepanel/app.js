@@ -50,9 +50,12 @@ import {
   slash,
 } from "./slash-menu.js";
 import { state } from "./state.js";
-import { refreshTab } from "./tab-context.js";
+import { pickTargetTab, refreshTab } from "./tab-context.js";
 import { applyUiTheme, bindThemeEditor } from "./theme.js";
 import { delegatePanel, trustPanel } from "./trust-runtime.js";
+import { bindWorkflowCatalog } from "./workflow-catalog.js";
+import { bindShopeeMarketingPanel } from "../flows/shopee/marketing-panel.js";
+import { skillCommandText } from "../lib/slash.js";
 import { ACTIVITY_KEY, clearActivity, readActivity } from "../lib/agent/inbox-activity.js";
 import { isResumableRun } from "../lib/agent/context.js";
 import { DELEGATE_STORAGE_KEY } from "../lib/agent/delegate.js";
@@ -161,6 +164,28 @@ function wire() {
     downloadText(`pagelens-debug-${Date.now()}.json`, json, "application/json");
   });
   bindComposer();
+  let openCatalog;
+  const onBack = () => openCatalog();
+  const openMarketing = bindShopeeMarketingPanel({
+    getTargetTab: pickTargetTab,
+    getSettings: () => state.settings,
+    isAgentBusy: () => state.busy,
+    downloadText,
+    onBack,
+  });
+  const openTiktokDraft = ({ id, skillName }) => {
+    if (!skillsOn()) throw new Error("请先在设置中启用 Skill。");
+    const input = $("input");
+    if (!input) return false;
+    setView("chat");
+    const prefix = skillCommandText({ id, name: skillName });
+    const draft = input.value.trimStart();
+    if (!draft.startsWith(prefix)) input.value = `${prefix} ${draft}`;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.focus();
+    return true;
+  };
+  openCatalog = bindWorkflowCatalog({ openMarketing, openTiktokDraft });
   try {
   on("btn-settings", "click", () => {
     if (state.view === "settings") {
