@@ -86,8 +86,8 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
         case "select-new":
           assert.equal(baseline, selected.length);
           assert.deepEqual(expected.map(card => card.filename), filenames);
-          selected = [...expected];
-          result = { ok: true, media: selected };
+          selected.push(...expected);
+          result = { ok: true, media: expected };
           break;
         case "confirm":
           assert.equal(selected.length, baseline + added);

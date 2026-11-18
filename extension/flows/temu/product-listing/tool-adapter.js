@@ -152,43 +152,46 @@ export function createTemuListingToolCaller({
     if (!picker.ok) return picker;
     let confirmed;
     try {
-      const previous = picker.knownMedia || [];
       if (Number.isInteger(picker.available) && paths.length > picker.available) {
         return failure("UPLOAD_CAPACITY", `素材中心还可选择 ${picker.available} 张图片。`);
       }
-      const known = new Map(paths.flatMap(path => {
-        const accepted = verifiedMaterials.get(path);
-        return accepted && previous.some(card => card.filename === accepted.filename && card.identity === accepted.identity &&
-          card.src === accepted.src && card.libraryFilename === accepted.libraryFilename)
-          ? [[path, accepted]] : [];
-      }));
       let snapshot = picker;
-      let automaticallySelected = 0;
+      const receipts = [];
       for (const [index, path] of paths.entries()) {
-        if (known.has(path)) continue;
-        const selectedFiles = await selectFiles(snapshot.selector, [path]);
-        if (!selectedFiles.ok) return selectedFiles;
-        const settled = await media("settle-upload", { name: filenames[index], previous: snapshot.knownMedia || [] });
-        if (!settled.ok) return settled;
-        if (!settled.card) return failure("UPLOAD_UNVERIFIED", "未能核对新上传的素材。");
-        known.set(path, settled.card);
+        const filename = filenames[index];
+        const localFilename = path.split(/[/\\]/u).at(-1);
+        const baseline = picker.count + index;
+        const pick = card => media("select-new", { filenames: [filename], baseline, expected: [card] });
+        let card = verifiedMaterials.get(path);
+        let picked = card && await pick(card);
+        if (picked && !picked.ok && picked.code !== "UPLOAD_PENDING") return picked;
+        if (!picked?.ok) {
+          const selectedFiles = await selectFiles(snapshot.selector, [path]);
+          if (!selectedFiles.ok) return selectedFiles;
+          const settled = await media("settle-upload", { name: filename, previous: snapshot.knownMedia || [],
+            baseline, localFilename });
+          if (!settled.ok) return settled;
+          card = settled.card;
+          if (!card) return failure("UPLOAD_UNVERIFIED", "未能核对新上传的素材。");
+          snapshot = await media("inspect");
+          if (!snapshot.ok) return snapshot;
+          if (snapshot.count === baseline) picked = await pick(card);
+          else if (snapshot.count === baseline + 1) picked = { ok: true };
+          else return failure("UPLOAD_UNVERIFIED", "上传后素材选择顺序已变化。");
+          if (!picked.ok) return picked;
+        }
+        if (receipts.some(previous => previous.identity === card.identity)) {
+          return failure("UPLOAD_UNVERIFIED", "多个槽位匹配到同一张素材，请核对目录里的图片。");
+        }
+        receipts.push(card);
         snapshot = await media("inspect");
         if (!snapshot.ok) return snapshot;
-        const extra = snapshot.count - picker.count - automaticallySelected;
-        if (extra === 1 && !picker.ordered) automaticallySelected++;
-        else if (extra !== 0) return failure("UPLOAD_UNVERIFIED", "上传后素材选择顺序已变化。");
+        if (snapshot.count !== baseline + 1) return failure("UPLOAD_UNVERIFIED", "素材没有进入预期的选择槽位。");
       }
-      const expected = paths.map(path => known.get(path));
-      if (automaticallySelected > 0 && automaticallySelected !== paths.length) {
-        return failure("UPLOAD_UNVERIFIED", "只有部分图片被 Temu 自动选中。");
-      }
-      const picked = automaticallySelected === paths.length ? { ok: true, media: expected }
-        : await media("select-new", { baseline: picker.count, previous, expected });
-      if (!picked.ok) return picked;
       confirmed = await media("confirm", { baseline: picker.count, added: paths.length });
       if (!confirmed.ok) return confirmed;
-      for (const path of paths) verifiedMaterials.set(path, known.get(path));
-      return { ...confirmed, media: picked.media };
+      for (const [index, path] of paths.entries()) verifiedMaterials.set(path, receipts[index]);
+      return { ...confirmed, media: receipts };
     } finally {
       if (!confirmed?.ok) await media("cancel").catch(() => {});
     }
@@ -298,7 +301,7 @@ export function createTemuListingToolCaller({
           case "temu_spec_values":
             return await runInPage(temuSpecPage, { href, parentIndex: args.parentIndex, labels: args.labels, values: args.values });
           case "temu_stock":
-            return await runInPage(temuStockPage, { href, kind: args.kind, key: args.key, value: args.value });
+            return await runInPage(temuStockPage, { href, kind: args.kind, key: args.key, value: args.value, rows: args.rows });
           case "temu_apparel":
             if (!["inspect", "add-color", "set-color", "set-sizes", "select-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
               return failure("ACTION_UNSUPPORTED", "此操作不属于服装试填。");

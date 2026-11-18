@@ -422,12 +422,22 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     if (!skuEditor?.ok) return stop("SKU 联动字段", skuEditor);
     for (const field of skuEditor.fields.filter(field => field.skuMember)) await applyField(field, explicitValue(field));
     const sources = input.skus?.length ? input.skus : [input];
+    const stockPlan = [];
     for (const [source, key] of matchedSkuGroups(skuEditor, sources, colorLabels)) {
       const quantity = source.quantity ?? input.quantity;
       if (!key || !hasValue(quantity) || skuEditor.fields.some(field => field.skuGroup === key && stockMembers.has(field.skuMember))) continue;
-      const outcome = await run("temu_stock", { kind: "write", key, value: quantity });
-      record(`${source.sellerSku || "SKU"} 库存`, outcome, key);
-      if (outcome?.ok) popupStock.add(key);
+      const labels = skuEditor.skuRows?.find(row => row.id === key)?.labels ||
+        skuEditor.fields.find(field => field.skuGroup === key)?.rowLabels || [];
+      stockPlan.push({ key, labels, value: quantity, label: `${source.sellerSku || "SKU"} 库存` });
+    }
+    if (stockPlan.length) {
+      const [{ key, value }] = stockPlan;
+      const outcome = stockPlan.length === 1 ? await run("temu_stock", { kind: "write", key, value })
+        : await run("temu_stock", { kind: "write-batch", key, rows: stockPlan.map(({ key, labels, value }) => ({ key, labels, value })) });
+      for (const entry of stockPlan) {
+        record(entry.label, outcome, entry.key);
+        if (outcome?.ok) popupStock.add(entry.key);
+      }
     }
     if (input.skus?.length && !input.price && input.skus.every(row => !row.price)) {
       issues.push(asIssue("申报价格", { code: "SKU_PRICE_MISSING", message: "该商品资料没有卖家申报价。请使用实际的人民币申报价，来源平台售价不会作为申报价。" }));

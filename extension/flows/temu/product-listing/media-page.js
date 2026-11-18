@@ -1,5 +1,5 @@
 /** Read and operate the material picker only while the new Temu draft remains open. */
-export async function temuMediaPage({ href, kind, key, filenames = [], previous = [], expected = [], name, baseline, added, trustedHover = false }) {
+export async function temuMediaPage({ href, kind, key, filenames = [], previous = [], expected = [], name, localFilename, baseline, added, trustedHover = false }) {
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
   const clean = value => String(value ?? "").replace(/\s+/gu, " ").trim();
@@ -161,14 +161,37 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     return true;
   }
 
+  function materialFilter(dialog, placeholder = "请输入素材ID") {
+    return unique([...dialog.querySelectorAll("input[placeholder]")].filter(input => input.placeholder === placeholder &&
+      visible(input) && !input.disabled && !input.readOnly));
+  }
+
+  function clearMaterialFilter(dialog, input) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "");
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    const current = materialFilter(dialog) || materialFilter(dialog, "请输入素材名称");
+    if (!current || current.value) return;
+    current.dispatchEvent(new Event("change", { bubbles: true }));
+    const enter = { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true };
+    current.dispatchEvent(new KeyboardEvent("keydown", enter));
+    current.dispatchEvent(new KeyboardEvent("keyup", enter));
+  }
+
   async function settleUpload() {
-    if (!name || !filenames.includes(name)) return fail("UPLOAD_UNVERIFIED", "上传文件与素材计划不一致。");
+    if (!name || !filenames.includes(name) || localFilename && (
+      !/\.(?:jpe?g|png|webp)$/iu.test(localFilename) || localFilename.replace(/\.(?:jpe?g|png|webp)$/iu, "") !== name)) {
+      return fail("UPLOAD_UNVERIFIED", "上传文件与素材计划不一致。");
+    }
     const existing = new Set(previous.map(card => card.identity));
+    const initialCount = Number.isInteger(baseline) ? baseline : selected(dialog)?.count;
+    const initialLibraryCount = materialLibraryCards(dialog).length;
     let cropped = false;
     let savedAt = 0;
     let refreshed = false;
     let closingList;
     let lastCard;
+    let duplicateViewed = false;
+    let duplicateCard;
     const outcome = await waitFor(() => {
       if (picker() !== dialog) return fail("MODAL_BLOCKED", "处理上传时素材中心已切换。");
       const alert = [...document.querySelectorAll('[role="alert"],[data-testid*="toast" i],[class*="Toast_content"]')]
@@ -179,8 +202,23 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       // Temu may place the crop dialog in a portal or nest it within the picker.
       const crop = withTitle("裁剪") || withTitle("图片裁剪");
       const upload = withTitle("本地上传") || withTitle("上传图片");
-      if (extra.some(node => ![crop, upload].some(owned => owned && (node === owned || node.contains(owned))))) {
+      const duplicate = withTitle("素材中心已有如下素材，无需重复上传");
+      if (extra.some(node => ![crop, upload, duplicate].some(owned => owned && (node === owned || node.contains(owned))))) {
         return fail("MODAL_BLOCKED", "上传时出现了无法识别的 Temu 弹窗。");
+      }
+      if (duplicate && duplicate !== dialog && duplicate !== known && !duplicateViewed) {
+        const shownNames = [...duplicate.querySelectorAll('span,div,p,[title]')].filter(node => visible(node) && !node.childElementCount)
+          .map(node => clean(node.getAttribute("title") || node.textContent)).filter(filename => /\.(?:jpe?g|png|webp)$/iu.test(filename));
+        const filename = unique(shownNames);
+        const sameFile = filename && (localFilename ? filename === localFilename : filename.replace(/\.(?:jpe?g|png|webp)$/iu, "") === name);
+        const view = enabledButton(duplicate, "在列表中查看");
+        if (!sameFile || !view || !Number.isInteger(initialCount) || selected(dialog)?.count !== initialCount) {
+          return fail("UPLOAD_UNVERIFIED", "Temu 的重复素材提示与本次上传的文件不一致。");
+        }
+        duplicateViewed = true;
+        lastCard = null;
+        view.click();
+        return null;
       }
       if (crop && crop !== dialog && crop !== known && !cropped) {
         const confirm = enabledButton(crop, "确认裁剪");
@@ -209,6 +247,26 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
         lastCard = null;
         return null;
       }
+      if (duplicateViewed) {
+        const filter = materialFilter(dialog);
+        const count = selected(dialog)?.count;
+        if (count > initialCount + 1) return fail("UPLOAD_UNVERIFIED", "重复素材导致选择数变化，无法核对图片槽位。");
+        if (count !== initialCount + 1) return null;
+        if (duplicateCard) {
+          const clearedFilter = filter || materialFilter(dialog, "请输入素材名称");
+          if (!clearedFilter || clearedFilter.value || initialLibraryCount > 1 && materialLibraryCards(dialog).length < 2) return null;
+          return { ok: true, duplicate: true, card: duplicateCard };
+        }
+        const id = clean(filter?.value);
+        if (!/^\d{1,25}$/u.test(id) || materialLibraryCards(dialog).length !== 1) return null;
+        const card = unique(mediaCards(dialog, true));
+        if (card && lastCard?.materialId === id && lastCard.identity === card.identity && lastCard.src === card.src) {
+          duplicateCard = receipt({ ...card, filename: name });
+          clearMaterialFilter(dialog, filter);
+        }
+        lastCard = card && { ...card, materialId: id };
+        return null;
+      }
       const matches = mediaCards(dialog).filter(card => card.filename === name && !existing.has(card.identity) &&
         (card.libraryFilename === name || cropped && savedAt));
       if (matches.length > 1) return fail("UPLOAD_UNVERIFIED", "出现多张同名的新素材，无法核对这次上传的文件。");
@@ -226,18 +284,25 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       }
       return null;
     }, 18000);
-    return outcome || fail("UPLOAD_PENDING", closingList && isActiveUploadList(closingList) ?
-      "素材中心的上传列表尚未关闭。" : "尚未核对到本次文件在素材中心生成的新图片。");
+    return outcome || fail("UPLOAD_PENDING", duplicateViewed ? "尚未核对重复素材的 ID、选中结果或搜索恢复。" :
+      closingList && isActiveUploadList(closingList) ? "素材中心的上传列表尚未关闭。" : "尚未核对到本次文件在素材中心生成的新图片。");
   }
 
-  function mediaCards(dialog) {
+  function materialLibraryCards(dialog) {
+    const selector = 'div[class*="index-module_itemContainer__"] > div[class*="index-module_cardContainer__"]';
+    return [...dialog.querySelectorAll(selector)].filter(visible);
+  }
+
+  function mediaCards(dialog, allNames = false) {
     if (!filenames.length) return [];
     const names = new Set(filenames);
     const found = new Map();
-    function matchingNames(text) {
+    function matchingNames(text, approvedAliases = false) {
       const libraryFilename = clean(text).replace(/\.(?:jpe?g|png|webp)$/iu, "");
       const sourceOfCrop = libraryFilename.replace(/-\d+$/u, "");
-      const candidates = [...new Set([libraryFilename, sourceOfCrop])].filter(filename => names.has(filename));
+      const aliases = approvedAliases ? expected.filter(card => card.libraryFilename === libraryFilename).map(card => card.filename) : [];
+      const candidates = allNames ? libraryFilename ? [libraryFilename] : [] :
+        [...new Set([libraryFilename, sourceOfCrop, ...aliases])].filter(filename => names.has(filename));
       return { libraryFilename, candidates };
     }
     function record({ libraryFilename, candidates }, image, card) {
@@ -249,14 +314,13 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       }
     }
 
-    const cardTemplate = 'div[class*="index-module_itemContainer__"] > div[class*="index-module_cardContainer__"]';
-    const libraryCards = [...dialog.querySelectorAll(cardTemplate)].filter(visible);
+    const libraryCards = materialLibraryCards(dialog);
     if (libraryCards.length) {
       for (const card of libraryCards) {
         const holder = unique([...card.querySelectorAll(':scope > div[class*="index-module_itemContent__"] > div[class*="index-module_materialName__"]')].filter(visible));
         const label = holder && unique([...holder.querySelectorAll('div[data-testid="beast-core-ellipsis"] > div[class*="elli_outerWrapper_"]')]);
         if (!label) continue;
-        const matched = matchingNames(label.getAttribute("title") || holder.getAttribute("title") || label.innerText || label.textContent);
+        const matched = matchingNames(label.getAttribute("title") || holder.getAttribute("title") || label.innerText || label.textContent, true);
         if (!matched.candidates.length) continue;
         const image = unique([...card.querySelectorAll(':scope > div[class*="index-module_cover__"] > div[class*="index-module_imageContainer__"] > img[src]')]
           .filter(node => visible(node) && /^https:\/\//iu.test(node.currentSrc || node.src)));
@@ -264,6 +328,7 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       }
       return [...found.values()];
     }
+    if (allNames) return [];
 
     for (const label of dialog.querySelectorAll('span,div,p,[title],img[alt]')) {
       if (!visible(label)) continue;

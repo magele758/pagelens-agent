@@ -127,6 +127,59 @@ function fixture(html) {
   dom.window.close();
 }
 
+{
+  function libraryTile(name, id) {
+    return `<div class="index-module_itemContainer__test" id="material-${id}"><div class="index-module_cardContainer__test">
+      <div class="index-module_cover__test"><div class="index-module_imageContainer__test"><img width="144" src="https://img.kwcdn.com/product/fancy/${id}.jpg?imageMogr2/thumbnail/144x"></div></div>
+      <div class="index-module_itemContent__test"><div class="index-module_materialName__test"><div data-testid="beast-core-ellipsis"><div class="elli_outerWrapper_test">${name}</div></div></div></div>
+    </div></div>`;
+  }
+  const { dom, doc, run } = fixture(`
+    <div class="MDL_inner_picker"><h2>素材中心</h2><div class="UPD_outerWrapper_test"><input type="file"></div>
+      <input id="search" placeholder="请输入素材名称"><span id="count">已选 0 个，可选 10 个</span>
+      ${libraryTile("original-shared", "123")}${libraryTile("another", "234")}
+    </div>
+    <div class="MDL_inner_duplicate"><h2>素材中心已有如下素材，无需重复上传</h2>
+      <p id="duplicate-filename">other-image.jpg</p><button>在列表中查看</button><button>关闭</button>
+    </div>`);
+  const duplicate = doc.querySelector(".MDL_inner_duplicate");
+  const filter = doc.querySelector("#search");
+  const count = doc.querySelector("#count");
+  const distractor = doc.querySelector("#material-234");
+  const events = [];
+  duplicate.querySelector("button").onclick = () => {
+    events.push("list");
+    duplicate.hidden = true;
+    filter.placeholder = "请输入素材ID";
+    filter.value = "123";
+    distractor.hidden = true;
+    count.textContent = "已选 1 个，可选 9 个";
+  };
+  filter.addEventListener("keydown", event => {
+    if (event.key === "Enter" && filter.value === "") {
+      events.push("clear-id");
+      distractor.hidden = false;
+    }
+  });
+  const media = args => run(temuMediaPage, { key: "productSkcList[1].carouselImgsI18n.common", filenames: ["renamed-copy"], ...args });
+  const settle = { kind: "settle-upload", name: "renamed-copy", localFilename: "renamed-copy.jpg", baseline: 0 };
+  assert.equal((await media(settle)).code, "UPLOAD_UNVERIFIED");
+  assert.deepEqual(events, []);
+  doc.querySelector("#duplicate-filename").textContent = "renamed-copy.jpg";
+  const result = await media(settle);
+  assert.equal(result.ok, true);
+  assert.equal(result.duplicate, true);
+  assert.equal(result.card.filename, "renamed-copy");
+  assert.equal(result.card.libraryFilename, "original-shared");
+  assert.equal(result.card.src, "https://img.kwcdn.com/product/fancy/123.jpg");
+  assert.equal(distractor.hidden, false);
+  assert.deepEqual(events, ["list", "clear-id"]);
+  const snapshot = await media({ kind: "inspect", expected: [result.card] });
+  assert.equal(snapshot.count, 1);
+  assert.equal(snapshot.knownMedia[0].identity, result.card.identity);
+  dom.window.close();
+}
+
 for (const menuLocation of ["synthetic", "same-mask", "body-portal"]) {
   const trustedHover = menuLocation !== "synthetic";
   const { dom, doc, run } = fixture(`
