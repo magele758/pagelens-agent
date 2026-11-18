@@ -545,9 +545,18 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
   assert.equal(opened.some((url) => url.includes("/product/create")), false);
   assert.equal(JSON.parse(await fs.readFile(path.join(reuseDir, "receipt.json"), "utf8")).startedTab, 4);
 
-  // Same retained form, partial content present: do not upload its files a second time.
+  // Resume the same retained form. Save only after the category and sales readback match.
   const createUrl = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
-  let clicks = 0, showSaved = false;
+  let clicks = 0, showSaved = false, category = "", fieldsPersist = false, mediaPersist = true;
+  const commerce = {
+    brand: "无品牌",
+    axes: ["Modelo"],
+    options: [["M"]],
+    skus: [{ label: "M", stock: 5, priceMXN: 100 }],
+    packagedWeightGrams: 500,
+    dimensionsInCm: true,
+    packageCm: { length: 10, width: 8, height: 7 },
+  };
   draft.setDraftBridgeForTests(async (tool, args) => {
     if (tool === "open_tab") {
       assert.ok(args.url.includes("/product/manage") || args.url.includes("/edit-draft/556"));
@@ -559,19 +568,31 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
         ? { ids: ["556"], matches: [{ id: "556", text: "Molde" }] } : { ids: [], matches: [] } };
       if (args.code.includes("另存为草稿")) { clicks++; return { ok: true, result: "" }; }
       assert.equal(args.tabId, 4);
-      return { ok: true, result: { url: createUrl, ...listing, gallery: 1, detailImages: 0, category: "" } };
+      if (args.code.includes("return await (function sellerRead")) return { ok: true, result: commerce };
+      const lostMedia = !mediaPersist && args.code.includes("let seen=0");
+      return { ok: true, result: { url: createUrl, ...listing, gallery: lostMedia ? 0 : 1, detailImages: 0, category,
+        salesAndShipping: fieldsPersist ? commerce : { ...commerce, skus: [] } } };
     }
     return { ok: true };
   });
+  await assert.rejects(draft.save(reuseDir), /Category did not match before saving/);
+  category = "Cocina";
+  await assert.rejects(draft.save(reuseDir), /Commercial fields differ before saving:.*SKU count/);
+  fieldsPersist = true;
+  mediaPersist = false;
+  await assert.rejects(draft.save(reuseDir), /Seller readback differs/);
+  assert.equal(clicks, 0);
+  mediaPersist = true;
   await assert.rejects(draft.save(reuseDir), /draft ID not yet confirmed/);
   const staged = JSON.parse(await fs.readFile(path.join(reuseDir, "receipt.json"), "utf8"));
-  assert.deepEqual([staged.startedTab, staged.partial, staged.verified, clicks], [4, true, false, 1]);
+  assert.deepEqual([staged.startedTab, staged.saving, staged.verified, clicks], [4, true, false, 1]);
   showSaved = true;
   await assert.rejects(draft.save(reuseDir), /stop at persisted draft/);
   assert.equal(clicks, 1);
   assert.equal(JSON.parse(await fs.readFile(path.join(recordDir, reuseProduct + ".json"), "utf8")).id, "556");
 
   // A failed variant commit with no verifiable category must leave the editor open without submitting.
+  category = "";
   const firstProduct = "1729600000000000004";
   const firstDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagelens-mx-checkpoint-"));
   await fs.writeFile(path.join(firstDir, "source.json"), JSON.stringify({
