@@ -51,7 +51,7 @@ function matchingSku(field, rows, rowCount) {
   return null;
 }
 
-export async function replayTemuListing({ tabId, input, call, onStep, signal, suggestFields } = {}) {
+export async function replayTemuListing({ tabId, input, call, onStep, signal, suggestFields, shouldSuggestField } = {}) {
   const start = Date.now();
   const items = [];
   const issues = [];
@@ -353,7 +353,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     if (typeof suggestFields === "function") {
       report("suggest", "补齐当前类目字段");
       const candidates = afterBasic.fields.filter(field => field.required && !field.skuMember &&
-        !attempted.has(field.key) && !hasValue(field.value)).slice(0, 30);
+        !attempted.has(field.key) && !hasValue(field.value) && (shouldSuggestField?.(field) ?? true)).slice(0, 30);
       const fields = [];
       for (const field of candidates) {
         if (field.locator && !field.options?.length) {

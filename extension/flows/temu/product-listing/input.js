@@ -278,12 +278,22 @@ function productValue(product, field, explicit, source) {
   return source.get(label);
 }
 
+const fieldEvidence = values => new Map(Object.entries(visibleAttrs(values)).map(([name, value]) => [compare(name), value]));
+const canInfer = field => !TECHNICAL_LABEL.test(field.label) && !NUMBER_KIND.test(field.kind) &&
+  (COPY_LABEL.test(field.label) || STYLE_LABEL.test(field.label));
+
+export function createTemuSuggestionFilter(product, { useModel = true } = {}) {
+  const explicit = fieldEvidence(product.listingAttributes);
+  const source = fieldEvidence(product.attributes);
+  return field => productValue(product, field, explicit, source) != null || useModel && canInfer(field);
+}
+
 /** Local values are resolved first. The optional model receives only descriptive evidence and actual choices. */
 export async function suggestTemuFields(product, schema, { settings, signal, useModel = true, request = completeChat } = {}) {
   signal?.throwIfAborted();
   const fields = fieldsFrom(schema);
-  const explicit = new Map(Object.entries(visibleAttrs(product.listingAttributes)).map(([name, value]) => [compare(name), value]));
-  const source = new Map(Object.entries(visibleAttrs(product.attributes)).map(([name, value]) => [compare(name), value]));
+  const explicit = fieldEvidence(product.listingAttributes);
+  const source = fieldEvidence(product.attributes);
   const values = new Map();
   const candidates = [];
   const rejected = [];
@@ -292,9 +302,9 @@ export async function suggestTemuFields(product, schema, { settings, signal, use
     const direct = fieldValue(field, given);
     if (direct !== undefined) values.set(field.key, direct);
     else if (!fieldValue(field, field.value) && explicit.has(compare(field.label))) rejected.push({ key: field.key, label: field.label });
-    else if (!fieldValue(field, field.value) && field.required && !TECHNICAL_LABEL.test(field.label) &&
-        (COPY_LABEL.test(field.label) || STYLE_LABEL.test(field.label) && field.options.length) &&
-        (!SELECT_KIND.test(field.kind) || field.options.length) && !NUMBER_KIND.test(field.kind)) candidates.push(field);
+    else if (!fieldValue(field, field.value) && field.required && canInfer(field) &&
+        (COPY_LABEL.test(field.label) || field.options.length) &&
+        (!SELECT_KIND.test(field.kind) || field.options.length)) candidates.push(field);
   }
   const result = modelStatus => ({ values: Object.fromEntries(values),
     missing: fields.filter(field => field.required && !values.has(field.key) && !fieldValue(field, field.value))
