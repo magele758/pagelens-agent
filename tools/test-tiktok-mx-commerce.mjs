@@ -424,6 +424,9 @@ brandBox.onclick = () => {
   };
   doc.body.append(menu);
 };
+doc.body.insertAdjacentHTML("afterbegin", '<div id="attribute-menu"><div><input maxlength="30"><button>添加</button></div></div>');
+let foreignClicks = 0;
+doc.querySelector("#attribute-menu button").onclick = () => foreignClicks++;
 const axisBox = doc.querySelector(
   '[data-id*="sale_property.name"] [role=combobox]',
 );
@@ -471,6 +474,8 @@ add.onclick = appendOption;
 doc.body.append(add);
 assert.deepEqual(commercialDifferences(await execute("write", plan), plan), []);
 assert.equal(index, 2);
+assert.equal(foreignClicks, 0, "Adding a custom variant must not click a category attribute action");
+assert.equal(doc.querySelector("#attribute-menu input").value, "");
 doc.querySelector("tbody").replaceChildren();
 for (const slot of doc.querySelectorAll('[data-id^="product.publish.sale_property.value.name."]')) slot.remove();
 appendOption();
@@ -515,6 +520,8 @@ console.log(
   assert.throws(() => checkAttributes(plan, [{name:"Material",options:["Glass\nVidrio","Metal"],selected:["Glass\nVidrio"]}]), /Material/);
   checkAttributes(plan, await read(plan));
   checkAttributes(plan, await read(plan));
+  assert.throws(() => checkAttributes(plan, [{ name: "Material", options: ["Metal", "Cantidad"],
+    selected: ["Metal", "Cantidad"] }], { exact: true }), /Draft attribute differs: Material/);
   assert.equal(clicks, 1);
   checkAttributes({ Material: ["Glass\nVidrio"] }, [{name:"Material", options:["玻璃\nVidrio", "Metal"], selected:["玻璃\nVidrio"]}]);
   assert.throws(() => checkAttributes({ Material: ["Glass\nVidrio"] }, [{name:"Material",
