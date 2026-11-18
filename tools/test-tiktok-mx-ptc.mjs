@@ -179,6 +179,72 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
     details: ["d1.jpg", "d2.jpg"],
     missing: ["d3.jpg", "d4.jpg", "d5.jpg"],
   });
+
+  const quantities = {
+    ...rich,
+    title: "ご飯保存容器",
+    skus: [
+      { ...rich.skus[0], options: ["1 個"] },
+      { ...rich.skus[1], options: ["3個"] },
+      { id: "333", options: ["6 個"], stock: 4, price: "3000", currency: "JPY" },
+    ],
+  };
+  const quantityOptions = [
+    { sourceSkuId: "222", label: "3 piezas" },
+    { sourceSkuId: "333", label: "6 piezas" },
+    { sourceSkuId: "111", label: "1 pieza", stock: 99, priceMXN: 1 },
+  ];
+  const translate = (product, options) => generateListing(product, null, 0.1161, async prompt => {
+    if (!prompt.startsWith("Prepare")) return JSON.stringify({ title: "Recipientes", description: "Texto del producto." });
+    assert.match(prompt, /top-level variantOptions array/);
+    assert.deepEqual(JSON.parse(prompt.split("\n").at(-1)).source.skus.map(sku => sku.id),
+      sourceVariants(product).skus.map(sku => sku.id));
+    return JSON.stringify({ ...JSON.parse(model), variantOptions: options });
+  });
+  const createCell = bound.ptc.file;
+  const builtIn = await fs.readFile(createCell, "utf8");
+  const legacyCell = `const workers = [
+  { name: "es", instruction: "Produce Mexican Spanish" },
+  { name: "en", instruction: "Produce English" },
+  { name: "commerce", instruction: "Prepare the locally customized sales plan; omit SKU rows." },
+];
+await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), allowed_tools: []})));`;
+  try {
+    await fs.writeFile(createCell, legacyCell);
+    const localized = await translate(quantities, quantityOptions);
+    assert.equal(await fs.readFile(createCell, "utf8"), legacyCell, "preserves an installed custom PTC cell");
+    assert.deepEqual(localized.copy.salesAndShipping.skus, [
+      { sourceSkuId: "111", option: "1 pieza", stock: 7, priceMXN: 116 },
+      { sourceSkuId: "222", option: "3 piezas", stock: 3, priceMXN: 232 },
+      { sourceSkuId: "333", option: "6 piezas", stock: 4, priceMXN: 348 },
+    ]);
+    assert.match(localized.copy.salesAndShipping.origins["1 pieza.option"].basis, /1 個.*1 pieza/);
+    assert.equal(localized.copy.variantOptions, undefined);
+    const rerun = await generateListing(quantities, localized.copy, 0.1161, async () => '{"title":"Otra vez","description":"Texto."}');
+    assert.deepEqual(rerun.copy.salesAndShipping.skus, localized.copy.salesAndShipping.skus);
+  } finally {
+    await fs.writeFile(createCell, builtIn);
+  }
+
+  const colorsAndSizes = {
+    ...rich,
+    skus: [
+      { ...rich.skus[0], options: ["青", "M"] },
+      { ...rich.skus[1], options: ["白", "L"] },
+      cloth,
+    ],
+  };
+  const combinations = await translate(colorsAndSizes, [
+    { sourceSkuId: "222", label: "Blanco / L" },
+    { sourceSkuId: "111", label: "Azul / M" },
+  ]);
+  assert.deepEqual(combinations.copy.salesAndShipping.skus.map(sku => sku.option), ["Azul / M", "Blanco / L"]);
+  assert.ok(combinations.copy.salesAndShipping.excludedSkus.extra);
+  await assert.rejects(translate(quantities), /no Mexican Spanish variant label/);
+  await assert.rejects(translate(quantities, quantityOptions.slice(1)), /cover every eligible source SKU/);
+  await assert.rejects(translate(quantities, quantityOptions.map(row => ({ ...row, label: "X" }))), /unique option/);
+  await assert.rejects(translate(quantities, [{ ...quantityOptions[0], label: "3個" }, ...quantityOptions.slice(1)]), /Invalid Mexican Spanish variant label/);
+  await assert.rejects(translate(quantities, [{ ...quantityOptions[0], sourceSkuId: "unrelated" }, ...quantityOptions.slice(1)]), /unknown or duplicate source SKU/);
 }
 {
   const priced = {
