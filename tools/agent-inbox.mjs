@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { japaneseSourceId } from "../extension/skills/tiktok-mx-draft/tiktok-mx-native.mjs";
+import { japaneseSourceId, repairDraftRequest } from "../extension/skills/tiktok-mx-draft/tiktok-mx-native.mjs";
 
 const home = process.env.PAGELENS_HOME || path.join(os.homedir(), ".pagelens");
 const sharedInbox = path.join(home, "agent-inbox");
@@ -66,8 +66,12 @@ function enqueue(opts) {
   if (extensionId && ["agent_prompt", "agent_cancel"].includes(action))
     throw new Error("Agent prompts and cancellations use the shared inbox");
   const development = action === "dev_status" || action === "dev_reload";
-  if (development && !extensionId) throw new Error(`${action} requires --extension-id`);
-  if (development && opts["token-file"]) throw new Error(`${action} does not accept a token`);
+  const repairing = action === "ptc_repair_mx_draft";
+  const localOnly = development || repairing;
+  if (localOnly && !extensionId) throw new Error(`${action} requires --extension-id`);
+  if (localOnly && opts["token-file"]) throw new Error(`${action} does not accept a token`);
+  if (!repairing && (opts.repair !== undefined || opts["queries-json"] !== undefined))
+    throw new Error("--repair and --queries-json are only used with ptc_repair_mx_draft");
   if (opts.revision !== undefined && action !== "dev_reload")
     throw new Error("--revision is only used with dev_reload");
 
@@ -95,6 +99,10 @@ function enqueue(opts) {
       if (!/^\d{12,22}$/.test(opts[flag] || "")) throw Error("Expected --" + flag);
       job[key] = String(opts[flag]);
     }
+  }
+  if (repairing) {
+    const queries = opts["queries-json"] === undefined ? undefined : JSON.parse(String(opts["queries-json"]));
+    Object.assign(job, repairDraftRequest({ sourceId: opts["source-id"], draftId: opts["draft-id"], repair: opts.repair, queries }));
   }
   if (opts["tab-url-includes"] || opts.tabUrlIncludes) {
     job.tabUrlIncludes = String(opts["tab-url-includes"] || opts.tabUrlIncludes);
@@ -142,7 +150,7 @@ function enqueue(opts) {
     job.allowInsertHtmlFallback = true;
   }
   if (opts.replace === true || opts.replace === "true") job.replace = true;
-  const token = development ? undefined : opts["token-file"]
+  const token = localOnly ? undefined : opts["token-file"]
     ? readMaybeFile(opts["token-file"]).trim() : process.env.PAGELENS_TOKEN?.trim();
   if (token) job.token = token;
 

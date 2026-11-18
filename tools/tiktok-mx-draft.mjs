@@ -5,7 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { commercialDifferences, commercialPlan } from "./tiktok-mx-commerce.mjs";
 export { normDraftTitle, draftTitleOf, draftIdOf, selectDraftRows, draftListReady } from "./tiktok-mx-editor.mjs";
-import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, readFreshDocument, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
+import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, readFreshDocument, saveDraftCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -650,34 +650,7 @@ async function recoverTitle(tab, link, state, copy, dir) {
 }
 async function draftButton(tab, alreadyActive = false, expectedUrl = null) {
   if (!alreadyActive) await bridge("activate_tab", { tabId: tab });
-  const signal = await js(tab, async (url) => {
-    if (url && location.href !== url) throw Error("Draft editor changed before saving");
-    const button = [...document.querySelectorAll("button")].find(
-      (e) => e.textContent.trim() === "另存为草稿",
-    );
-    if (!button || button.disabled)
-      throw new Error("Draft save control not available");
-    let result = "", savedLink = "";
-    const observer = new MutationObserver(() => {
-      for (const e of document.querySelectorAll(
-        "[class*=message-content],[role=alert]",
-      )) {
-        if (/提交失败|保存失败|草稿保存成功/.test(e.innerText)) {
-          result = e.innerText.trim();
-          savedLink = result.includes("草稿保存成功") ? e.querySelector('a[href*="/product/edit-draft/"]')?.href || "" : "";
-        }
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-    try {
-      button.click();
-      for (let i = 0; i < 18 && !result; i++)
-        await new Promise((r) => setTimeout(r, 150));
-      return { message: result, url: savedLink || location.href };
-    } finally {
-      observer.disconnect();
-    }
-  }, expectedUrl);
+  const signal = await runCode(tab, saveDraftCode(expectedUrl));
   const message = signal?.message ?? signal;
   let draftId = null;
   if (signal?.url && message?.includes("草稿保存成功")) {

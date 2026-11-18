@@ -841,6 +841,81 @@ assert.equal(cold.copy.salesAndShipping.skus[0].stock, 4);
 assert.equal(cold.copy.salesAndShipping.origins["packageCm.width"].basis, evidence.basis);
 assert.equal(cold.copy.salesAndShipping.skus[0].priceMXN, 220);
 
+// Exercise the in-place host workflow without a store session.
+{
+  const { repairHostedDraft } = await import("../native/mx-ptc-repair.mjs");
+  const home = await fs.mkdtemp(path.join(flowDir, "repair-"));
+  const oldHome = process.env.PAGELENS_HOME;
+  process.env.PAGELENS_HOME = home;
+  const sourceId = sample.id;
+  const draftId = "1729600000000000006";
+  const link = "https://seller.tiktokshopglobalselling.com/product/edit-draft/" + draftId + "?shop_region=MX";
+  const title = "Known household grinder";
+  const label = "Cookware - Kitchen Utensils - Specialty Kitchen Utensils";
+  const values = { Function: ["Reusable"], Material: ["Plastic"] };
+  const before = { url: link, title, category: label, description: "Original", gallery: 2, detailImages: 1,
+    salesAndShipping: { brand: "", packageCm: {}, skus: [{ label: "Standard", stock: 4, priceMXN: 140 }] } };
+  let clicks = 0, reloads = 0, closing = 0, selected = false, failReload = false;
+  let useCategory = false, categorySelected = false;
+  const request = async ({ action, request: { tool, args } }) => {
+    assert.equal(action, "bridge_call");
+    if (tool === "open_tab") {
+      assert.equal(args.url, link);
+      return { tabId: 7, groupId: 9 };
+    }
+    if (tool === "list_tabs") return closing ? [] : [{ id: 7, groupId: 9, url: link }];
+    assert.equal(args.tabId, 7);
+    if (tool === "close_tab") { closing++; return {}; }
+    if (tool === "reload_tab") { reloads++; return {}; }
+    if (tool === "activate_tab") return {};
+    if (tool === "trusted_type") { assert.equal(args.value, "Frame"); return { ok: true }; }
+    assert.equal(tool, "run_js");
+    const code = args.code;
+    assert.ok(code.length <= 8000, "Repair script exceeds the bridge limit");
+    if (code.endsWith("return performance.timeOrigin")) return { ok: true, result: 1 };
+    if (code.includes("Expected a full category path")) {
+      const path = "Home - Home Decor - Frames";
+      if (code.endsWith('("' + path + '")')) { categorySelected = true; return { ok: true, result: { choice: path } }; }
+      return { ok: true, result: { choices: [path] } };
+    }
+    if (code.includes("Draft category search did not open")) return { ok: true, result: { selector: "fixture" } };
+    if (code.includes("另存为草稿")) {
+      clicks++;
+      return { ok: true, result: { message: "草稿保存成功", url: link } };
+    }
+    if (code.includes("sellerAttributes(")) {
+      if (code.endsWith("," + JSON.stringify(values) + ")")) selected = true;
+      const choices = Object.entries(values).map(([name, options]) =>
+        ({ name, options, selected: selected && !(failReload && reloads) ? options : [] }));
+      return { ok: true, result: choices };
+    }
+    return { ok: true, result: useCategory ? { ...before, category: categorySelected ? "Home - Home Decor - Frames" : "" } : before };
+  };
+  const planners = {
+    registeredListing: async (sid, did) => { assert.deepEqual([sid, did], [sourceId, draftId]); return { source, copy: { title }, dir: home }; },
+    chooseAttributes: async (_source, [field]) => ({ values: { [field.name]: values[field.name] } }),
+    chooseCategory: async (_source, choices) => ({ choice: { label: choices[0] } }),
+  };
+  try {
+    const repair = await repairHostedDraft({ sourceId, draftId, repair: "attributes" }, request, planners);
+    assert.deepEqual(repair.attributes, values);
+    assert.equal(repair.verified, true);
+    assert.equal(repair.draftId, draftId);
+    assert.deepEqual([clicks, reloads, closing], [1, 1, 1]);
+    assert.equal(JSON.parse(await fs.readFile(path.join(home, "repair-attributes-receipt.json"))).verified, true);
+    selected = false; closing = 0; reloads = 0; failReload = true;
+    await assert.rejects(repairHostedDraft({ sourceId, draftId, repair: "attributes" }, request, planners), /attribute selection differs/);
+    assert.equal(clicks, 2);
+    useCategory = true; closing = 0;
+    const category = await repairHostedDraft({ sourceId, draftId, repair: "category", queries: ["Frame"] }, request, planners);
+    assert.equal(category.category, "Home - Home Decor - Frames");
+    assert.equal(clicks, 3);
+  } finally {
+    if (oldHome == null) delete process.env.PAGELENS_HOME;
+    else process.env.PAGELENS_HOME = oldHome;
+  }
+}
+
 // Exercise the public create entry with an isolated inbox and a persisted native receipt.
 {
   const home = path.join(flowDir, "cli-home");

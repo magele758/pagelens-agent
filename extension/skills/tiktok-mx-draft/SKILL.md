@@ -68,3 +68,5 @@ PTC 程序放在项目的 `.pagelens-flows/tiktok-mx/`，该目录由 Git 忽略
 本机可通过一条文件 inbox 请求启动插件自调度的草稿流程。请求使用唯一的 id、createdAt、action 为 `ptc_create_mx_draft`、日本商品链接 sourceUrl（也可用数字字符串 sourceId）和正数 rate（日元兑墨西哥比索）。PageLens 后台启动自己的 Native Messaging Host，浏览器操作仅在该任务创建的标签上执行，保存后由 PTC 对比刷新数据和本机方案。结果在同一 ID 的 outbox，含 draftId、skuWrites、firstRefreshMatched 和 receiptFile。已登记来源走原有复用或恢复入口。该入口本身只处理商品，从零测前的清箱独立执行。
 
 只读复核使用 `ptc_inspect_mx_draft`，同时指定已登记的 sourceId 与 draftId，无需 rate。PTC 的只读工具与保存草稿的固定执行程序分开；两种入口均需已启用文件 inbox、本机 Host 及已授权的站点。
+
+定向 inbox 的 `ptc_repair_mx_draft` 接收同一登记下的 sourceId、draftId 和 repair（`attributes` 或 `category`）。类目修复可提供后台搜索词 queries，PTC 从实时启用的叶子类目中选择。流程仅在原草稿补空白项，保存后刷新同一草稿并核对选值及原有图文与销售信息。回执记录执行耗时。

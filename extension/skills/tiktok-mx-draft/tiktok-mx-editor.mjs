@@ -113,6 +113,133 @@ export function attributeCode(url, plan = null) {
     JSON.stringify(url) + "," + JSON.stringify(plan) + ")";
 }
 
+function repairCategoryInput(control) {
+  const selector = "input.core-cascader-view-input";
+  const usable = input => input && input.getClientRects().length && !input.disabled && !input.readOnly;
+  const own = control.querySelector(selector);
+  if (usable(own)) return { input: own, selector: `#product-cascader-select-view ${selector}` };
+  const inputs = [...document.querySelectorAll(selector)].filter(usable);
+  const region = control.closest("[data-id]") || control.parentElement;
+  if (inputs.length === 1 && (region?.contains(inputs[0]) || document.activeElement === inputs[0]))
+    return { input: inputs[0], selector };
+  return null;
+}
+
+function categoryRepairCode(url, operation, value = null) {
+  const page = new URL(url);
+  if (page.origin !== "https://seller.tiktokshopglobalselling.com" ||
+      page.username || page.password || page.searchParams.get("shop_region") !== "MX" ||
+      !/^\/product\/edit-draft\/\d{12,22}$/.test(page.pathname))
+    throw Error("Expected an existing MX product draft");
+  return sellerVerification.toString() + "\n" + repairCategoryInput.toString() +
+    `\nconst guard = () => { if (location.href !== ${JSON.stringify(url)} || sellerVerification()) throw Error("Draft changed or seller verification is open"); };` +
+    "\nreturn await (" + operation.toString() + ")(" + JSON.stringify(value) + ")";
+}
+
+export function repairCategorySearchCode(url) {
+  return categoryRepairCode(url, async () => {
+    guard();
+    const control = document.querySelector("#product-cascader-select-view");
+    if (!control?.getClientRects().length) throw Error("Draft category selector unavailable");
+    const current = control.innerText.trim();
+    if (!repairCategoryInput(control)) control.click();
+    for (let i = 0; i < 20; i++) {
+      guard();
+      const field = repairCategoryInput(control);
+      if (field) {
+        field.input.focus({ preventScroll: true });
+        if (document.activeElement === field.input) return { selector: field.selector, current };
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw Error("Draft category search did not open");
+  });
+}
+
+export function repairCategoryOptionsCode(url, exactLabel = null) {
+  return categoryRepairCode(url, async (wanted) => {
+    const normalize = text => String(text || "").trim().replace(/\s+/g, " ").replace(/\s*>\s*|\s+[-/]\s+/g, "/");
+    const fullPath = text => normalize(text).split("/").filter(Boolean).length >= 3;
+    const shown = node => node?.getClientRects().length && getComputedStyle(node).visibility !== "hidden";
+    const label = row => [row.title, row.getAttribute("aria-label"), row.innerText]
+      .find(text => fullPath(text))?.trim();
+    const disabled = row => row.closest('[aria-disabled="true"],[disabled]') ||
+      [...row.classList].some(name => name === "disabled" || name.endsWith("-disabled"));
+    const search = () => {
+      guard();
+      const control = document.querySelector("#product-cascader-select-view");
+      const field = control && repairCategoryInput(control);
+      if (!field?.input.value.trim())
+        throw Error("Search the current draft category before reading choices");
+      const owner = field.input.closest('[role="combobox"]');
+      const controlId = field.input.getAttribute("aria-controls") || owner?.getAttribute("aria-controls");
+      const panel = controlId && document.getElementById(controlId);
+      return [...(panel || document).querySelectorAll(".core-cascader-list-search-item")]
+        .filter(shown).map(row => ({ row, label: label(row), disabled: Boolean(disabled(row)) }))
+        .filter(entry => entry.label);
+    };
+    if (wanted !== null && !fullPath(wanted)) throw Error("Expected a full category path");
+    let entries = [];
+    const pause = () => new Promise(resolve => setTimeout(resolve, 150));
+    for (let i = 0; i < 24; i++) {
+      entries = search();
+      if (wanted === null ? entries.length : entries.some(entry => normalize(entry.label) === normalize(wanted))) break;
+      await pause();
+    }
+    const choices = [...new Set(entries.filter(entry => !entry.disabled).map(entry => entry.label))];
+    if (wanted === null) return { choices, choice: null };
+    const matches = entries.filter(entry => normalize(entry.label) === normalize(wanted));
+    if (!matches.length) throw Error("Exact category is unavailable: " + wanted);
+    if (matches.length !== 1) throw Error("Exact category is ambiguous: " + wanted);
+    const [match] = matches;
+    if (match.disabled) throw Error("Exact category is disabled: " + wanted);
+    guard();
+    match.row.click();
+    let confirmed = false;
+    for (let i = 0; i < 32; i++) {
+      guard();
+      const dialog = [...document.querySelectorAll('[role="dialog"]')].find(node =>
+        shown(node) && node.innerText.includes("更改商品类目") && node.innerText.includes("属性信息将被清除"));
+      if (dialog && !confirmed) {
+        const proceed = [...dialog.querySelectorAll("button")].filter(button =>
+          shown(button) && !button.disabled && button.innerText.trim() === "继续");
+        if (proceed.length === 1) { proceed[0].click(); confirmed = true; }
+      }
+      const current = document.querySelector("#product-cascader-select-view")?.innerText;
+      if (!dialog && normalize(current) === normalize(match.label)) return { choices, choice: match.label };
+      await pause();
+    }
+    throw Error("Exact category did not settle: " + wanted);
+  }, exactLabel);
+}
+
+export function saveDraftCode(expectedUrl = null) {
+  const click = async (url) => {
+    if (url && location.href !== url) throw Error("Draft editor changed before saving");
+    const button = [...document.querySelectorAll("button")].find(e => e.textContent.trim() === "另存为草稿");
+    if (!button || button.disabled) throw Error("Draft save control not available");
+    let message = "", savedLink = "";
+    const observer = new MutationObserver(() => {
+      for (const e of document.querySelectorAll("[class*=message-content],[role=alert]")) {
+        if (/提交失败|保存失败|草稿保存成功/.test(e.innerText)) {
+          message = e.innerText.trim();
+          savedLink = message.includes("草稿保存成功") ? e.querySelector('a[href*="/product/edit-draft/"]')?.href || "" : "";
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      button.click();
+      for (let i = 0; i < 18 && !message; i++)
+        await new Promise(resolve => setTimeout(resolve, 150));
+      return { message, url: savedLink || location.href };
+    } finally {
+      observer.disconnect();
+    }
+  };
+  return "return await (" + click.toString() + ")(" + JSON.stringify(expectedUrl) + ")";
+}
+
 export async function readFreshDocument(url, call, snapshot = snapshotCode(true, true, true)) {
   const guard = "if(location.href!==" + JSON.stringify(url) + ")throw Error('Wrong draft document');";
   const initial = await call("run_js", { code: guard + "return performance.timeOrigin" });
