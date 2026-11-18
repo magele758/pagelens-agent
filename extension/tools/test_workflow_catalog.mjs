@@ -46,9 +46,17 @@ test("selects a platform and opens the requested workflow without running it", a
   const openMarketing = bindShopeeMarketingPanel({ getTargetTab: async () => tab, onBack });
   let selectedSkill;
   let listingOpened = false;
+  let capturePlatform;
+  let openLibrary = false;
   const openProductListing = () => { listingOpened = true; return true; };
   const openTiktokDraft = feature => { selectedSkill = feature; return true; };
-  openCatalog = bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft });
+  const openProductCapture = (feature, platform) => {
+    assert.equal(feature.id, "product-capture");
+    capturePlatform = platform;
+    return true;
+  };
+  const openProductLibrary = () => { openLibrary = true; };
+  openCatalog = bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft, openProductCapture, openProductLibrary });
 
   const picker = byId("workflow-platform");
   const choosePlatform = id => picker.querySelector(`button[data-platform="${id}"]`).click();
@@ -61,17 +69,28 @@ test("selects a platform and opens the requested workflow without running it", a
   byId("btn-ptc-flow").click();
   assert.equal(byId("workflow-catalog-dialog").open, true);
   assert.deepEqual([...picker.querySelectorAll("button")].map(button => button.dataset.platform), [
-    "shopee", "temu", "amazon", "tiktok-shop",
+    "shopee", "temu", "amazon", "tiktok-shop", "zhfulfill",
   ]);
   assert.deepEqual(selected(document), ["shopee"]);
   choosePlatform("temu");
   assert.deepEqual(selected(document), ["temu"]);
-  assert.equal(choices().length, 0);
-  assert.match(byId("workflow-feature-empty").textContent, /Temu 暂无/u);
+  assert.deepEqual(choices().map(item => item.dataset.workflow), ["product-capture"]);
+  assert.equal(byId("workflow-feature-empty").hidden, true);
   assert.equal(window.localStorage.getItem(storageKey), "temu");
   byId("workflow-catalog-close").click();
   byId("btn-ptc-flow").click();
   assert.deepEqual(selected(document), ["temu"]);
+  for (const platform of ["temu", "amazon", "zhfulfill"]) {
+    choosePlatform(platform);
+    assert.deepEqual(choices().map(item => item.dataset.workflow), ["product-capture"]);
+    await launch("product-capture");
+    assert.equal(capturePlatform, platform);
+    openCatalog();
+  }
+  byId("workflow-catalog-library").click();
+  assert.equal(byId("workflow-catalog-dialog").open, false);
+  assert.equal(openLibrary, true);
+  openCatalog();
   choosePlatform("shopee");
   assert.deepEqual(choices().map(item => item.dataset.workflow), [
     "product-listing", "campaign-data", "campaign-draft", "voucher-data", "voucher-draft",

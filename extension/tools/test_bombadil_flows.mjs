@@ -85,6 +85,8 @@ for (const width of [400, 900]) {
     workflowAction('product-listing');
     const product = document.getElementById('ptc-flow-dialog');
     await until(() => product.open, 'open Shopee product listing');
+    // Give the first click's asynchronous dispatch the same task boundary as a subsequent browser click.
+    await delay(0);
     assert.equal(document.getElementById('ptc-start').disabled, true, 'fixture is outside Shopee listing');
     click('ptc-mode-directory');
     assert.equal(document.getElementById('ptc-batch-pane').hidden, false);
@@ -147,6 +149,28 @@ for (const width of [400, 900]) {
       await until(() => document.getElementById('compose-chip-label').textContent === '当前网页：' + title, 'attach ' + title);
       check('tab switch to ' + title);
     }
+    const activate = id => document.dispatchEvent(new dom.window.CustomEvent('fixture-activate-tab', { detail: id }));
+    const shortcuts = document.getElementById('workflow-shortcuts');
+    assert.ok(shortcuts.hidden, 'unrelated site has no marketplace shortcuts');
+    activate(19);
+    await until(() => !shortcuts.hidden && shortcuts.querySelector('[data-workflow="campaign-data"]'), 'Shopee seller shortcuts');
+    assert.ok(shortcuts.querySelector('[data-workflow="product-listing"]'));
+    assert.ok(!shortcuts.querySelector('[data-workflow="product-capture"]'));
+    shortcuts.querySelector('[data-workflow="campaign-data"]').click();
+    await until(() => marketing.open, 'open campaigns without the catalog');
+    assert.equal(document.getElementById('shopee-marketing-title').textContent, '活动数据');
+    click('shopee-marketing-close');
+    activate(20);
+    await until(() => !shortcuts.hidden && shortcuts.querySelector('[data-workflow="product-capture"]'), 'Amazon detail shortcut');
+    assert.deepEqual([...shortcuts.querySelectorAll('[data-workflow]')].map(button => button.dataset.workflow), ['product-capture']);
+    activate(21);
+    await until(() => shortcuts.hidden, 'hide unsupported Temu seller shortcuts');
+    activate(22);
+    await until(() => shortcuts.querySelector('[data-workflow="identify-tab"]'), 'show address permission action');
+    shortcuts.querySelector('[data-workflow="identify-tab"]').click();
+    await until(() => shortcuts.querySelector('[data-workflow="product-capture"]'), 'Temu shortcut after granting tab address access');
+    assert.equal(document.getElementById('workflow-shortcut-site').textContent, 'Temu');
+    check('marketplace shortcut transitions');
     await until(() => requiredVisits.panel.every(v => visits.has(v)), 'missing panel coverage: ' + [...visits]);
     console.log('Passed sidebar navigation, history, media and branch isolation at width ' + width);
   } finally { dom.window.close(); }

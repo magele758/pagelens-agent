@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_PRODUCTS = 20;
-const MAX_JSON = 64 * 1024;
+const MAX_JSON = 512 * 1024;
 const MAX_IMAGE = 20 * 1024 * 1024;
 const MAX_SIZE_CHART_IMAGE = 4 * 1024 * 1024;
 // A multiple of three keeps each non-final base64 segment unpadded.

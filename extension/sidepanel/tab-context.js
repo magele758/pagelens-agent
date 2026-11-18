@@ -7,6 +7,7 @@ import { state } from "./state.js";
 import { restrictedUrl } from "../lib/chrome.js";
 import { requestTabHostAccess } from "../lib/optional-permissions.js";
 import { loadTabPack } from "../lib/page-pack.js";
+import { renderWorkflowShortcuts } from "./workflow-shortcuts.js";
 
 async function pickTargetTab() {
   const windowId = await resolveWindowId();
@@ -26,6 +27,7 @@ async function refreshTab({ interactive = false } = {}) {
 
   const revision = ++state.pageRevision;
   state.tab = tab || null;
+  renderWorkflowShortcuts(state.tab);
 
   if (!state.share || !tab || restrictedUrl(tab.url)) {
     state.pack = null;
