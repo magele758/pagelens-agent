@@ -98,6 +98,18 @@ try {
   const ensured = await handleFs({ action: "ensureDir", path: nested });
   assert(ensured.ok && ensured.kind === "directory" && fs.existsSync(nested), "fs ensureDir");
 
+  const inbox = path.join(tmp, "inbox");
+  fs.mkdirSync(inbox);
+  const job = { action: "claimInboxJob", root: inbox, rel: "draft.json" };
+  fs.writeFileSync(path.join(inbox, job.rel), '{"action":"ptc_create_mx_draft"}');
+  assert(!handleFs({ ...job, scope: "agent" }).ok, "agents cannot claim inbox jobs via file tools");
+  const first = handleFs(job);
+  assert(first.ok && first.claimed, "one inbox worker claims the job");
+  assert(!fs.existsSync(path.join(inbox, job.rel)), "claimed job disappears from the pending queue");
+  assert(fs.existsSync(path.join(inbox, first.rel)), "claimed payload is recoverable on disk");
+  assert(!handleFs(job).claimed, "a second worker cannot claim the same pending file");
+  assert(!handleFs({ ...job, rel: "../draft.json" }).ok, "claim is restricted to inbox filenames");
+
   const wrote = await handleFs({ action: "writeText", root: tmp, rel: "yt-x/meta.json", text: '{"ok":1}\n' });
   assert(wrote.ok && wrote.path === "yt-x/meta.json", "fs write");
   const read = await handleFs({ action: "readText", root: tmp, rel: "yt-x/meta.json" });

@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 // Each owned tab is a working page. Chrome removes the group with its last tab.
 export class DraftTabs {
   constructor(product, bridge) {
@@ -39,6 +41,42 @@ export class DraftTabs {
     this.groupId = groupId;
     this.tabs.set(url, tabId);
     return tabId;
+  }
+
+  async waitForUrl(tabId, url) {
+    const deadline = Date.now() + 15000;
+    do {
+      const tab = (await this.bridge("list_tabs", {})).find(entry => entry.id === tabId);
+      if (tab?.url === url) return tabId;
+      await sleep(150);
+    } while (Date.now() < deadline);
+    throw Error("Task tab did not finish navigating");
+  }
+
+  async navigate(tabId, url) {
+    const page = this.validate(url);
+    if (!this.owned.has(tabId)) throw Error("Cannot navigate a tab outside the draft task");
+    await this.bridge("navigate_tab", { tabId, url: page.href });
+    for (const [address, id] of this.tabs) if (id === tabId) this.tabs.delete(address);
+    this.tabs.set(page.href, tabId);
+    return this.waitForUrl(tabId, page.href);
+  }
+
+  async reopenSavedDraft(tabId, url) {
+    const page = this.validate(url);
+    if (!/^\/product\/edit-draft\/\d+$/.test(page.pathname)) throw Error("Expected a saved draft URL");
+    const current = this.owned.has(tabId) && (await this.bridge("list_tabs", {})).find(tab => tab.id === tabId);
+    // Seller Center may return to the draft list or close the editor on save.
+    if (current && current.groupId === this.groupId) {
+      if (current.url === page.href) return tabId;
+      if (this.tabs.get(current.url) === tabId ||
+          current.url === "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX&tab=draft")
+        return this.navigate(tabId, page.href);
+    }
+    this.owned.delete(tabId);
+    for (const [address, id] of this.tabs) if (id === tabId) this.tabs.delete(address);
+    const background = await this.open(page.href, [], false);
+    return this.waitForUrl(background, page.href);
   }
 
   async close() {

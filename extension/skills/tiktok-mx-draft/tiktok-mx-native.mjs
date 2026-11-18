@@ -2,7 +2,7 @@ import { NATIVE_HOST_NAME } from "../../lib/native-host.js";
 import { runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
 
 const tools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab", "activate_tab",
-  "wait_for", "upload_file", "trusted_type", "press_keys"]);
+  "wait_for", "upload_file", "trusted_type", "press_keys", "navigate_tab"]);
 const seller = "https://seller.tiktokshopglobalselling.com";
 export function japaneseSourceId(value) {
   const page = new URL(value);
@@ -29,6 +29,8 @@ export function createDraftTransport(sourceId, call, tabUrl) {
     } else if (tool !== "list_tabs" && !owned.has(args.tabId)) throw Error("Tab outside draft task");
     else if (tool !== "list_tabs" && tool !== "close_tab" && !allowedDraftUrl(await tabUrl(args.tabId), sourceId))
       throw Error("Task tab navigated outside draft workflow");
+    if (tool === "navigate_tab" && !allowedDraftUrl(args.url, sourceId))
+      throw Error("Unexpected draft destination");
     const reply = await call(tool, args);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") for (const id of [reply.result.tabId, ...(reply.result.backgroundTabIds || [])]) owned.add(id);

@@ -150,9 +150,17 @@ globalThis.chrome = {
       if (msg.op === "clipboard_write") return { ok: true };
       if (msg.action === "ensureDir") return { ok: true };
       if (msg.action === "readdir") {
-        return { ok: true, entries: Object.keys(native.files).map((name) => ({ name, kind: "file" })) };
+        return { ok: true, entries: Object.keys(native.files).filter(name => !name.includes("/")).map((name) => ({ name, kind: "file" })) };
       }
-      if (msg.action === "readText") return { ok: true, text: native.files[msg.rel] };
+      if (msg.action === "readText") return Object.hasOwn(native.files, msg.rel)
+        ? { ok: true, text: native.files[msg.rel] } : { ok: false, code: "ENOENT" };
+      if (msg.action === "claimInboxJob") {
+        if (!Object.hasOwn(native.files, msg.rel)) return { ok: true, claimed: false };
+        const rel = `processing/${msg.rel}`;
+        native.files[rel] = native.files[msg.rel];
+        delete native.files[msg.rel];
+        return { ok: true, claimed: true, rel };
+      }
       if (msg.action === "deleteFile") {
         delete native.files[msg.rel];
         return { ok: true };
@@ -213,6 +221,17 @@ store.settings = { agentInboxEnabled: true, agentInboxVersion: 1, cdpInput: fals
   native.calls.length = 0;
   await inbox.pollAgentInboxOnce();
   assert.deepEqual(native.calls.map((c) => c.action), ["readdir"], "steady state: one Native Host process per poll");
+}
+
+{
+  const competitor = await import("../lib/agent/inbox.js?competing-worker");
+  native.files["product.json"] = JSON.stringify({ id: "product", action: "ptc_create_mx_draft" });
+  native.calls.length = 0;
+  const results = await Promise.all([inbox.pollAgentInboxOnce(), competitor.pollAgentInboxOnce()]);
+  assert.equal(results.every(result => result.ok), true);
+  assert.equal(results.reduce((count, result) => count + result.processed, 0), 1);
+  assert.equal(native.calls.filter(call => call.action === "writeText" && call.root === inbox.OUTBOX_ROOT).length, 1);
+  assert.deepEqual(native.files, {}, "a finalized claim is removed from processing");
 }
 
 {

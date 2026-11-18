@@ -220,6 +220,34 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "pagelens-mx-draft-"));
   process.env.PAGELENS_HOME = home;
   const draft = await import("./tiktok-mx-draft.mjs?draft-test");
+  {
+    const { DraftTabs } = await import("./tiktok-mx-tabs.mjs");
+    const create = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
+    const saved = "https://seller.tiktokshopglobalselling.com/product/edit-draft/1738623714154153548?shop_region=MX";
+    const tabs = new Map();
+    const opens = [];
+    const group = new DraftTabs("1736073370556597841", async (tool, args) => {
+      if (tool === "list_tabs") return [...tabs.values()];
+      if (tool === "navigate_tab") return (tabs.get(args.tabId).url = args.url);
+      if (tool !== "open_tab") assert.fail(tool);
+      const id = opens.push(args);
+      tabs.set(id, { id, groupId: 5, url: args.url });
+      return { tabId: id, groupId: 5 };
+    });
+    const productUrl = "https://shop.tiktok.com/jp/pdp/1736073370556597841";
+    const edit = await group.open(productUrl);
+    assert.equal(opens[0].active, false);
+    assert.equal(await group.navigate(edit, create), edit);
+    assert.equal(group.tabs.has(productUrl), false);
+    assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+    assert.equal(group.tabs.get(saved), edit);
+    assert.equal(group.tabs.has(create), false);
+    assert.equal(opens.length, 1, "save and refresh stay in the visible editor tab");
+    tabs.delete(edit);
+    assert.equal(await group.reopenSavedDraft(edit, saved), 2);
+    assert.equal(opens[1].active, false, "if Chrome closed the editor, recovery opens in background");
+    assert.equal(opens[1].groupWithTab, undefined);
+  }
   const navigationUrl = "https://shop.tiktok.com/jp/pdp/1722345678901234567";
   let navigationReads = 0;
   await draft.waitForSourceTab(55, navigationUrl, async () => (
@@ -351,7 +379,11 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
     await assert.rejects(bridge("open_tab", { url: "https://example.com" }), /destination/);
     await bridge("open_tab", { url });
     await assert.rejects(bridge("run_shell", { tabId: 51 }), /Unexpected draft tool/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 50, url }), /outside draft task/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url: "https://example.com" }), /destination/);
     assert.equal(calls, 1);
+    await bridge("navigate_tab", { tabId: 51, url });
+    assert.equal(calls, 2);
   }
   await fs.writeFile(path.join(dir, "source.json"), JSON.stringify(sourceFile));
   await fs.writeFile(path.join(dir, "listing.json"), JSON.stringify(listing));

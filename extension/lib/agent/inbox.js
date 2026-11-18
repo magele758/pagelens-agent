@@ -67,7 +67,7 @@ async function listInboxJobs() {
 
 async function readJson(root, rel) {
   const res = await nativeFs({ action: "readText", root, rel });
-  if (!res?.ok) throw new Error(res?.error || `read failed: ${rel}`);
+  if (!res?.ok) throw Object.assign(new Error(res?.error || `read failed: ${rel}`), { code: res?.code });
   if (res.truncated) throw new Error(`job too large (truncated): ${rel}`);
   return JSON.parse(res.text);
 }
@@ -84,7 +84,7 @@ async function deleteRel(root, rel) {
 }
 
 /** Move job to processed/ then write outbox result. */
-async function finishJob(jobName, job, result) {
+async function finishJob(jobName, job, result, claimedRel) {
   const id = String(job?.id || jobName.replace(/\.json$/i, ""));
   const out = {
     id,
@@ -94,12 +94,9 @@ async function finishJob(jobName, job, result) {
     ...result,
   };
   await writeJson(INBOX_ROOT, `${PROCESSED_REL}/${jobName}`, redactJobToken(job));
-  try {
-    await deleteRel(INBOX_ROOT, jobName);
-  } catch {
-    /* already gone */
-  }
+  if (!claimedRel) await deleteRel(INBOX_ROOT, jobName).catch(() => {});
   await writeJson(OUTBOX_ROOT, `${id}.json`, out);
+  if (claimedRel) await deleteRel(INBOX_ROOT, claimedRel);
   return out;
 }
 
@@ -838,6 +835,7 @@ export async function pollAgentInboxOnce(deps = {}) {
       try {
         job = await readJson(INBOX_ROOT, name);
       } catch (err) {
+        if (err.code === "ENOENT") continue;
         await finishJob(name, { id: name.replace(/\.json$/i, "") }, {
           ok: false,
           error: `invalid job json: ${err?.message || err}`,
@@ -849,6 +847,13 @@ export async function pollAgentInboxOnce(deps = {}) {
         if (outcome) results.push(outcome);
         continue;
       }
+      let claimedRel;
+      if (["ptc_create_mx_draft", "ptc_inspect_mx_draft"].includes(job?.action)) {
+        const claim = await nativeFs({ action: "claimInboxJob", root: INBOX_ROOT, rel: name });
+        if (!claim?.ok) return { ok: false, error: claim?.error || "Could not claim the TikTok PTC job" };
+        if (!claim.claimed) continue;
+        claimedRel = claim.rel;
+      }
       const startedAt = Date.now();
       markJobStarted();
       let result;
@@ -858,7 +863,7 @@ export async function pollAgentInboxOnce(deps = {}) {
         result = { ok: false, error: err?.message || String(err) };
       }
       await recordJobFinished(job, result, startedAt);
-      results.push(await finishJob(name, job, result));
+      results.push(await finishJob(name, job, result, claimedRel));
       if (result.ok && job.followUp === true && ["bridge_call", "fill_mx_draft", "read_mx_draft", "refresh_mx_draft_list"].includes(job.action))
         pollForNextStep();
     }

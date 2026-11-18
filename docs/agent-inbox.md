@@ -2,6 +2,8 @@
 
 Zero-new-daemon bridge: drop a JSON job under `~/.pagelens/agent-inbox/`, PageLens service worker polls it (only when 设置 → “启用文件 inbox” is on, default **off**), executes, writes `~/.pagelens/agent-outbox/<id>.json`, and moves the job to `agent-inbox/processed/`.
 
+TikTok PTC requests require the matching Native Host. The host claims each request in `agent-inbox/processing/` before the extension opens any tabs. If Chrome or the host stops before the receipt is written, the claim stays there. Check the draft list and any retained editor before submitting a new request.
+
 Poll interval: 30s for packaged installs (Chrome clamps alarms to ≥30s), ~6s when loaded unpacked. Each poll costs one Native Host process (`readdir`); if the host is unavailable, polling backs off from 1 to 30 minutes.
 
 Page actions (`paste_html`, `wechat_fill_draft`, `cose_publish`) only target tabs whose origin is in `agentBridgeOrigins` (same allowlist as the bridge), and each job opens a confirmation window. Unanswered within 60s → rejected (`failCriteria: "not_confirmed"`). Use `wait --timeout` ≥ 90000 so there is time to click 允许.
@@ -19,6 +21,7 @@ Then reload PageLens on `chrome://extensions`.
 | Path | Role |
 |------|------|
 | `~/.pagelens/agent-inbox/*.json` | Pending jobs |
+| `~/.pagelens/agent-inbox/processing/` | Claimed TikTok PTC requests awaiting a receipt |
 | `~/.pagelens/agent-inbox/processed/` | Completed job copies |
 | `~/.pagelens/agent-outbox/<id>.json` | Results |
 | `~/.pagelens/agent-payloads/` | Large HTML bodies (CLI auto-splits) |

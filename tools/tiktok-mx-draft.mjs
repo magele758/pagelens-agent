@@ -297,7 +297,7 @@ export async function waitForSourceTab(tab, url, list = () => bridge("list_tabs"
   } while (Date.now() < deadline);
   throw Error("Source tab did not finish navigating to the requested product");
 }
-async function prepare(url, fresh = false, afterOpening, onFactsReady, preloadCreate = false) {
+async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSourceForCreate = false) {
   const previousRun = await lookup(sourceRecord(sourceId(url)));
   if (previousRun && !fresh) {
     if (!nativeDispatch) console.log(JSON.stringify({ existing: true, ...previousRun }));
@@ -309,11 +309,9 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, preloadCr
     path.join(os.tmpdir(), "pagelens-mx-" + id + "-"),
   );
   group = new DraftTabs(id, bridge);
-  if (preloadCreate) await group.open(createUrl, [url, drafts]);
-  const tab = group.tabs.get(url) ?? await open(url);
-  if (preloadCreate) afterOpening?.();
+  const tab = reuseSourceForCreate ? await group.open(url, [drafts], false) : await open(url);
   await waitForSourceTab(tab, url);
-  if (!preloadCreate) afterOpening?.();
+  if (!reuseSourceForCreate) afterOpening?.();
   let data;
   try {
     data = await js(tab, extract, id);
@@ -326,6 +324,7 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, preloadCr
   mark("sourceRead");
   if (!data.title || !data.gallery?.length)
     throw new Error("Product title or gallery missing");
+  if (reuseSourceForCreate) afterOpening?.(tab);
   await write(path.join(dir, "source-capture.json"), {
     ...data,
     url,
@@ -395,8 +394,8 @@ async function createDraft(url, rate) {
   if (await lookup(sourceRecord(sourceId(url)))) throw Error("Source already registered; use rerun");
   const { generateListing, matchingPlan } = await import("./tiktok-mx-ptc.mjs");
   let generated, initialList;
-  const dir = await prepare(url, false, () => {
-    pendingPreflight = openCreateForm();
+  const dir = await prepare(url, false, tab => {
+    pendingPreflight = openCreateForm(tab);
     pendingPreflight.catch(() => {});
   }, async (facts, dir) => {
     const previous = await matchingPlan(facts);
@@ -720,8 +719,11 @@ async function sellerTab(url, forceReload = false) {
   if (forceReload) await bridge("reload_tab", { tabId: existing });
   return existing;
 }
-async function openCreateForm() {
-  const tab = group.tabs.get(createUrl) ?? await open(createUrl);
+async function openCreateForm(sourceTab) {
+  const tab = sourceTab == null
+    ? group.tabs.get(createUrl) ?? await open(createUrl)
+    : await group.navigate(sourceTab, createUrl);
+  if (sourceTab != null) await bridge("activate_tab", { tabId: tab });
   await bridge("wait_for", { tabId: tab, selector: titleSelector, timeoutMs: 20000 });
   mark("createFormReady");
   return tab;
@@ -825,6 +827,7 @@ export async function save(
       });
     }
     let cat = previous.category;
+    let savedFrom;
     let initialAcknowledged = true;
     if (!id) {
       if (readOnly) throw new Error("No existing draft ID to verify");
@@ -957,10 +960,13 @@ export async function save(
       await write(resultFile, { ...pending, id, category: cat, saving: true, partial: Boolean(checkpoint) });
       await write(recordFile, { dir, id, title: copy.title, link: seller + "/product/edit-draft/" + id + "?shop_region=MX" });
       group.pendingForm = null;
+      savedFrom = tab;
     }
     if (!knownId) mark("draftIdentified");
     const link = seller + "/product/edit-draft/" + id + "?shop_region=MX";
-    let edit = target?.edit ?? (await sellerTab(link, Boolean(knownId && !readOnly)));
+    let edit = target?.edit ?? (savedFrom == null
+      ? await sellerTab(link, Boolean(knownId && !readOnly))
+      : await group.reopenSavedDraft(savedFrom, link));
     // One read waits for the editor and captures bilingual text, media and every SKU.
     // Reload explicitly after the initial save, then reuse this persisted snapshot.
     let state = target?.original;
@@ -1098,7 +1104,8 @@ export async function save(
       const acknowledged = await draftButton(edit, !!target);
       mark("saved");
       // A successful save can navigate the editor back to the product list.
-      edit = await open(link);
+      edit = await group.reopenSavedDraft(edit, link);
+      if (expectedEdit === link) editTabs.add(edit);
       state = await readSaved(edit, link, copy, plan);
       // A forced rewrite of identical values needs a positive save indication.
       if (resave && !acknowledged && target && matchesDraft(target.original, copy, plan))
@@ -1106,7 +1113,8 @@ export async function save(
       if (await recoverTitle(edit, link, state, copy, dir)) {
         mark("titleRepair");
         await draftButton(edit, true);
-        edit = await open(link);
+        edit = await group.reopenSavedDraft(edit, link);
+        if (expectedEdit === link) editTabs.add(edit);
         state = await readSaved(edit, link, copy, plan);
       } else if (target && state.url === link && state.gallery === gallery.length &&
                  state.detailImages >= details.length && !state.captcha) {
@@ -1115,7 +1123,8 @@ export async function save(
         } catch {
           await repairSavedCopy(edit, state, copy, details);
           await draftButton(edit, true);
-          edit = await open(link);
+          edit = await group.reopenSavedDraft(edit, link);
+          if (expectedEdit === link) editTabs.add(edit);
           state = await readSaved(edit, link, copy, plan);
         }
       }
