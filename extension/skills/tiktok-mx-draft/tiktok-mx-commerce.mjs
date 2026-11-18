@@ -302,7 +302,7 @@ export async function sellerVariants(ui, plan) {
     const menu = () =>
       document.getElementById(box.getAttribute("aria-controls"));
     const match = () =>
-      all("[role=option]", menu() || document).find(
+      all("[role=option]", menu() || box).find(
         (e) =>
           visible(e) &&
           text(e)
@@ -333,35 +333,22 @@ export async function sellerVariants(ui, plan) {
       throw new Error("Existing variant name differs: " + ui.axisLabels(name).join(" / "));
     box.querySelector("input").click();
     await sleep(200);
-    const menu = () =>
-      document.getElementById(box.getAttribute("aria-controls"));
-    const exact = all('li,[role=menuitem],[role=option]', menu() || box).find(
+    const popup = control => document.getElementById(
+      control.getAttribute("aria-controls") || control.getAttribute("aria-owns"),
+    );
+    const menu = () => popup(box) || name;
+    const exact = all('li,[role=menuitem],[role=option]', menu()).find(
       e => visible(e) && e.getAttribute("aria-disabled") !== "true" &&
         [text(e), ...all("span", e).map(text)].some(label => norm(label) === norm(plan.axis)),
     );
     if (exact) exact.click();
     else {
-      const button = (label, root) =>
-        all("button", root || document).find(
-          (e) => visible(e) && text(e) === label,
-        );
-      (
-        await wait(
-          () => button("新增", menu()) || button("新增"),
-          "add variant name",
-        )
-      ).click();
-      const add = await wait(
-        () =>
-          all("button").find(
-            (e) =>
-              visible(e) &&
-              text(e) === "添加" &&
-              e.parentElement.querySelector("input[maxlength='30']"),
-          ) || button("添加", menu()),
-        "custom name",
-      );
-      const input = add.parentElement.querySelector("input");
+      const button = (label, root) => all("button", root).find(e => visible(e) && text(e) === label);
+      const customize = await wait(() => button("新增", menu()), "add variant name");
+      customize.click();
+      const add = await wait(() => button("添加", popup(customize) || menu()), "custom name");
+      const input = add.parentElement.querySelector("input:not([readonly])");
+      if (!input) throw Error("Custom variant name input unavailable");
       input.focus();
       document.execCommand("insertText", false, plan.axis);
       await wait(() => !add.disabled, "custom name enabled");

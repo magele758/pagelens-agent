@@ -179,6 +179,72 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
     details: ["d1.jpg", "d2.jpg"],
     missing: ["d3.jpg", "d4.jpg", "d5.jpg"],
   });
+
+  const quantities = {
+    ...rich,
+    title: "ご飯保存容器",
+    skus: [
+      { ...rich.skus[0], options: ["1 個"] },
+      { ...rich.skus[1], options: ["3個"] },
+      { id: "333", options: ["6 個"], stock: 4, price: "3000", currency: "JPY" },
+    ],
+  };
+  const quantityOptions = [
+    { sourceSkuId: "222", label: "3 piezas" },
+    { sourceSkuId: "333", label: "6 piezas" },
+    { sourceSkuId: "111", label: "1 pieza", stock: 99, priceMXN: 1 },
+  ];
+  const translate = (product, options) => generateListing(product, null, 0.1161, async prompt => {
+    if (!prompt.startsWith("Prepare")) return JSON.stringify({ title: "Recipientes", description: "Texto del producto." });
+    assert.match(prompt, /top-level variantOptions array/);
+    assert.deepEqual(JSON.parse(prompt.split("\n").at(-1)).source.skus.map(sku => sku.id),
+      sourceVariants(product).skus.map(sku => sku.id));
+    return JSON.stringify({ ...JSON.parse(model), variantOptions: options });
+  });
+  const createCell = bound.ptc.file;
+  const builtIn = await fs.readFile(createCell, "utf8");
+  const legacyCell = `const workers = [
+  { name: "es", instruction: "Produce Mexican Spanish" },
+  { name: "en", instruction: "Produce English" },
+  { name: "commerce", instruction: "Prepare the locally customized sales plan; omit SKU rows." },
+];
+await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), allowed_tools: []})));`;
+  try {
+    await fs.writeFile(createCell, legacyCell);
+    const localized = await translate(quantities, quantityOptions);
+    assert.equal(await fs.readFile(createCell, "utf8"), legacyCell, "preserves an installed custom PTC cell");
+    assert.deepEqual(localized.copy.salesAndShipping.skus, [
+      { sourceSkuId: "111", option: "1 pieza", stock: 7, priceMXN: 116 },
+      { sourceSkuId: "222", option: "3 piezas", stock: 3, priceMXN: 232 },
+      { sourceSkuId: "333", option: "6 piezas", stock: 4, priceMXN: 348 },
+    ]);
+    assert.match(localized.copy.salesAndShipping.origins["1 pieza.option"].basis, /1 個.*1 pieza/);
+    assert.equal(localized.copy.variantOptions, undefined);
+    const rerun = await generateListing(quantities, localized.copy, 0.1161, async () => '{"title":"Otra vez","description":"Texto."}');
+    assert.deepEqual(rerun.copy.salesAndShipping.skus, localized.copy.salesAndShipping.skus);
+  } finally {
+    await fs.writeFile(createCell, builtIn);
+  }
+
+  const colorsAndSizes = {
+    ...rich,
+    skus: [
+      { ...rich.skus[0], options: ["青", "M"] },
+      { ...rich.skus[1], options: ["白", "L"] },
+      cloth,
+    ],
+  };
+  const combinations = await translate(colorsAndSizes, [
+    { sourceSkuId: "222", label: "Blanco / L" },
+    { sourceSkuId: "111", label: "Azul / M" },
+  ]);
+  assert.deepEqual(combinations.copy.salesAndShipping.skus.map(sku => sku.option), ["Azul / M", "Blanco / L"]);
+  assert.ok(combinations.copy.salesAndShipping.excludedSkus.extra);
+  await assert.rejects(translate(quantities), /no Mexican Spanish variant label/);
+  await assert.rejects(translate(quantities, quantityOptions.slice(1)), /cover every eligible source SKU/);
+  await assert.rejects(translate(quantities, quantityOptions.map(row => ({ ...row, label: "X" }))), /unique option/);
+  await assert.rejects(translate(quantities, [{ ...quantityOptions[0], label: "3個" }, ...quantityOptions.slice(1)]), /Invalid Mexican Spanish variant label/);
+  await assert.rejects(translate(quantities, [{ ...quantityOptions[0], sourceSkuId: "unrelated" }, ...quantityOptions.slice(1)]), /unknown or duplicate source SKU/);
 }
 {
   const priced = {
@@ -220,6 +286,55 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "pagelens-mx-draft-"));
   process.env.PAGELENS_HOME = home;
   const draft = await import("./tiktok-mx-draft.mjs?draft-test");
+  {
+    const create = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
+    const saved = "https://seller.tiktokshopglobalselling.com/product/edit-draft/1738623714154153548?shop_region=MX";
+    const tabs = new Map();
+    const opens = [];
+    const navigations = [];
+    const group = new DraftTabs("1736073370556597841", async (tool, args) => {
+      if (tool === "list_tabs") return [...tabs.values()];
+      if (tool === "navigate_tab") {
+        navigations.push(args.url);
+        tabs.get(args.tabId).url = args.url;
+        return;
+      }
+      if (tool !== "open_tab") assert.fail(tool);
+      const id = opens.push(args);
+      tabs.set(id, { id, groupId: 5, url: args.url });
+      return { tabId: id, groupId: 5 };
+    });
+    const productUrl = "https://shop.tiktok.com/jp/pdp/1736073370556597841";
+    const edit = await group.open(productUrl);
+    assert.equal(opens[0].active, false);
+    assert.equal(await group.navigate(edit, create), edit);
+    assert.equal(group.tabs.has(productUrl), false);
+    assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+    assert.equal(group.tabs.get(saved), edit);
+    assert.equal(group.tabs.has(create), false);
+    await group.navigate(edit, create);
+    tabs.get(edit).url = saved;
+    const explicitNavigations = navigations.length;
+    assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+    assert.equal(navigations.length, explicitNavigations, "Seller Center already navigated to the saved draft");
+    assert.equal(group.tabs.get(saved), edit);
+    assert.equal(group.tabs.has(create), false);
+    for (const search of ["tab=draft&shop_region=MX", "shop_region=MX"]) {
+      tabs.get(edit).url = "https://seller.tiktokshopglobalselling.com/product/manage?" + search;
+      assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+      assert.equal(tabs.get(edit).url, saved);
+    }
+    assert.equal(opens.length, 1, "save and refresh stay in the visible editor tab");
+    tabs.delete(edit);
+    assert.equal(await group.reopenSavedDraft(edit, saved), 2);
+    assert.equal(opens[1].active, false, "if Chrome closed the editor, recovery opens in background");
+    assert.equal(opens[1].groupWithTab, undefined);
+    const unrelated = "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX&tab=active";
+    tabs.get(2).url = unrelated;
+    assert.equal(await group.reopenSavedDraft(2, saved), 3);
+    assert.equal(tabs.get(2).url, unrelated, "leave a tab navigated outside the draft flow untouched");
+    assert.equal(opens[2].active, false);
+  }
   const navigationUrl = "https://shop.tiktok.com/jp/pdp/1722345678901234567";
   let navigationReads = 0;
   await draft.waitForSourceTab(55, navigationUrl, async () => (
@@ -345,13 +460,26 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
     state.salesAndShipping.skus[0].stock = 2;
     await assert.rejects(inspect(), /M stock/);
     let calls = 0;
-    const execute = createDraftTransport(product, async () => { calls++; return { ok: true, result: { tabId: 51 } }; }, async () => url);
+    let currentUrl = url;
+    const execute = createDraftTransport(product, async () => { calls++; return { ok: true, result: { tabId: 51 } }; }, async () => currentUrl);
     const bridge = (tool, args) => execute({ action: "bridge_call", request: { tool, args } });
     await assert.rejects(bridge("run_js", { tabId: 51 }), /outside draft task/);
     await assert.rejects(bridge("open_tab", { url: "https://example.com" }), /destination/);
     await bridge("open_tab", { url });
     await assert.rejects(bridge("run_shell", { tabId: 51 }), /Unexpected draft tool/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 50, url }), /outside draft task/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url: "https://example.com" }), /destination/);
     assert.equal(calls, 1);
+    await bridge("navigate_tab", { tabId: 51, url });
+    assert.equal(calls, 2);
+    currentUrl = "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX";
+    await assert.rejects(bridge("run_js", { tabId: 51 }), /outside draft workflow/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url: "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX" }), /outside draft workflow/);
+    await bridge("navigate_tab", { tabId: 51, url });
+    assert.equal(calls, 3);
+    currentUrl += "&tab=active";
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url }), /outside draft workflow/);
+    assert.equal(calls, 3);
   }
   await fs.writeFile(path.join(dir, "source.json"), JSON.stringify(sourceFile));
   await fs.writeFile(path.join(dir, "listing.json"), JSON.stringify(listing));
@@ -479,9 +607,18 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
   assert.equal(opened.some((url) => url.includes("/product/create")), false);
   assert.equal(JSON.parse(await fs.readFile(path.join(reuseDir, "receipt.json"), "utf8")).startedTab, 4);
 
-  // Same retained form, partial content present: do not upload its files a second time.
+  // Resume the same retained form. Save only after the category and sales readback match.
   const createUrl = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
-  let clicks = 0, showSaved = false;
+  let clicks = 0, showSaved = false, category = "", fieldsPersist = false, mediaPersist = true;
+  const commerce = {
+    brand: "无品牌",
+    axes: ["Modelo"],
+    options: [["M"]],
+    skus: [{ label: "M", stock: 5, priceMXN: 100 }],
+    packagedWeightGrams: 500,
+    dimensionsInCm: true,
+    packageCm: { length: 10, width: 8, height: 7 },
+  };
   draft.setDraftBridgeForTests(async (tool, args) => {
     if (tool === "open_tab") {
       assert.ok(args.url.includes("/product/manage") || args.url.includes("/edit-draft/556"));
@@ -493,19 +630,31 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
         ? { ids: ["556"], matches: [{ id: "556", text: "Molde" }] } : { ids: [], matches: [] } };
       if (args.code.includes("另存为草稿")) { clicks++; return { ok: true, result: "" }; }
       assert.equal(args.tabId, 4);
-      return { ok: true, result: { url: createUrl, ...listing, gallery: 1, detailImages: 0, category: "" } };
+      if (args.code.includes("return await (function sellerRead")) return { ok: true, result: commerce };
+      const lostMedia = !mediaPersist && args.code.includes("let seen=0");
+      return { ok: true, result: { url: createUrl, ...listing, gallery: lostMedia ? 0 : 1, detailImages: 0, category,
+        salesAndShipping: fieldsPersist ? commerce : { ...commerce, skus: [] } } };
     }
     return { ok: true };
   });
+  await assert.rejects(draft.save(reuseDir), /Category did not match before saving/);
+  category = "Cocina";
+  await assert.rejects(draft.save(reuseDir), /Commercial fields differ before saving:.*SKU count/);
+  fieldsPersist = true;
+  mediaPersist = false;
+  await assert.rejects(draft.save(reuseDir), /Seller readback differs/);
+  assert.equal(clicks, 0);
+  mediaPersist = true;
   await assert.rejects(draft.save(reuseDir), /draft ID not yet confirmed/);
   const staged = JSON.parse(await fs.readFile(path.join(reuseDir, "receipt.json"), "utf8"));
-  assert.deepEqual([staged.startedTab, staged.partial, staged.verified, clicks], [4, true, false, 1]);
+  assert.deepEqual([staged.startedTab, staged.saving, staged.verified, clicks], [4, true, false, 1]);
   showSaved = true;
   await assert.rejects(draft.save(reuseDir), /stop at persisted draft/);
   assert.equal(clicks, 1);
   assert.equal(JSON.parse(await fs.readFile(path.join(recordDir, reuseProduct + ".json"), "utf8")).id, "556");
 
   // A failed variant commit with no verifiable category must leave the editor open without submitting.
+  category = "";
   const firstProduct = "1729600000000000004";
   const firstDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagelens-mx-checkpoint-"));
   await fs.writeFile(path.join(firstDir, "source.json"), JSON.stringify({

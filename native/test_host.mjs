@@ -98,6 +98,26 @@ try {
   const ensured = await handleFs({ action: "ensureDir", path: nested });
   assert(ensured.ok && ensured.kind === "directory" && fs.existsSync(nested), "fs ensureDir");
 
+  const inbox = path.join(tmp, "inbox");
+  fs.mkdirSync(inbox);
+  const extensionId = "a".repeat(32);
+  const directed = path.join(inbox, extensionId);
+  fs.mkdirSync(directed);
+  fs.writeFileSync(path.join(directed, "private.json"), "{}");
+  const listing = handleFs({ action: "readdir", root: inbox, inboxId: extensionId });
+  assert(listing.ok && listing.directedEntries.some(entry => entry.name === "private.json"), "targeted inbox has its own listing");
+  assert(!listing.entries.some(entry => entry.name === "private.json"), "legacy listing cannot consume targeted inbox files");
+  assert(handleFs({ action: "readdir", root: inbox, inboxId: "b".repeat(32) }).directedEntries === undefined, "another extension cannot list this route");
+  const job = { action: "claimInboxJob", root: inbox, rel: "draft.json" };
+  fs.writeFileSync(path.join(inbox, job.rel), '{"action":"ptc_create_mx_draft"}');
+  assert(!handleFs({ ...job, scope: "agent" }).ok, "agents cannot claim inbox jobs via file tools");
+  const first = handleFs(job);
+  assert(first.ok && first.claimed, "one inbox worker claims the job");
+  assert(!fs.existsSync(path.join(inbox, job.rel)), "claimed job disappears from the pending queue");
+  assert(fs.existsSync(path.join(inbox, first.rel)), "claimed payload is recoverable on disk");
+  assert(!handleFs(job).claimed, "a second worker cannot claim the same pending file");
+  assert(!handleFs({ ...job, rel: "../draft.json" }).ok, "claim is restricted to inbox filenames");
+
   const wrote = await handleFs({ action: "writeText", root: tmp, rel: "yt-x/meta.json", text: '{"ok":1}\n' });
   assert(wrote.ok && wrote.path === "yt-x/meta.json", "fs write");
   const read = await handleFs({ action: "readText", root: tmp, rel: "yt-x/meta.json" });
