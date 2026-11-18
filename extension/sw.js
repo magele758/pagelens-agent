@@ -8,6 +8,7 @@ import {
   completeHeadlessAgentPrompt,
 } from "./lib/agent/inbox.js";
 import { installInboxConfirm } from "./lib/agent/inbox-confirm.js";
+import { confirmDevelopmentUpdate } from "./lib/agent/inbox-development.js";
 import { AGENT_TASK_EVENTS, onAgentTaskEvent } from "./lib/agent/delegate.js";
 import { installWindowMail } from "./lib/window-mail.js";
 import { installDelegate } from "./lib/agent/delegate-sw.js";
@@ -28,7 +29,8 @@ setTimeout(() => {
   pollAgentInboxOnce().catch(() => {});
 }, 1500);
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
+  confirmDevelopmentUpdate(details).catch(() => {});
   applyOptionalLocalSettings().catch(() => {});
   syncAgentInboxAlarm().catch(() => {});
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});

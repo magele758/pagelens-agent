@@ -8,6 +8,8 @@
  *                 [--runtime auto|panel|headless] [--capsule-json '{"actions":["publish"],"platforms":["zhihu"]}'] [--max-steps 20]
  *   node tools/agent-inbox.mjs cancel [<promptId>] [--all]   # stop running agent_prompt / drop queued ones
  *   node tools/agent-inbox.mjs enqueue --action paste_html --html-file ./a.html --token-file ~/.pagelens/agents/cli.token
+ *   node tools/agent-inbox.mjs enqueue --extension-id <id> --action dev_status
+ *   node tools/agent-inbox.mjs enqueue --extension-id <id> --action dev_reload --revision <commit>
  *   node tools/agent-inbox.mjs wait <id>
  *   node tools/agent-inbox.mjs status
  */
@@ -58,12 +60,16 @@ function jobId(value) {
 }
 
 function enqueue(opts) {
-  ensureDirs();
   const id = jobId(opts.id || crypto.randomUUID());
   const action = String(opts.action || "").trim();
   if (!action) throw new Error("--action required");
   if (extensionId && ["agent_prompt", "agent_cancel"].includes(action))
     throw new Error("Agent prompts and cancellations use the shared inbox");
+  const development = action === "dev_status" || action === "dev_reload";
+  if (development && !extensionId) throw new Error(`${action} requires --extension-id`);
+  if (development && opts["token-file"]) throw new Error(`${action} does not accept a token`);
+  if (opts.revision !== undefined && action !== "dev_reload")
+    throw new Error("--revision is only used with dev_reload");
 
   const job = {
     id,
@@ -71,6 +77,12 @@ function enqueue(opts) {
     action,
   };
 
+  if (action === "dev_reload") {
+    if (typeof opts.revision !== "string" || !/^[0-9a-f]{40}$/.test(opts.revision))
+      throw new Error("dev_reload requires a full 40-hex --revision");
+    job.expectedRevision = opts.revision;
+  }
+  ensureDirs();
   if (action === "ptc_create_mx_draft") {
     if (typeof opts["source-url"] !== "string" || typeof opts.rate !== "string" ||
         !Number.isFinite(Number(opts.rate)) || Number(opts.rate) <= 0)
@@ -130,7 +142,8 @@ function enqueue(opts) {
     job.allowInsertHtmlFallback = true;
   }
   if (opts.replace === true || opts.replace === "true") job.replace = true;
-  const token = opts["token-file"] ? readMaybeFile(opts["token-file"]).trim() : process.env.PAGELENS_TOKEN?.trim();
+  const token = development ? undefined : opts["token-file"]
+    ? readMaybeFile(opts["token-file"]).trim() : process.env.PAGELENS_TOKEN?.trim();
   if (token) job.token = token;
 
   let html = opts.html ? String(opts.html) : "";

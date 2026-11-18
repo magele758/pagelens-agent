@@ -33,6 +33,7 @@ import { enforceTokenGuards } from "../bridge/trust-guard.js";
 import { chromeStorageAdapter, createApprovalQueue } from "./trust/approval-queue.js";
 import { offscreenDoc } from "../offscreen-doc.js";
 import { markJobStarted, recordJobFinished } from "./inbox-activity.js";
+import { developmentInboxJob } from "./inbox-development.js";
 import { cancelAgentPrompt, settleHeadless, startAgentPrompt, takeCompletion, takeExpired } from "./inbox-agent.js";
 
 export const INBOX_ROOT = "~/.pagelens/agent-inbox";
@@ -877,15 +878,24 @@ export async function pollAgentInboxOnce(deps = {}) {
       const startedAt = Date.now();
       markJobStarted();
       let result;
+      const development = ["dev_status", "dev_reload"].includes(job?.action);
       try {
         if (directed && ["agent_prompt", "agent_cancel"].includes(job?.action))
           throw new Error("Agent prompts and cancellations use the shared inbox");
-        result = await executeJob(job, { ...deps, settings });
+        result = development
+          ? { ok: true, result: await developmentInboxJob(job, { directed, queued: names.length > 1 }) }
+          : await executeJob(job, { ...deps, settings });
       } catch (err) {
         result = { ok: false, error: err?.message || String(err) };
+        if (development && err?.code === "DEVELOPMENT_BUSY") result.errorCode = err.code;
       }
       await recordJobFinished(job, result, startedAt);
       results.push(await finishJob(root, name, job, result, claimedRel));
+      if (result.ok && job.action === "dev_reload") {
+        // Persist the accepted receipt before Chrome destroys the worker.
+        chrome.runtime.reload();
+        break;
+      }
       if (result.ok && job.followUp === true && ["bridge_call", "fill_mx_draft", "read_mx_draft", "refresh_mx_draft_list"].includes(job.action))
         pollForNextStep();
     }
