@@ -17,6 +17,7 @@ const standardColors = new Map([
   ["pink", "粉色"], ["yellow", "黄色"], ["orange", "橙色"], ["purple", "紫色"], ["gray", "灰色"], ["grey", "灰色"],
 ]);
 const standardColor = label => standardColors.get(keyOf(label.replace(/^[a-z]\s+-\s+/iu, "")));
+const stockMembers = new Set(["stock", "quantity"]);
 
 function optionAliases(value) {
   const alias = keyOf(value);
@@ -59,12 +60,24 @@ function matchingSku(field, rows, rowCount, colors) {
   return null;
 }
 
+function matchedSkuGroups(state, sources, colors) {
+  const rows = state.skuRows || [...new Map(state.fields.filter(field => field.skuMember && field.skuGroup).map(field =>
+    [field.skuGroup, { id: field.skuGroup, labels: field.rowLabels }])).values()];
+  const matched = new Map();
+  for (const row of rows) {
+    const source = matchingSku({ rowLabels: row.labels }, sources, rows.length, colors);
+    if (source) matched.set(source, matched.has(source) ? null : row.id);
+  }
+  return matched;
+}
+
 export async function replayTemuListing({ tabId, input, call, onStep, signal, suggestFields, shouldSuggestField } = {}) {
   const start = Date.now();
   const items = [];
   const issues = [];
   const attempted = new Set();
   const colorLabels = new Map();
+  const popupStock = new Set();
   let step = "validate";
   let draftUrl;
   let missing = [];
@@ -402,22 +415,23 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     await applyVariantGroups();
     const afterVariants = await readEditor();
     if (!afterVariants?.ok) return stop("商品规格", afterVariants);
-    for (const field of afterVariants.fields.filter(field => field.skuMember)) await applyField(field, explicitValue(field));
+    const classification = afterVariants.fields.filter(field => field.skuMember === "productSkuMultiPack.skuClassification" &&
+      hasValue(explicitValue(field)));
+    for (const field of classification) await applyField(field, explicitValue(field));
+    const skuEditor = classification.length ? await readEditor() : afterVariants;
+    if (!skuEditor?.ok) return stop("SKU 联动字段", skuEditor);
+    for (const field of skuEditor.fields.filter(field => field.skuMember)) await applyField(field, explicitValue(field));
+    const sources = input.skus?.length ? input.skus : [input];
+    for (const [source, key] of matchedSkuGroups(skuEditor, sources, colorLabels)) {
+      const quantity = source.quantity ?? input.quantity;
+      if (!key || !hasValue(quantity) || skuEditor.fields.some(field => field.skuGroup === key && stockMembers.has(field.skuMember))) continue;
+      const outcome = await run("temu_stock", { kind: "write", key, value: quantity });
+      record(`${source.sellerSku || "SKU"} 库存`, outcome, key);
+      if (outcome?.ok) popupStock.add(key);
+    }
     if (input.skus?.length && !input.price && input.skus.every(row => !row.price)) {
       issues.push(asIssue("申报价格", { code: "SKU_PRICE_MISSING", message: "该商品资料没有卖家申报价。请使用实际的人民币申报价，来源平台售价不会作为申报价。" }));
     }
-    const skuRows = afterVariants.skuRows;
-    if (input.skus?.length && (Array.isArray(skuRows) ? !skuRows.length : !afterVariants.fields.some(field => field.skuMember && field.skuGroup))) {
-      verifiedSkuCount = 0;
-      issues.push(asIssue("SKU", { code: "SKU_NOT_RENDERED", message: "当前类目没有生成可填写的 SKU 行。请核对规格是否已被 Temu 接受。" }));
-    } else if (input.skus?.length && Array.isArray(skuRows)) {
-      const missingRows = input.skus.filter(source => !skuRows.some(row =>
-        matchingSku({ rowLabels: row.labels }, [source], skuRows.length, colorLabels)));
-      verifiedSkuCount = input.skus.length - missingRows.length;
-      if (missingRows.length) issues.push(asIssue("SKU", { code: "SKU_ROWS_MISSING",
-        message: `有 ${missingRows.length} 个源 SKU 未在 Temu 表格中匹配到，请核对规格。` }));
-    }
-
     report("images", "上传本商品图片并核对页面回显");
     const beforeImages = await readEditor();
     if (!beforeImages?.ok) return stop("图片控件", beforeImages);
@@ -481,6 +495,26 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     report("verify", "复核试填表单");
     const final = await readEditor();
     if (!final?.ok) return stop("试填回读", final);
+    const skuFields = final.fields.filter(field => field.skuMember && field.skuGroup);
+    const matched = matchedSkuGroups(final, sources, colorLabels);
+    if (input.skus?.length) {
+      verifiedSkuCount = sources.filter(source => matched.get(source)).length;
+      if (verifiedSkuCount < sources.length) issues.push(asIssue("SKU", { code: "SKU_ROWS_MISSING",
+        message: `有 ${sources.length - verifiedSkuCount} 个源 SKU 未唯一匹配到当前表格。` }));
+    }
+    let missingStock = 0;
+    for (const source of sources) {
+      const expected = source.quantity ?? input.quantity;
+      if (!hasValue(expected)) continue;
+      const key = matched.get(source);
+      const inline = skuFields.some(field => field.skuGroup === key && stockMembers.has(field.skuMember) &&
+        hasValue(field.value) && Number(field.value) === Number(expected));
+      if (inline) continue;
+      const stock = popupStock.has(key) && await run("temu_stock", { kind: "inspect", key });
+      if (!stock?.ok || !hasValue(stock.value) || Number(stock.value) !== Number(expected)) missingStock++;
+    }
+    if (missingStock) issues.push(asIssue("库存", { code: "SKU_QUANTITY_UNVERIFIED",
+      message: `有 ${missingStock} 个 SKU 未回读到指定库存，请在 Temu 核对库存列。` }));
     missing = listMissing();
     verificationComplete = !final.truncated;
     const unsupportedRequired = final.unsupported?.filter(field => field.required) || [];

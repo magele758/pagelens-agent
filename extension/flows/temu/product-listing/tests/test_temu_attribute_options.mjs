@@ -48,11 +48,11 @@ test("only retains directory-validated shared and per-variant gallery paths", ()
 
 test("searches the active form control, waits for filtered options, and verifies the exact selection", async t => {
   const href = "https://agentseller.temu.com/goods/edit?productDraftId=test";
-  const dom = new JSDOM(`<main id="page_container_id"><div id="productProperties[22]">
-    <label>材质 Material</label>
+  const dom = new JSDOM(`<main id="page_container_id"><div data-testid="beast-core-form-item">
+    <label>材质 Material</label><div id="productProperties[22]">
     <div class="ST_outerWrapper_test"><div class="ST_head_test"><input aria-controls="materials" readonly>
     <span class="ST_selectValueSingle_test"></span></div></div>
-    </div></main><div data-testid="beast-core-portal" hidden>
+    </div></div></main><div data-testid="beast-core-portal" hidden>
     <input type="search"><div id="materials" role="listbox"></div>
     </div><div class="MDL_inner_unexpected" hidden>其他操作提示</div>`, { url: href, runScripts: "outside-only" });
   t.after(() => dom.window.close());
@@ -66,16 +66,27 @@ test("searches the active form control, waits for filtered options, and verifies
   const overlay = document.querySelector(".MDL_inner_unexpected");
   const selection = document.querySelector('[class^="ST_selectValueSingle_"]');
   let clicks = 0;
+  let dismissed = 0;
   let inputEvents = 0;
+  let materialScrolled = false;
+  menu.getBoundingClientRect = () => ({ height: 80, top: 100, bottom: 180 });
   function show(items) {
     menu.innerHTML = items.map(([id, name]) => `<div role="option" data-value="${id}">${name}</div>`).join("");
+    const material = menu.querySelector('[data-value="temu-poly"]');
+    if (material) {
+      material.getBoundingClientRect = () => materialScrolled ? { height: 28, top: 130, bottom: 158 } : { height: 28, top: 220, bottom: 248 };
+      material.scrollIntoView = () => { materialScrolled = true; };
+    }
   }
   input.addEventListener("focus", () => {
     portal.hidden = false;
     search.value = "";
     show([["cotton", "棉 Cotton"]]);
   });
-  input.addEventListener("keydown", event => { if (event.key === "Escape") portal.hidden = true; });
+  document.querySelector("main label").addEventListener("mousedown", () => {
+    dismissed++;
+    portal.hidden = true;
+  });
   search.addEventListener("input", () => {
     inputEvents++;
     if (search.value === "blocked") {
@@ -83,29 +94,32 @@ test("searches the active form control, waits for filtered options, and verifies
       return;
     }
     window.setTimeout(() => show(search.value.toLowerCase() === "polyester"
-      ? [["temu-poly", "聚酯纤维 Polyester"], ["temu-recycled-poly", "再生聚酯纤维 Recycled Polyester"]] : []), 210);
+      ? [["temu-poly", "聚酯纤维(涤纶）Polyester"], ["temu-recycled-poly", "再生聚酯纤维 Recycled Polyester"]] : []), 210);
   });
   menu.addEventListener("click", event => {
+    assert.equal(materialScrolled, true, "a clipped material option is revealed before selection");
     clicks++;
     selection.textContent = event.target.textContent;
-    portal.hidden = true;
   });
   const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
   const [field] = (await run({ kind: "inspect" })).fields;
   const probe = await run({ kind: "probe", query: "Polyester", field });
   assert.equal(probe.ok, true);
   assert.equal(probe.filtered, true);
-  assert.deepEqual([...probe.options[0].aliases], ["聚酯纤维", "Polyester"]);
+  assert.ok(probe.options[0].aliases.includes("聚酯纤维"));
+  assert.ok(probe.options[0].aliases.includes("Polyester"));
   assert.equal(clicks, 0);
   assert.equal(portal.hidden, true);
-  assert.equal((await run({ kind: "select", value: "temu-poly", query: "Polyester", field })).status, "filled");
+  assert.equal((await run({ kind: "select", value: "聚酯纤维", query: "Polyester", field })).status, "filled");
   assert.equal(clicks, 1);
-  assert.equal(selection.textContent, "聚酯纤维 Polyester");
+  assert.equal(selection.textContent, "聚酯纤维(涤纶）Polyester");
+  assert.equal(dismissed, 2);
   assert.equal(inputEvents, 2);
   assert.equal((await run({ kind: "select", value: "poly", field })).code, "OPTION_MISSING");
   assert.equal(clicks, 1);
   assert.equal((await run({ kind: "select", value: "blocked", field })).code, "PAGE_CHANGED");
   assert.equal(clicks, 1);
+  assert.equal(dismissed, 3);
   assert.equal(overlay.hidden, false);
 });
 

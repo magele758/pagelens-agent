@@ -134,7 +134,7 @@ export async function temuControls(request) {
     const locator = { adapter: "temu-select", tag: "input", type: input.type, role: "combobox", selector, label };
     const selected = readSelected(wrapper);
     const sku = /^productSkuMap\.([\w-]*)\.(sensitiveAttr|productSkuMultiPack\.skuClassification)$/u.exec(group.id);
-    return { input, wrapper, field: {
+    return { input, wrapper, holder: group, field: {
       key: fieldKey || group.id, kind: "select", label, locator, required: Boolean(required), multiple, value: multiple ? selected : selected[0] || "",
       constraints: { ...(required ? { required: true } : {}), ...(multiple ? { multiple: true } : {}) }, options: [],
       ...(sku && { skuGroup: sku[1], skuMember: sku[2], rowLabels: rowLabelsFor(group) }),
@@ -202,11 +202,29 @@ export async function temuControls(request) {
     return [...lists, ...dropdowns.filter(node => !dropdowns.some(parent => parent !== node && parent.contains(node)))];
   };
   const popupFor = menu => menu.closest('[class*="ST_dropdown_"]') || menu.closest('[data-testid="beast-core-portal"]') || menu;
-  const nonAction = 'a,button,input,select,textarea,label,summary,[role="button"],[role="tab"],[role="link"],[role="option"],[contenteditable="true"]';
-  function neutralTitle() {
-    const titles = Array.from(document.querySelectorAll('#page_container_id [class*="STP_stepsItemTitle_"]'))
-      .filter((node) => clean(node.textContent) === "基本信息" && visible(node) && !node.closest(nonAction) && !node.querySelector(nonAction));
-    return titles.length === 1 ? titles[0] : null;
+  const interactive = 'a,button,input,select,textarea,summary,[role="button"],[role="tab"],[role="link"],[role="option"],[contenteditable="true"]';
+  function* outsideTargets({ wrapper, holder, field }, menu) {
+    const popup = popupFor(menu);
+    const isStatic = node => visible(node) && !wrapper.contains(node) && !popup.contains(node) &&
+      !node.closest(interactive) && !node.querySelector(interactive) && !node.closest("label")?.control;
+    const label = key(field.label);
+    const root = document.getElementById("page_container_id");
+    for (let area = holder, depth = 0; area && area !== root && depth < 4; area = area.parentElement, depth++) {
+      const labels = [...area.querySelectorAll(`${LABEL},span,div`)].filter(node =>
+        key(labelText(node)) === label && isStatic(node) && ![...node.children].some(child => key(labelText(child)) === label));
+      if (labels.length === 1) {
+        yield labels[0];
+        break;
+      }
+      if (area.matches(FORM_ITEM) || labels.length > 1) break;
+    }
+    const headings = [...root?.querySelectorAll('h1,h2,h3,[role="heading"],[class*="STP_stepsItemTitle_"]') || []];
+    for (const title of ["商品属性", "基本信息"]) {
+      const matches = headings.filter(node => clean(node.textContent) === title && isStatic(node) &&
+        ![...node.children].some(child => clean(child.textContent) === title));
+      if (matches.length === 1) yield matches[0];
+    }
+    yield document.body;
   }
   const containsOptions = (menu) => Boolean(menu.querySelector(OPTION));
 
@@ -267,26 +285,35 @@ export async function temuControls(request) {
 
   async function close(control, menu) {
     if (!validPage() || !menu || !visible(menu)) return true;
-    if (blocked()) return false;
+    const ownsMenu = () => {
+      if (!validPage() || blocked()) return false;
+      const openMenus = menus();
+      return openMenus.length === 1 && openMenus[0] === menu;
+    };
+    if (!ownsMenu()) return false;
     const input = control.input;
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-    if (visible(menu) && input === document.activeElement) input.blur();
-    if (visible(menu) && menu.contains(document.activeElement)) document.activeElement.blur();
-    if (visible(menu)) {
-      // The product page's static heading is the usual click-away target.
-      const outside = neutralTitle() || document.body;
+    const active = document.activeElement;
+    if (control.wrapper.contains(active) || popupFor(menu).contains(active)) {
+      active.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      if (ownsMenu()) active.blur();
+      if (await poll(() => !visible(menu), 100)) return true;
+    }
+    // The active field label is outside the portal and uses its normal outside-press handling.
+    for (const outside of outsideTargets(control, menu)) {
+      if (!ownsMenu()) break;
       const rect = outside.getBoundingClientRect();
       const eventOptions = { bubbles: true, cancelable: true, composed: true,
         clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
       const Pointer = globalThis.PointerEvent || MouseEvent;
       for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-        if (!visible(menu)) break;
+        if (!ownsMenu()) break;
         const EventType = type.startsWith("pointer") ? Pointer : MouseEvent;
         outside.dispatchEvent(new EventType(type, { ...eventOptions, pointerType: "mouse", isPrimary: true }));
         await wait(0);
       }
+      if (await poll(() => !visible(menu), 120)) return true;
     }
-    if (visible(menu)) {
+    if (ownsMenu()) {
       const sink = document.createElement("span");
       sink.tabIndex = -1;
       sink.style.cssText = "position:fixed;width:0;height:0;top:0;left:0;pointer-events:none";
@@ -299,7 +326,7 @@ export async function temuControls(request) {
       }
     }
     if (visible(menu)) await poll(() => !visible(menu), 220);
-    if (visible(menu) && validPage() && !blocked() && menus().length === 1) {
+    if (ownsMenu()) {
       const head = input.closest(HEAD);
       if (head?.closest(WRAPPER) === control.wrapper && visible(head)) {
         head.click();
@@ -313,10 +340,12 @@ export async function temuControls(request) {
     return [...menu.querySelectorAll(OPTION)].filter(element => visible(element) && !menu.contains(element.parentElement.closest(OPTION))).map(element => {
       const label = clean(element.textContent, 500);
       const value = clean(element.getAttribute("data-value") || element.getAttribute("value") || label, 1000);
-      const parts = /^([\p{Script=Han}\d\s]+?)\s*[(\[]?([a-z][a-z\d\s?'’/-]*?)[)\]]?$/iu.exec(label.normalize("NFKC"));
+      const normalized = label.normalize("NFKC");
+      const parts = /^([\p{Script=Han}\d\s]+?(?:\([\p{Script=Han}\d\s]+\))?)\s*[(\[]?([a-z][a-z\d\s?'’/-]*?)[)\]]?$/iu.exec(normalized);
+      const qualified = /^([\p{Script=Han}\d\s]+?)\s*\([\p{Script=Han}\d\s]+\)$/u.exec(parts?.[1] || normalized);
       const childLabels = Array.from(element.querySelectorAll("span,[aria-label]"))
         .map((node) => clean(node.getAttribute("aria-label") || node.textContent));
-      const aliases = [...new Set([element.getAttribute("aria-label"), ...(parts?.slice(1) || []), ...childLabels])]
+      const aliases = [...new Set([element.getAttribute("aria-label"), ...(parts?.slice(1) || []), qualified?.[1], ...childLabels])]
         .map(alias => clean(alias)).filter(alias => alias && key(alias) !== key(label)).slice(0, 12);
       const status = element.getAttribute("data-checked") ?? element.getAttribute("aria-selected");
       const disabled = element.matches('[data-disabled="true"],[aria-disabled="true"],[disabled],a[href]') ||
@@ -502,9 +531,19 @@ export async function temuControls(request) {
       if (unwanted.some((row) => row.disabled)) return fail("OPTION_DISABLED", "当前包含无法取消的选项。");
       const wanted = desired.filter((row) => !prior.some((choice) => same(row, choice)));
       for (const choice of [...wanted, ...unwanted]) {
-        const current = await find(choice.value, clean(query, 120) && !checked.multiple ? query : choice.aliases[0] || choice.label, choice);
+        const term = clean(query, 120) && !checked.multiple ? query : choice.aliases[0] || choice.label;
+        let current = await find(choice.value, term, choice);
         if (!validPage() || blocked()) return fail("PAGE_CHANGED", "页面或弹窗发生变化，已停止填写。", changed);
         if (!current) return fail("OPTION_CHANGED", "下拉选项已变化。", changed);
+        const rect = current.element.getBoundingClientRect();
+        const viewport = menu.getBoundingClientRect();
+        if (rect.height && (rect.top < Math.max(0, viewport.top) || rect.bottom > Math.min(innerHeight, viewport.bottom))) {
+          current.element.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+          await wait(45);
+          current = await find(choice.value, term, choice);
+          if (!validPage() || blocked()) return fail("PAGE_CHANGED", "页面或弹窗发生变化，已停止填写。", changed);
+          if (!current) return fail("OPTION_CHANGED", "下拉选项已变化。", changed);
+        }
         current.element.click();
         changed = true;
         await wait(25);

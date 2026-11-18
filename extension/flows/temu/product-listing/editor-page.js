@@ -309,8 +309,9 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
       return fail("VALUE_INVALID", `「${field.label}」超出平台校验范围。`);
     }
   }
+  const titleComparable = text => text.normalize("NFKC").replace(/[‘’]/gu, "'").toLowerCase();
   const sameValue = actual => actual === wanted || key === "productEnName" &&
-    typeof actual === "string" && typeof wanted === "string" && actual.toLowerCase() === wanted.toLowerCase();
+    typeof actual === "string" && typeof wanted === "string" && titleComparable(actual) === titleComparable(wanted);
   if (sameValue(field.value)) return { ok: true, status: "unchanged", ...defaultOutcome };
   if (!ready()) return fail("PAGE_CHANGED", "当前商品或弹窗已变化。");
   if (typeof wanted === "boolean") input.click();

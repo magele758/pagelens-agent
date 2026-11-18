@@ -9,6 +9,7 @@ import { temuEditorPage } from "./editor-page.js";
 import { temuMediaPage } from "./media-page.js";
 import { temuSpecPage } from "./spec-page.js";
 import { isTemuCategoryPage, temuStagePage } from "./stage1.js";
+import { temuStockPage } from "./stock-page.js";
 
 const SITE = "https://agentseller.temu.com";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -263,6 +264,8 @@ export function createTemuListingToolCaller({
             return await runInPage(temuEditorPage, { kind: "add-parent-spec", href });
           case "temu_spec_values":
             return await runInPage(temuSpecPage, { href, parentIndex: args.parentIndex, labels: args.labels, values: args.values });
+          case "temu_stock":
+            return await runInPage(temuStockPage, { href, kind: args.kind, key: args.key, value: args.value });
           case "temu_apparel":
             if (!["inspect", "add-color", "set-color", "set-sizes", "select-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
               return failure("ACTION_UNSUPPORTED", "此操作不属于服装试填。");
