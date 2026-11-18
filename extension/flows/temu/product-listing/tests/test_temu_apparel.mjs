@@ -93,7 +93,8 @@ function sizeFixture(labels) {
 {
   const key = "productSkcList[0].mainSpec[0]";
   const color = "E - White Stripe";
-  const page = fixture(`<div id="${key}"><div class="ST_outerWrapper_test"><div class="ST_head_test">
+  const page = fixture(`<span class="STP_stepsItemTitle_test">基本信息</span>
+    <div id="${key}"><div class="ST_outerWrapper_test"><div class="ST_head_test">
       <input placeholder="选择或自定义颜色" aria-controls="custom-colors">
     </div></div></div>
     <div data-testid="beast-core-portal"><div role="listbox" id="custom-colors" hidden>
@@ -107,7 +108,8 @@ function sizeFixture(labels) {
   input.addEventListener("focus", () => { menu.hidden = false; });
   input.addEventListener("keydown", event => { if (event.key === "Tab") tabbed = true; });
   menu.querySelector("span").addEventListener("click", () => { wrongClicks++; });
-  doc.body.addEventListener("mousedown", () => {
+  input.addEventListener("blur", () => { menu.hidden = true; });
+  doc.querySelector(".STP_stepsItemTitle_test").addEventListener("mousedown", () => {
     if (!tabbed || input.value !== color || doc.activeElement === input) return;
     input.placeholder = color;
     input.value = "";
@@ -117,6 +119,28 @@ function sizeFixture(labels) {
   assert.equal((await page.run({ kind: "inspect" })).rows[0].value, color);
   assert.equal((await page.run({ kind: "set-color", key, value: color })).status, "unchanged");
   assert.equal(wrongClicks, 0);
+  page.close();
+}
+
+{
+  const key = "productSkcList[0].mainSpec[0]";
+  const page = fixture(`<div id="${key}"><div class="ST_outerWrapper_test"><div class="ST_head_test">
+      <input placeholder="选择或自定义颜色" aria-controls="alternate-colors">
+    </div></div></div>
+    <div data-testid="beast-core-portal"><div role="listbox" id="alternate-colors" hidden>
+      <span role="option">黑色</span>
+    </div></div>`);
+  const input = page.doc.querySelector("input");
+  const menu = page.doc.getElementById("alternate-colors");
+  input.addEventListener("focus", () => { menu.hidden = false; });
+  menu.querySelector("span").addEventListener("click", () => {
+    menu.hidden = true;
+    input.parentElement.insertAdjacentHTML("beforeend", '<span class="ST_selectValueSingle_test">黑色</span>');
+  });
+  const result = await page.run({ kind: "set-color", key, value: "B - Black", alternate: "黑色" });
+  assert.equal(result.value, "黑色");
+  assert.equal(result.status, "filled");
+  assert.equal(input.value, "");
   page.close();
 }
 

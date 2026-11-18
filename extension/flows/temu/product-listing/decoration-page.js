@@ -72,8 +72,13 @@ export async function temuDecorationPage({ href, description = "", kind = "fill"
     const save = exact(active, buttons, "保存");
     if (!save) return fail("DECORATION_UNVERIFIED", "找不到详情页装修弹窗内的保存按钮。");
     save.click();
-    const closed = await waitFor(() => !decoration());
-    return closed ? { ok: true, status: "verified" } : fail("DECORATION_UNVERIFIED", "详情页装修弹窗尚未关闭，请核对后继续。");
+    const outcome = await waitFor(() => {
+      if (!decoration()) return { ok: true, status: "verified" };
+      const imageRequired = [...document.querySelectorAll('div,span,[role="alert"]')].some(node =>
+        visible(node) && !node.childElementCount && clean(node.textContent) === "详情图文需至少上传一张图片");
+      return imageRequired ? fail("DETAIL_IMAGE_REQUIRED", "Temu 要求详情图文至少有一张图片。请选含详情图的商品目录，并勾选上传图片后重试。") : null;
+    });
+    return outcome || fail("DECORATION_UNVERIFIED", "详情页装修弹窗尚未关闭，请核对后继续。");
   }
 
   if (kind === "apply") return apply(description);

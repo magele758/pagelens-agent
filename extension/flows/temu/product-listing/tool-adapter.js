@@ -222,7 +222,8 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
             if (!state.ok) return state;
             const dropdowns = await runInPage(temuControls, { kind: "inspect", scope: editorScope() });
             if (!dropdowns.ok) return dropdowns;
-            return { ...state, fields: [...state.fields, ...dropdowns.fields], unsupported: dropdowns.unsupported };
+            return { ...state, fields: [...state.fields, ...dropdowns.fields],
+              unsupported: dropdowns.unsupported, truncated: Boolean(state.truncated || dropdowns.truncated) };
           }
           case "temu_field_options":
           case "temu_select": {
@@ -243,7 +244,7 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
             if (!["inspect", "add-color", "set-color", "set-sizes", "select-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
               return failure("ACTION_UNSUPPORTED", "此操作不属于服装试填。");
             }
-            return await runInPage(temuApparelPage, { href, kind: args.kind, key: args.key, value: args.value });
+            return await runInPage(temuApparelPage, { href, kind: args.kind, key: args.key, value: args.value, alternate: args.alternate });
           case "temu_description":
             return await fillDetails(args);
           case "temu_origin":

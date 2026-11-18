@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { chooseTemuProductDirectory, loadTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../input.js";
+import { chooseTemuProductDirectory, createTemuSuggestionFilter, loadTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../input.js";
 import { loadProductDirectory } from "../../../../../native/product-directory.mjs";
 import { handleRequest } from "../../../../../native/pagelens-host.mjs";
 import { pickProductDirectory } from "../../../../../native/product-directory-picker.mjs";
@@ -194,4 +194,19 @@ test("suggests only live allowed option IDs and descriptive fields, preserving t
   assert.deepEqual(result.values, { season: "12", fabric: "plastic", features: ["out", "work"], english: "Outdoor Water Bottle" });
   assert.deepEqual(result.missing.map(field => field.key), ["style", "origin", "length"]);
   assert.deepEqual(result.rejected, [{ key: "style", label: "风格" }]);
+});
+
+
+test("probes only fields supported by product evidence or enabled text suggestions", () => {
+  const product = { title: "Water Bottle", attributes: { 主体材质: "不锈钢" } };
+  const material = { label: "主体材质", kind: "select" };
+  const location = { label: "制造地点", kind: "select" };
+  const season = { label: "季节", kind: "select" };
+  const local = createTemuSuggestionFilter(product, { useModel: false });
+  const withModel = createTemuSuggestionFilter(product);
+  assert.equal(local(material), true);
+  assert.equal(local(location), false);
+  assert.equal(local(season), false);
+  assert.equal(withModel(location), false);
+  assert.equal(withModel(season), true);
 });

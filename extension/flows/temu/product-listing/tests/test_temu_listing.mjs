@@ -71,6 +71,7 @@ const input = {
   });
   assert.equal(result.status, "needs-review");
   assert.equal(result.code, "PAGE_CHANGED");
+  assert.equal(result.verificationComplete, false);
 }
 
 {
