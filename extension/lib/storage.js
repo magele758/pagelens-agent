@@ -1,0 +1,293 @@
+import { normalizeUiTheme, normalizeThemeColors } from "./ui-theme.js";
+import { hydrateTextCatalog } from "./text-providers.js";
+import { normalizeJevSettings } from "./jev.js";
+import { normalizeBridgeSettings } from "./bridge/policy.js";
+import { defaultIrreversibleActions, normalizeIrreversibleActions } from "./agent/trust/irreversible.js";
+
+export const PRESETS = [
+  { id: "custom", name: "自定义", baseUrl: "" },
+  { id: "local-mock", name: "本地 Mock（开发）", baseUrl: "http://127.0.0.1:18787/v1" },
+  { id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
+  { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
+  { id: "siliconflow", name: "SiliconFlow", baseUrl: "https://api.siliconflow.cn/v1" },
+  { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
+  { id: "moonshot", name: "Kimi / Moonshot", baseUrl: "https://api.moonshot.cn/v1" },
+  { id: "dashscope", name: "通义 兼容模式", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { id: "volcengine", name: "火山方舟 兼容", baseUrl: "https://ark.cn-beijing.volces.com/api/v3" },
+  { id: "gemini-compat", name: "Gemini OpenAI 兼容", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  { id: "ollama", name: "Ollama 本地", baseUrl: "http://127.0.0.1:11434/v1" },
+  { id: "lmstudio", name: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1" },
+];
+
+export const ASR_PRESETS = [
+  { id: "custom", name: "自定义", baseUrl: "" },
+  { id: "v1-transcribe", name: "自建 /v1/transcribe", baseUrl: "http://127.0.0.1:8002" },
+  { id: "openai", name: "OpenAI Whisper", baseUrl: "https://api.openai.com/v1" },
+  { id: "groq", name: "Groq Whisper", baseUrl: "https://api.groq.com/openai/v1" },
+  { id: "siliconflow", name: "SiliconFlow", baseUrl: "https://api.siliconflow.cn/v1" },
+  { id: "local", name: "本地 Whisper（OpenAI 兼容）", baseUrl: "http://127.0.0.1:8000/v1" },
+];
+
+export const TTS_PRESETS = [
+  { id: "off", name: "关闭", baseUrl: "" },
+  { id: "index-tts", name: "Index-TTS 2.5（Gradio）", baseUrl: "http://127.0.0.1:7860" },
+  { id: "cosyvoice", name: "CosyVoice 跨语种音色克隆", baseUrl: "http://127.0.0.1:50000" },
+  { id: "custom", name: "自定义 Gradio", baseUrl: "" },
+];
+
+function emptyModel() {
+  return {
+    preset: "custom",
+    baseUrl: "",
+    model: "",
+    apiKey: "",
+  };
+}
+
+function emptyAsr() {
+  return {
+    ...emptyModel(),
+    language: "",
+  };
+}
+
+function emptyTts() {
+  return {
+    preset: "off",
+    baseUrl: "",
+    lang: "ZH",
+    durationFactor: 1,
+    bufferSegments: 5,
+    preparationMode: "progressive",
+    contextMode: "cue",
+    translateAheadSeconds: 600,
+    bufferSeconds: 30,
+    playbackMode: "sync",
+    gapMs: 0,
+  };
+}
+
+function emptyLangfuse() {
+  return {
+    enabled: false,
+    baseUrl: "http://localhost:3000",
+    publicKey: "",
+    secretKey: "",
+    environment: "development",
+    release: "0.12.0",
+  };
+}
+
+export const SUMMARY_INPUT_TOKENS = 200000;
+
+export function normalizeSummaryInputTokens(value) {
+  const tokens = Number(value);
+  return Number.isFinite(tokens) && tokens > 0 ? Math.min(2000000, Math.max(1000, Math.round(tokens))) : SUMMARY_INPUT_TOKENS;
+}
+
+export function defaultSettings() {
+  return {
+    text: { ...emptyModel(), summaryInputTokens: SUMMARY_INPUT_TOKENS },
+    multimodal: emptyModel(),
+    asr: emptyAsr(),
+    tts: emptyTts(),
+    langfuse: emptyLangfuse(),
+    jev: normalizeJevSettings(),
+    multimodalSameAsText: false,
+    answerLanguage: "zh-CN",
+    uiFont: "md",
+    uiTheme: "default",
+    uiThemeColors: {},
+    shareActiveTab: true,
+    nativeShell: true,
+    cdpInput: true,
+    agentInboxEnabled: false,
+    agentInboxVersion: 1,
+    agentPromptEnabled: true,
+    ...normalizeBridgeSettings(),
+    agentGatewayEnabled: false,
+    hitlMode: "balanced",
+    irreversibleActions: defaultIrreversibleActions(),
+    loopEngine: "kernel",
+    hitlTimeoutSeconds: 30,
+    skillsEnabled: false,
+    dailyNotesFolder: "Daily",
+    shortcuts: [],
+    textProviders: [],
+    textRef: null,
+  };
+}
+
+export function normalizeSettings(raw) {
+  const base = defaultSettings();
+  const merged = { ...base, ...(raw || {}) };
+  merged.jev = normalizeJevSettings(raw?.jev);
+  merged.dailyNotesFolder = typeof raw?.dailyNotesFolder === "string"
+    ? raw.dailyNotesFolder.trim().replace(/^\/+|\/+$/g, "")
+    : (base.dailyNotesFolder || "Daily");
+  merged.text = { ...base.text, ...(raw?.text || {}) };
+  merged.text.summaryInputTokens = normalizeSummaryInputTokens(merged.text.summaryInputTokens);
+  const catalog = hydrateTextCatalog(raw || merged, merged.text);
+  merged.textProviders = catalog.textProviders;
+  merged.textRef = catalog.textRef;
+  merged.text = { ...merged.text, ...catalog.text };
+  merged.text.summaryInputTokens = normalizeSummaryInputTokens(merged.text.summaryInputTokens);
+  merged.multimodal = { ...base.multimodal, ...(raw?.multimodal || {}) };
+  merged.asr = { ...base.asr, ...(raw?.asr || {}) };
+  merged.tts = { ...base.tts, ...(raw?.tts || {}) };
+  const factor = Number(merged.tts.durationFactor);
+  merged.tts.durationFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  const bufSegs = Number(merged.tts.bufferSegments);
+  merged.tts.bufferSegments = Number.isFinite(bufSegs) && bufSegs >= 1 ? Math.min(10, Math.max(1, Math.round(bufSegs))) : 5;
+  merged.tts.preparationMode = ['full', 'buffered', 'progressive'].includes(merged.tts.preparationMode) ? merged.tts.preparationMode : 'progressive';
+  merged.tts.contextMode = merged.tts.contextMode === 'sentence' ? 'sentence' : 'cue';
+  const ahead = Number(merged.tts.translateAheadSeconds);
+  merged.tts.translateAheadSeconds = Number.isFinite(ahead) && ahead >= 30 ? Math.min(7200, Math.round(ahead)) : 600;
+  // The previous full mode was an implicit default, not a deliberate long-wait preference.
+  if (!merged.tts.preparationVersion) merged.tts.preparationMode = 'progressive';
+  merged.tts.preparationVersion = 1;
+  merged.tts.bufferSeconds = Math.max(5, Math.min(120, Number(merged.tts.bufferSeconds) || 30));
+  merged.tts.playbackMode = ['stream', 'sync'].includes(merged.tts.playbackMode) ? merged.tts.playbackMode : 'sync';
+  const gap = Number(merged.tts.gapMs);
+  merged.tts.gapMs = Number.isFinite(gap) && gap >= 0 ? Math.min(2000, gap) : 0;
+  if (!["ZH", "EN", "JA", "AR", "ES"].includes(merged.tts.lang)) merged.tts.lang = "ZH";
+  merged.uiFont = ["md", "lg", "xl"].includes(raw?.uiFont) ? raw.uiFont : "md";
+  merged.uiTheme = normalizeUiTheme(raw?.uiTheme);
+  merged.uiThemeColors = normalizeThemeColors(raw?.uiThemeColors);
+  merged.nativeShell = raw?.nativeShell !== false;
+  merged.cdpInput = raw?.cdpInput !== false;
+  // Before v1 the inbox was on by default and that implicit `true` got persisted; only an explicit opt-in counts.
+  merged.agentInboxEnabled = raw?.agentInboxVersion >= 1 && raw?.agentInboxEnabled === true;
+  merged.agentInboxVersion = 1;
+  merged.agentPromptEnabled = raw?.agentPromptEnabled !== false;
+  Object.assign(merged, normalizeBridgeSettings(raw));
+  merged.agentGatewayEnabled = raw?.agentGatewayEnabled === true;
+  merged.hitlMode = ["strict", "balanced", "autonomous"].includes(raw?.hitlMode) ? raw.hitlMode : "balanced";
+  merged.irreversibleActions = normalizeIrreversibleActions(raw?.irreversibleActions);
+  merged.loopEngine = "kernel";
+  const timeout = Number(raw?.hitlTimeoutSeconds);
+  merged.hitlTimeoutSeconds = Number.isFinite(timeout) && timeout > 0 ? Math.min(Math.max(timeout, 5), 300) : 30;
+  merged.skillsEnabled = raw?.skillsEnabled === true;
+  merged.langfuse = {
+    enabled: raw?.langfuse?.enabled === true,
+    baseUrl: String(raw?.langfuse?.baseUrl || "http://localhost:3000").trim().replace(/\/+$/, ""),
+    publicKey: String(raw?.langfuse?.publicKey || "").trim(),
+    secretKey: String(raw?.langfuse?.secretKey || "").trim(),
+    environment: String(raw?.langfuse?.environment || "development").trim(),
+    release: String(raw?.langfuse?.release || "0.12.0").trim(),
+  };
+  delete merged.interpretUseCaptions;
+  merged.shortcuts = Array.isArray(raw?.shortcuts)
+    ? raw.shortcuts.map((s) => ({
+        id: String(s?.id || crypto.randomUUID()),
+        label: String(s?.label || "").trim(),
+        prompt: String(s?.prompt || "").trim(),
+      }))
+    : [];
+  return merged;
+}
+
+export async function loadSettings() {
+  const { settings } = await chrome.storage.local.get("settings");
+  return normalizeSettings(settings);
+}
+
+// Shared by the side panel and the service worker. Not reentrant: a mutator must not call modifySettings.
+const SETTINGS_LOCK = "pagelens-settings";
+let pendingSettingsWrite = Promise.resolve();
+
+function withSettingsLock(action) {
+  if (globalThis.navigator?.locks?.request) return navigator.locks.request(SETTINGS_LOCK, action);
+  const result = pendingSettingsWrite.then(action);
+  pendingSettingsWrite = result.catch(() => {});
+  return result;
+}
+
+/**
+ * Read the latest settings, let mutator return the next object, then write.
+ * Return null from mutator to leave storage unchanged.
+ * `io` lets callers that already inject load/save (agent tools, bridge) join the same lock.
+ */
+export function modifySettings(mutator, io) {
+  const load = io?.load || loadSettings;
+  const save = io?.save || saveSettings;
+  return withSettingsLock(async () => {
+    const current = await load();
+    const next = await mutator(current);
+    if (next == null) return current;
+    return save(next);
+  });
+}
+
+/** Optional unpacked-only overlay (extension/local-settings.json, gitignored). */
+export async function applyOptionalLocalSettings() {
+  try {
+    const res = await fetch(chrome.runtime.getURL("local-settings.json"));
+    if (!res.ok) return null;
+    const extra = await res.json();
+    if (!extra || extra.rev == null) return null;
+    const { plLocalApplied } = await chrome.storage.local.get("plLocalApplied");
+    if (plLocalApplied === extra.rev) return null;
+    const saved = await modifySettings((cur) => {
+      const next = { ...cur };
+      if (extra.asr && typeof extra.asr === "object") next.asr = { ...cur.asr, ...extra.asr };
+      if (extra.tts && typeof extra.tts === "object") next.tts = { ...cur.tts, ...extra.tts };
+      if (extra.langfuse && typeof extra.langfuse === "object") next.langfuse = { ...cur.langfuse, ...extra.langfuse };
+      return next;
+    });
+    await chrome.storage.local.set({ plLocalApplied: extra.rev });
+    return saved;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSettings(settings) {
+  const next = normalizeSettings(settings);
+  next.shortcuts = next.shortcuts.filter((s) => s.label && s.prompt);
+  await chrome.storage.local.set({ settings: next });
+  return next;
+}
+
+export function resolveModel(settings, kind) {
+  if (kind === "multimodal" && settings.multimodalSameAsText) {
+    return settings.text;
+  }
+  return kind === "multimodal" ? settings.multimodal : settings.text;
+}
+
+export function isModelReady(model) {
+  if (!model?.baseUrl?.trim() || !model?.model?.trim()) return false;
+  if (model.apiKey?.trim()) return true;
+  try {
+    const url = new URL(model.baseUrl);
+    return ["http:", "https:"].includes(url.protocol)
+      && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function isAsrReady(model) {
+  if (!model?.baseUrl?.trim()) return false;
+  const preset = String(model.preset || "");
+  if (preset === "v1-transcribe" || preset === "faster-whisper") return true;
+  if (/\/v1\/transcribe/i.test(model.baseUrl || "")) return true;
+  return Boolean(model.model?.trim());
+}
+
+export function isTtsReady(tts) {
+  return Boolean(tts?.baseUrl?.trim());
+}
+
+
+
+export function isSkillsEnabled(settings) {
+  return settings?.skillsEnabled === true;
+}
+
+export function presetsFor(group) {
+  if (group === "asr") return ASR_PRESETS;
+  if (group === "tts") return TTS_PRESETS;
+  return PRESETS;
+}

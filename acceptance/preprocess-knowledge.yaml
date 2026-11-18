@@ -1,0 +1,6 @@
+id: preprocess-knowledge
+status: implemented
+notes: "assumedApproval: standing-order-2026-10-22"
+criteria:
+  - id: AC-3
+    then: Existing and new clippings are discoverable by content-derived topic, domain, shared topics and source.

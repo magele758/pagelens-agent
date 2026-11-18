@@ -1,0 +1,687 @@
+/**
+ * Conversation history.
+ * Index / last-touch active id stay in chrome.storage.local; each window also
+ * has `pl.sessions.active.win.<id>`. Session bodies live in IndexedDB
+ * (pagelens-data). Legacy pl.sessions.item.* in chrome.storage is migrated on read.
+ */
+
+import { idbDel, idbGet, idbGetAll, idbSet, idbSetAll } from "./idb-kv.js";
+
+export const INDEX_KEY = "pl.sessions.index";
+export const ACTIVE_KEY = "pl.sessions.active";
+export const ACTIVE_WINDOW_PREFIX = "pl.sessions.active.win.";
+export const ITEM_PREFIX = "pl.sessions.item.";
+export const MAX_SESSIONS = 200;
+export const RUN_STALE_MS = 24 * 3600 * 1000;
+const MAX_TEXT = 100000;
+const MAX_RUN_MESSAGES = 80;
+const MAX_TOOL_CONTENT = 12000;
+
+export function itemKey(id) {
+  return ITEM_PREFIX + id;
+}
+
+export function windowKey(windowId) {
+  if (windowId == null || windowId === "") return "";
+  const n = Number(windowId);
+  return Number.isInteger(n) && n >= 0 ? String(n) : "";
+}
+
+export function activeWindowStorageKey(windowId) {
+  const key = windowKey(windowId);
+  return key ? ACTIVE_WINDOW_PREFIX + key : "";
+}
+
+export function pageHost(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+export function mergePage(pages, page) {
+  if (!page?.url) return Array.isArray(pages) ? [...pages] : [];
+  const list = Array.isArray(pages) ? [...pages] : [];
+  const next = {
+    url: String(page.url),
+    title: String(page.title || "").slice(0, 200),
+    hostname: page.hostname || pageHost(page.url),
+    kind: page.kind || "page",
+  };
+  const i = list.findIndex((p) => p.url === next.url);
+  if (i === -1) list.push(next);
+  else list[i] = { ...list[i], ...next };
+  return list;
+}
+
+export function sessionTitle(session) {
+  const first = (session.messages || []).find((m) => m.role === "user" && String(m.text || "").trim());
+  const line = String(first?.text || "").split("\n")[0].trim();
+  if (line) return line.slice(0, 48);
+  const t = session.pages?.[0]?.title;
+  if (t) return String(t).slice(0, 48);
+  return "未命名对话";
+}
+
+export function formatWhen(ts, now = Date.now()) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  const hh = pad(d.getHours());
+  const mm = pad(d.getMinutes());
+  const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const n = new Date(now);
+  const today = `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())}`;
+  if (day === today) return `今天 ${hh}:${mm}`;
+  return `${day} ${hh}:${mm}`;
+}
+
+function stringifyRunContent(content) {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part?.type === "text") return part.text || "";
+        if (part?.type === "image_url") return "【截图】";
+        return "";
+      })
+      .join("");
+  }
+  return String(content);
+}
+
+export function normalizeLoopMessage(raw) {
+  const role = raw?.role;
+  if (role === "user" || role === "assistant") {
+    const out = {
+      role,
+      content: stringifyRunContent(raw.content).slice(0, MAX_TEXT),
+    };
+    if (role === "assistant" && Array.isArray(raw.tool_calls) && raw.tool_calls.length) {
+      const calls = raw.tool_calls
+        .map((c, i) => {
+          const name = c?.function?.name || c?.name || "";
+          if (!name) return null;
+          return {
+            id: String(c.id || `call_${i}`),
+            type: "function",
+            function: {
+              name,
+              arguments: String(c.function?.arguments || c.arguments || "{}").slice(0, 8000),
+            },
+          };
+        })
+        .filter(Boolean);
+      if (calls.length) out.tool_calls = calls;
+    }
+    return out;
+  }
+  if (role === "tool") {
+    const id = String(raw.tool_call_id || "");
+    if (!id) return null;
+    return {
+      role: "tool",
+      tool_call_id: id,
+      content: stringifyRunContent(raw.content).slice(0, MAX_TOOL_CONTENT),
+    };
+  }
+  return null;
+}
+
+export function normalizeRun(raw, now = Date.now()) {
+  if (!raw || raw.status !== "running") return undefined;
+  if (!Array.isArray(raw.history) || !raw.history.length) return undefined;
+  const startedAt = Number(raw.startedAt) || 0;
+  if (startedAt && now - startedAt > RUN_STALE_MS) return undefined;
+  const history = raw.history.map(normalizeLoopMessage).filter(Boolean).slice(-MAX_RUN_MESSAGES);
+  if (!history.some((m) => m.role === "user")) return undefined;
+  const nonce = typeof raw.nonce === "string" ? raw.nonce.trim() : "";
+  return {
+    status: "running",
+    ...(Number.isInteger(raw.tabId) ? { tabId: raw.tabId } : {}),
+    ...(Number.isInteger(raw.windowId) ? { windowId: raw.windowId } : {}),
+    // Browser-process token. Session storage drops it on quit; the run record must still carry it.
+    ...(nonce.length >= 8 && nonce.length <= 80 && !/[\s\u0000-\u001f]/.test(nonce) ? { nonce } : {}),
+    history,
+    lastText: String(raw.lastText || "").slice(0, MAX_TEXT),
+    turnsUsed: Math.max(0, Number(raw.turnsUsed) || 0),
+    startedAt,
+  };
+}
+
+function compactTraceArgs(args) {
+  if (!args || typeof args !== "object") return undefined;
+  try {
+    return JSON.parse(JSON.stringify(args, (_k, v) => (
+      typeof v === "string" && v.length > 1500 ? `${v.slice(0, 1500)}…` : v
+    )));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeTraceItem(raw) {
+  const name = String(raw?.name || "");
+  if (!name) return null;
+  const item = {
+    name,
+    ok: raw?.ok !== false,
+  };
+  if (raw.id) item.id = String(raw.id);
+  if (raw.kind === "tool" || raw.kind === "meta") item.kind = raw.kind;
+  if (raw.status) item.status = String(raw.status);
+  const durationMs = Number(raw.durationMs);
+  if (Number.isFinite(durationMs) && durationMs > 0) item.durationMs = Math.round(durationMs);
+  if (raw.archived) item.archived = true;
+  const args = compactTraceArgs(raw.args);
+  if (args && Object.keys(args).length) item.args = args;
+  if (raw.preview != null && raw.preview !== "") item.preview = String(raw.preview).slice(0, 4000);
+  return item;
+}
+
+export function normalizeMessage(raw, index) {
+  const trace = Array.isArray(raw?.trace)
+    ? raw.trace.map(normalizeTraceItem).filter(Boolean).slice(0, 40)
+    : undefined;
+  const endedAt = Number(raw?.metrics?.endedAt);
+  const metrics = raw?.metrics && typeof raw.metrics === "object" ? {
+    durationMs: Math.max(0, Number(raw.metrics.durationMs) || 0),
+    inputTokens: Math.max(0, Number(raw.metrics.inputTokens) || 0),
+    outputTokens: Math.max(0, Number(raw.metrics.outputTokens) || 0),
+    totalTokens: Math.max(0, Number(raw.metrics.totalTokens) || 0),
+    finishReason: String(raw.metrics.finishReason || ""),
+    ...(Number.isFinite(endedAt) && endedAt > 0 ? { endedAt: Math.round(endedAt) } : {}),
+  } : undefined;
+  const traceLog = raw?.traceLog && typeof raw.traceLog === "object" ? raw.traceLog : undefined;
+  const id = raw?.id ? String(raw.id) : (Number.isInteger(index) ? `m-${index}` : undefined);
+  return {
+    ...(id ? { id } : {}),
+    role: raw?.role === "user" ? "user" : "bot",
+    text: String(raw?.text || "").slice(0, MAX_TEXT),
+    error: raw?.error ? true : undefined,
+    trace: trace?.length ? trace : undefined,
+    metrics,
+    traceLog,
+    hasImage: Boolean(raw?.image || raw?.hasImage) || undefined,
+  };
+}
+
+function normalizeSideChatMessage(raw, index = 0) {
+  if (!raw || typeof raw !== "object") return null;
+  const endedAt = Number(raw?.metrics?.endedAt);
+  const metrics = raw?.metrics && typeof raw.metrics === "object" ? {
+    durationMs: Math.max(0, Number(raw.metrics.durationMs) || 0),
+    inputTokens: Math.max(0, Number(raw.metrics.inputTokens) || 0),
+    outputTokens: Math.max(0, Number(raw.metrics.outputTokens) || 0),
+    totalTokens: Math.max(0, Number(raw.metrics.totalTokens) || 0),
+    finishReason: String(raw.metrics.finishReason || ""),
+    ...(Number.isFinite(endedAt) && endedAt > 0 ? { endedAt: Math.round(endedAt) } : {}),
+  } : undefined;
+  return {
+    id: String(raw.id || `scm-${index}`),
+    role: raw.role === "user" ? "user" : "bot",
+    text: String(raw.text || "").slice(0, MAX_TEXT),
+    ...(raw.thinking ? { thinking: String(raw.thinking).slice(0, MAX_TEXT) } : {}),
+    createdAt: Number(raw.createdAt) || Date.now(),
+    ...(raw.error ? { error: true } : {}),
+    ...(metrics ? { metrics } : {}),
+  };
+}
+
+function normalizeSideChatAnchor(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const plainStart = Number.isInteger(src.plainStart) && src.plainStart >= 0 ? src.plainStart : undefined;
+  const plainEnd = Number.isInteger(src.plainEnd) && src.plainEnd >= 0 ? src.plainEnd : undefined;
+  return {
+    quoteText: String(src.quoteText || "").slice(0, 4000),
+    ...(src.contextBefore ? { contextBefore: String(src.contextBefore).slice(0, 80) } : {}),
+    ...(src.contextAfter ? { contextAfter: String(src.contextAfter).slice(0, 80) } : {}),
+    ...(plainStart !== undefined ? { plainStart } : {}),
+    ...(plainEnd !== undefined ? { plainEnd } : {}),
+    status: src.status === "orphaned" ? "orphaned" : "attached",
+  };
+}
+
+export function normalizeSideChatThread(raw, index = 0) {
+  if (!raw || typeof raw !== "object") return null;
+  const now = Date.now();
+  const forkType = ["selection", "message", "session"].includes(raw.forkType) ? raw.forkType : "selection";
+  const messages = Array.isArray(raw.messages)
+    ? raw.messages.map((m, i) => normalizeSideChatMessage(m, i)).filter(Boolean)
+    : [];
+  return {
+    id: String(raw.id || `sc-${index}`),
+    parentMessageId: String(raw.parentMessageId || ""),
+    forkType,
+    anchor: normalizeSideChatAnchor(raw.anchor),
+    title: String(raw.title || "").trim().slice(0, 80) || "旁注分支",
+    status: raw.status === "resolved" ? "resolved" : "active",
+    pinnedNote: String(raw.pinnedNote || "").trim().slice(0, 1000),
+    snapshotMessageCount: Number.isInteger(raw.snapshotMessageCount) && raw.snapshotMessageCount >= 0
+      ? raw.snapshotMessageCount
+      : 0,
+    messages,
+    createdAt: Number(raw.createdAt) || now,
+    updatedAt: Number(raw.updatedAt) || Number(raw.createdAt) || now,
+  };
+}
+
+export function normalizeSession(raw) {
+  const now = Date.now();
+  let pages = [];
+  for (const page of raw?.pages || []) pages = mergePage(pages, page);
+  const messages = Array.isArray(raw?.messages)
+    ? raw.messages.map((m, idx) => normalizeMessage(m, idx))
+    : [];
+  const sideChats = Array.isArray(raw?.sideChats)
+    ? raw.sideChats.map((sc, idx) => normalizeSideChatThread(sc, idx)).filter(Boolean)
+    : [];
+  const session = {
+    id: String(raw?.id || crypto.randomUUID()),
+    createdAt: Number(raw?.createdAt) || now,
+    updatedAt: Number(raw?.updatedAt) || now,
+    pages,
+    messages,
+    sideChats,
+  };
+  session.title = sessionTitle(session);
+  const run = normalizeRun(raw?.run);
+  if (run) session.run = run;
+  const gid = Number(raw?.taskGroupId);
+  if (raw?.taskGroupId != null && Number.isInteger(gid) && gid >= 0) session.taskGroupId = gid;
+  return session;
+}
+
+export function toSummary(session) {
+  const sideChats = Array.isArray(session.sideChats) ? session.sideChats : [];
+  return {
+    id: session.id,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    title: session.title,
+    messageCount: (session.messages || []).length,
+    sideChatCount: sideChats.length,
+    unresolvedSideChatCount: sideChats.filter((sc) => sc.status !== "resolved").length,
+    pages: (session.pages || []).map((p) => ({
+      url: p.url,
+      title: p.title,
+      hostname: p.hostname,
+      kind: p.kind,
+    })),
+  };
+}
+
+export function collectAllSideChats(sessions) {
+  const items = [];
+  for (const raw of sessions || []) {
+    const s = normalizeSession(raw);
+    for (const sc of s.sideChats || []) {
+      items.push({
+        sessionId: s.id,
+        sessionTitle: s.title,
+        sessionUpdatedAt: s.updatedAt,
+        pages: s.pages,
+        sideChat: sc,
+      });
+    }
+  }
+  return items.sort((a, b) => (b.sideChat.updatedAt || 0) - (a.sideChat.updatedAt || 0));
+}
+
+export function nextIndex(index, summary, max = MAX_SESSIONS) {
+  const rest = (index || []).filter((s) => s.id !== summary.id);
+  return [summary, ...rest].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, max);
+}
+
+export function filterSessions(index, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return index || [];
+  return (index || []).filter((s) => {
+    const blob = [
+      s.title,
+      ...(s.pages || []).flatMap((p) => [p.title, p.url, p.hostname]),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return blob.includes(q);
+  });
+}
+
+function yamlScalar(value) {
+  const s = String(value ?? "");
+  if (s === "") return '""';
+  if (/[:#\n"'\\]/.test(s) || /^-/.test(s)) return JSON.stringify(s);
+  return s;
+}
+
+export function sessionSlug(session) {
+  return String(session?.title || "session")
+    .replace(/[\\/:*?"<>|\n\r]+/g, "")
+    .trim()
+    .slice(0, 32) || "session";
+}
+
+export function sessionFilename(session, ext) {
+  const day = new Date(session.createdAt || Date.now()).toISOString().slice(0, 10);
+  return `pagelens-${day}-${sessionSlug(session)}.${ext}`;
+}
+
+export function sessionNoteRelPath(session) {
+  const s = normalizeSession(session || {});
+  const day = new Date(s.createdAt || Date.now()).toISOString().slice(0, 10);
+  const short = String(s.id || "note").replace(/[^a-zA-Z0-9]/g, "").slice(0, 8) || "note";
+  return `PageLens/sessions/${day}-${sessionSlug(s)}-${short}.md`;
+}
+
+function sideChatToCallout(sc) {
+  const statusLabel = sc.status === "resolved" ? "已掌握" : "思考中";
+  const lines = [
+    `> [!note] 旁注 · ${sc.title}（${statusLabel} · ${formatWhen(sc.updatedAt)}）`,
+  ];
+  if (sc.anchor?.quoteText) {
+    lines.push(`> **原句**：${String(sc.anchor.quoteText).replace(/\n+/g, " ")}`);
+  }
+  if (sc.pinnedNote) {
+    lines.push(`> **凝练批注**：${String(sc.pinnedNote).replace(/\n+/g, " ")}`);
+  }
+  for (const m of sc.messages || []) {
+    if (!m.text) continue;
+    const prefix = m.role === "user" ? "**问**" : "**答**";
+    const body = String(m.text).split("\n").join("\n> ");
+    lines.push(`> - ${prefix}：${body}`);
+  }
+  return lines.join("\n");
+}
+
+export function sessionToMarkdown(session) {
+  const s = normalizeSession(session);
+  const pages = s.pages.length
+    ? s.pages.map((p) => `- ${p.title || p.hostname || "无标题"}\n  ${p.url}`).join("\n")
+    : "- （未分享页面）";
+  const byParent = new Map();
+  const attachedIds = new Set();
+  for (const sc of s.sideChats || []) {
+    const pid = sc.parentMessageId || "";
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid).push(sc);
+  }
+  const turns = s.messages.map((m) => {
+    const who = m.role === "user" ? "用户" : "PageLens";
+    const bits = [`## ${who}`, "", m.text || "（空）"];
+    if (m.hasImage) bits.push("", "（含截图，导出时未内嵌图片数据）");
+    if (m.trace?.length) {
+      bits.push("", `_工具：${m.trace.map((t) => (t.ok === false ? `${t.name} 失败` : t.name)).join(" → ")}_`);
+    }
+    const list = m.id ? byParent.get(m.id) : null;
+    if (list?.length) {
+      for (const sc of list) {
+        attachedIds.add(sc.id);
+        bits.push("", sideChatToCallout(sc));
+      }
+    }
+    return bits.join("\n");
+  });
+  const unattached = (s.sideChats || []).filter((sc) => !attachedIds.has(sc.id));
+  const extraSection = unattached.length
+    ? ["", "## 旁注与扩展思考", "", ...unattached.map((sc) => `${sideChatToCallout(sc)}\n`)]
+    : [];
+  const meta = [
+    `- 创建：${formatWhen(s.createdAt)}`,
+    `- 更新：${formatWhen(s.updatedAt)}`,
+    `- 消息：${s.messages.length} 条`,
+  ];
+  if (s.sideChats?.length) {
+    meta.push(`- 旁注：${s.sideChats.length} 条`);
+  }
+  return [
+    `# ${s.title}`,
+    "",
+    ...meta,
+    "",
+    "## 页面",
+    "",
+    pages,
+    "",
+    ...turns,
+    ...extraSection,
+    "",
+  ].join("\n");
+}
+
+export function sessionToObsidianMarkdown(session) {
+  const s = normalizeSession(session);
+  const day = new Date(s.createdAt || Date.now()).toISOString().slice(0, 10);
+  const updated = new Date(s.updatedAt || s.createdAt || Date.now()).toISOString().slice(0, 10);
+  const urls = (s.pages || []).map((p) => p.url).filter(Boolean);
+  const fm = [
+    "---",
+    `title: ${yamlScalar(s.title)}`,
+    `date: ${day}`,
+    `updated: ${updated}`,
+    "tags: [pagelens, session]",
+    `session_id: ${yamlScalar(s.id)}`,
+    "source: PageLens",
+  ];
+  if (urls.length) {
+    fm.push("urls:");
+    for (const url of urls) fm.push(`  - ${yamlScalar(url)}`);
+  }
+  fm.push("---", "");
+  return `${fm.join("\n")}${sessionToMarkdown(s)}`;
+}
+
+export function sessionsToMarkdown(sessions) {
+  if (!sessions?.length) return "# PageLens 对话导出\n\n（没有会话）\n";
+  const parts = sessions.map(sessionToMarkdown);
+  return `# PageLens 对话导出\n\n共 ${sessions.length} 条\n\n---\n\n${parts.join("\n---\n\n")}`;
+}
+
+export function sessionsToJSON(sessions) {
+  return JSON.stringify(
+    {
+      app: "PageLens",
+      exportedAt: new Date().toISOString(),
+      sessions: (sessions || []).map((s) => {
+        const n = normalizeSession(s);
+        delete n.run;
+        return n;
+      }),
+    },
+    null,
+    2,
+  );
+}
+
+async function localGet(keys) {
+  return chrome.storage.local.get(keys);
+}
+
+async function localSet(obj) {
+  await chrome.storage.local.set(obj);
+}
+
+async function localRemove(keys) {
+  await chrome.storage.local.remove(keys);
+}
+
+async function readSessionItem(id) {
+  const key = itemKey(id);
+  const fromIdb = await idbGet(key);
+  if (fromIdb != null) return fromIdb;
+  const data = await localGet(key);
+  const raw = data[key];
+  if (raw == null) return null;
+  if (await idbSet(key, raw)) await localRemove(key);
+  return raw;
+}
+
+async function writeSessionItem(id, session) {
+  const key = itemKey(id);
+  if (await idbSet(key, session)) {
+    await localRemove(key);
+    return;
+  }
+  await localSet({ [key]: session });
+}
+
+async function dropSessionItems(keys) {
+  if (!keys?.length) return;
+  await idbDel(keys);
+  await localRemove(keys);
+}
+
+export async function listSessions() {
+  const data = await localGet(INDEX_KEY);
+  return Array.isArray(data[INDEX_KEY]) ? data[INDEX_KEY] : [];
+}
+
+export async function loadSession(id) {
+  if (!id) return null;
+  const raw = await readSessionItem(id);
+  return raw ? normalizeSession(raw) : null;
+}
+
+async function hasWindowActiveBinding() {
+  const all = await localGet(null);
+  return Object.entries(all || {}).some(([k, v]) => k.startsWith(ACTIVE_WINDOW_PREFIX) && typeof v === "string" && v);
+}
+
+export async function getActiveId(windowId) {
+  const storeKey = activeWindowStorageKey(windowId);
+  if (storeKey) {
+    const data = await localGet(storeKey);
+    return typeof data[storeKey] === "string" ? data[storeKey] : "";
+  }
+  const data = await localGet(ACTIVE_KEY);
+  return typeof data[ACTIVE_KEY] === "string" ? data[ACTIVE_KEY] : "";
+}
+
+// Web Locks are shared by all extension documents, unlike a per-panel promise chain.
+let pendingIndexWrite = Promise.resolve();
+function withSessionIndexLock(action) {
+  if (globalThis.navigator?.locks) return navigator.locks.request(INDEX_KEY, action);
+  const result = pendingIndexWrite.then(action);
+  pendingIndexWrite = result.catch(() => {});
+  return result;
+}
+
+export function loadActiveSession(windowId) {
+  return withSessionIndexLock(() => readActiveSession(windowId));
+}
+
+// A conversation already open elsewhere, or whose interrupted run still names another window, is copied.
+export function openSessionInWindow(id, windowId) {
+  return withSessionIndexLock(async () => {
+    const session = await loadSession(id);
+    if (!session) return null;
+    const windows = await chrome.windows.getAll();
+    const keys = windows.filter((win) => win.id !== windowId).map((win) => activeWindowStorageKey(win.id));
+    const bindings = await localGet(keys);
+    const runWindowId = session.run?.windowId;
+    const runBelongsElsewhere = runWindowId != null && runWindowId !== windowId;
+    if (Object.values(bindings).includes(id) || runBelongsElsewhere) {
+      session.id = crypto.randomUUID();
+      session.createdAt = Date.now();
+      delete session.run;
+      delete session.taskGroupId;
+    }
+    return storeSession(session, { windowId });
+  });
+}
+
+async function readActiveSession(windowId) {
+  const storeKey = activeWindowStorageKey(windowId);
+  if (storeKey) {
+    const data = await localGet([storeKey, ACTIVE_KEY]);
+    const own = data[storeKey];
+    if (typeof own === "string") return own ? loadSession(own) : null;
+    const legacy = typeof data[ACTIVE_KEY] === "string" ? data[ACTIVE_KEY] : "";
+    if (legacy && !(await hasWindowActiveBinding())) {
+      await localSet({ [storeKey]: legacy });
+      return loadSession(legacy);
+    }
+    return null;
+  }
+  const data = await localGet(ACTIVE_KEY);
+  return loadSession(data[ACTIVE_KEY]);
+}
+
+export async function loadAllSessions() {
+  const index = await listSessions();
+  if (!index.length) return [];
+  const keys = index.map((s) => itemKey(s.id));
+  const fromIdb = await idbGetAll(keys);
+  const missing = keys.filter((k) => !(k in fromIdb));
+  let fromLocal = {};
+  if (missing.length) {
+    fromLocal = await localGet(missing);
+    const migrate = {};
+    for (const k of missing) {
+      if (fromLocal[k] != null) migrate[k] = fromLocal[k];
+    }
+    const migrated = Object.keys(migrate);
+    if (migrated.length && (await idbSetAll(migrate))) await localRemove(migrated);
+  }
+  return index
+    .map((s) => fromIdb[itemKey(s.id)] ?? fromLocal[itemKey(s.id)])
+    .filter(Boolean)
+    .map(normalizeSession);
+}
+
+export function saveSession(raw, options = {}) {
+  return withSessionIndexLock(() => storeSession(raw, options));
+}
+
+async function storeSession(raw, options) {
+  const session = normalizeSession(raw);
+  session.updatedAt = Date.now();
+  session.title = sessionTitle(session);
+  if (!session.messages.length) return session;
+
+  const index = await listSessions();
+  const next = nextIndex(index, toSummary(session));
+  const keep = new Set(next.map((s) => s.id));
+  const drop = index.filter((s) => !keep.has(s.id)).map((s) => itemKey(s.id));
+
+  const patch = {
+    [INDEX_KEY]: next,
+  };
+  if (!options.keepActive) {
+    patch[ACTIVE_KEY] = session.id;
+    const storeKey = activeWindowStorageKey(options.windowId);
+    if (storeKey) patch[storeKey] = session.id;
+  }
+  await writeSessionItem(session.id, session);
+  await localSet(patch);
+  await dropSessionItems(drop);
+  return session;
+}
+
+export function deleteSession(id) {
+  return withSessionIndexLock(() => removeSession(id));
+}
+
+async function removeSession(id) {
+  const index = (await listSessions()).filter((s) => s.id !== id);
+  const all = await localGet(null);
+  const patch = { [INDEX_KEY]: index };
+  if (all[ACTIVE_KEY] === id) patch[ACTIVE_KEY] = "";
+  for (const [k, v] of Object.entries(all || {})) {
+    if (k.startsWith(ACTIVE_WINDOW_PREFIX) && v === id) patch[k] = "";
+  }
+  await localSet(patch);
+  await dropSessionItems([itemKey(id)]);
+  return index;
+}
+
+export async function clearActiveId(windowId) {
+  const storeKey = activeWindowStorageKey(windowId);
+  if (storeKey) {
+    await withSessionIndexLock(() => localSet({ [storeKey]: "" }));
+    return;
+  }
+  await localSet({ [ACTIVE_KEY]: "" });
+}

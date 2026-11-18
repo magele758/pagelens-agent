@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PageLens</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="themes.css" />
+  <link rel="stylesheet" href="sidechat.css" />
+  <link rel="stylesheet" href="settings.css" />
+  <link rel="stylesheet" href="../vendor/katex/katex.min.css" />
+</head>
+<body>
+  <svg xmlns="http://www.w3.org/2000/svg" class="icon-sprite" aria-hidden="true">
+    <symbol id="i-pen" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-log" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+    <symbol id="i-review" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M8 7h8M8 11h6"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9c.3.6.9 1 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m7 4 12 8-12 8V4z"/></symbol>
+    <symbol id="i-lang" viewBox="0 0 24 24"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-12-5 12"/><path d="M14 18h6"/></symbol>
+    <symbol id="i-headphone" viewBox="0 0 24 24"><path d="M3 14v-3a9 9 0 0 1 18 0v3"/><path d="M21 16a2 2 0 0 1-2 2h-1v-8h1a2 2 0 0 1 2 2zM3 16a2 2 0 0 0 2 2h1v-8H5a2 2 0 0 0-2 2z"/></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="m23 9-6 6M17 9l6 6"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M3 12h4M17 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8M16 17H8M10 9H8"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></symbol>
+    <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.4 11.6-9.2 9.2a5 5 0 0 1-7-7l9.2-9.2a3.5 3.5 0 0 1 5 5L9.2 19.8a2 2 0 1 1-2.8-2.8l8.5-8.5"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></symbol>
+    <symbol id="i-quote" viewBox="0 0 24 24"><path d="M3 21c3 0 7-1 7-8V5H4v8h4"/><path d="M14 21c3 0 7-1 7-8V5h-6v8h4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor"/><circle cx="15" cy="17" r="2" fill="currentColor"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="12" width="4" height="8" rx="2"/><rect x="17" y="12" width="4" height="8" rx="2"/></symbol>
+    <symbol id="i-puzzle" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6m-3-3v6"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m6 0h4"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="9" cy="8" r="1"/><circle cx="15" cy="8" r="1"/><circle cx="7" cy="13" r="1"/><path d="M14 21v-6h7"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+  </svg>
+
+  <div id="app">
+    <header class="header">
+      <div class="brand">
+        <span class="mark"></span> PageLens
+        <span class="hitl-badge hidden" id="hitl-badge" title="当前处于全自动模式">⚡️全自动</span>
+      </div>
+      <button type="button" id="btn-sidechat-header" class="sc-header-btn" aria-expanded="false" aria-label="SideChat 旁注分支" data-tooltip="SideChat 旁注分支">
+        <span aria-hidden="true">⑂</span><span class="sc-header-label">旁注</span>
+        <span id="sc-header-count" class="sc-header-count hidden"></span>
+      </button>
+      <nav class="icon-btns" aria-label="全局功能">
+        <button type="button" id="btn-new" class="icon-btn" aria-label="新对话" data-tooltip="新对话">
+          <svg class="ico"><use href="#i-pen"/></svg>
+        </button>
+        <button type="button" id="btn-history" class="icon-btn" aria-label="历史会话" data-tooltip="历史会话">
+          <svg class="ico"><use href="#i-history"/></svg>
+        </button>
+        <button type="button" id="btn-debug-export" class="icon-btn" aria-label="运行日志" data-tooltip="运行日志">
+          <svg class="ico"><use href="#i-log"/></svg>
+        </button>
+        <button type="button" id="btn-review" class="icon-btn" aria-label="知识盘点" data-tooltip="知识盘点">
+          <svg class="ico"><use href="#i-review"/></svg>
+        </button>
+        <button type="button" id="btn-obsidian" class="icon-btn" aria-label="写入文稿文件夹" data-tooltip="写入文稿文件夹">
+          <svg class="ico"><use href="#i-book"/></svg>
+        </button>
+        <button type="button" id="btn-settings" class="icon-btn" aria-label="设置" data-tooltip="设置">
+          <svg class="ico"><use href="#i-gear"/></svg>
+        </button>
+      </nav>
+    </header>
+
+    <details id="window-mail">
+      <summary aria-live="polite">窗口协作</summary>
+      <div class="window-mail-compose">
+        <select id="window-peer" aria-label="接收窗口"></select>
+        <textarea id="window-mail-text" aria-label="消息或任务内容" placeholder="给对方发消息，或描述要委派的任务" rows="2" maxlength="8000"></textarea>
+        <div class="row-btns">
+          <button type="button" class="secondary mini" data-kind="message">发消息</button>
+          <button type="button" class="secondary mini" data-kind="task">委派任务</button>
+          <span id="window-mail-status" role="status"></span>
+        </div>
+        <ol id="window-mail-log" aria-label="窗口通信记录"></ol>
+      </div>
+    </details>
+
+    <button type="button" class="secondary mini" id="btn-allow-current-site" hidden></button>
+
+    <div id="workspace" class="workspace">
+      <section id="view-chat" class="view">
+        <div id="hitl-modal" class="hitl-modal hidden">
+          <div class="hitl-card">
+            <div class="hitl-header">
+              <span class="hitl-icon">⚠️</span>
+              <span class="hitl-title" id="hitl-title">特权操作需要授权</span>
+              <span class="hitl-timer" id="hitl-timer">30s</span>
+            </div>
+            <div class="hitl-body">
+              <div class="hitl-desc" id="hitl-desc"></div>
+              <pre class="hitl-cmd hidden" id="hitl-cmd"></pre>
+              <label class="check hitl-session-check" id="hitl-session-label">
+                <input type="checkbox" id="hitl-session-remember" />
+                信任本场对话（本会话免确认）
+              </label>
+            </div>
+            <div class="hitl-actions">
+              <button type="button" class="secondary" id="btn-hitl-reject">拒绝</button>
+              <button type="button" class="primary" id="btn-hitl-approve">允许执行</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="clip-modal" class="clip-modal hidden">
+          <div class="clip-card">
+            <div class="clip-header">
+              <span class="clip-icon">🔖</span>
+              <span class="clip-title">剪藏到 Obsidian &amp; 书签</span>
+              <button type="button" class="btn-modal-x" id="btn-clip-cancel-x" title="关闭">×</button>
+            </div>
+            <div class="clip-body">
+              <label class="clip-field">
+                <span class="field-label">标题</span>
+                <input type="text" id="clip-input-title" spellcheck="false" />
+              </label>
+              <label class="clip-field">
+                <span class="field-label">网址</span>
+                <input type="text" id="clip-input-url" spellcheck="false" />
+              </label>
+              <label class="clip-field">
+                <span class="field-label">我的思考 / 备注</span>
+                <textarea id="clip-input-note" rows="3" placeholder="记录关于本回答的灵感、重点、个人评注..."></textarea>
+              </label>
+              <label class="clip-field">
+                <span class="field-label">标签（空格或逗号分隔）</span>
+                <input type="text" id="clip-input-tags" placeholder="如：ai, 架构, 知识库" />
+              </label>
+              <div class="clip-preview-section">
+                <span class="field-label">AI 提炼内容预览</span>
+                <div class="clip-content-preview" id="clip-content-preview"></div>
+              </div>
+              <div class="clip-options">
+                <label class="check">
+                  <input type="checkbox" id="clip-check-obsidian" checked />
+                  写入 Obsidian 独立卡片 (<code>PageLens/clippings/</code>)
+                </label>
+                <label class="check">
+                  <input type="checkbox" id="clip-check-daily" checked />
+                  加入今日日记内容采摘 (<code id="clip-daily-path-preview">Daily/2026-09-14.md</code>)
+                </label>
+                <label class="check">
+                  <input type="checkbox" id="clip-check-bookmark" checked />
+                  同步到 Chrome 书签 (<code>PageLens 智库</code> 文件夹)
+                </label>
+              </div>
+            </div>
+            <div class="clip-actions">
+              <button type="button" class="secondary" id="btn-clip-cancel">取消</button>
+              <button type="button" class="primary" id="btn-clip-confirm">确认保存</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="clip-view-modal" class="clip-modal hidden">
+          <div class="clip-card clip-view-card">
+            <div class="clip-header">
+              <span class="clip-icon">💡</span>
+              <span class="clip-title" id="clip-view-modal-title">本页剪藏笔记</span>
+              <button type="button" class="btn-modal-x" id="btn-clip-view-close" title="关闭">×</button>
+            </div>
+            <div class="clip-body" id="clip-view-body"></div>
+            <div class="clip-actions">
+              <button type="button" class="secondary" id="btn-clip-view-done">关闭</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-main-col">
+        <div class="messages-area">
+          <div class="msgs" id="msgs" tabindex="0" aria-label="会话消息"></div>
+          <div id="sc-margin-rail" class="sc-margin-rail hidden" aria-label="旁注定位轨"></div>
+          <div id="sc-selection-bar" class="sc-selection-bar hidden" role="toolbar" aria-label="划词旁注操作">
+            <button type="button" id="btn-sc-sel-ask" class="sc-sel-btn primary">💬 旁注追问</button>
+            <button type="button" id="btn-sc-sel-explain" class="sc-sel-btn soft">✨ 通俗解释</button>
+            <button type="button" id="btn-sc-sel-existing" class="sc-sel-btn teal hidden">↗ 已有旁注</button>
+            <button type="button" id="btn-sc-sel-delete" class="sc-sel-btn danger hidden">🗑 删除</button>
+            <button type="button" id="btn-sc-sel-copy" class="sc-sel-btn">复制</button>
+          </div>
+          <button type="button" class="messages-bottom hidden" id="btn-messages-bottom" aria-controls="msgs" title="回到底部" aria-label="回到底部">
+            <svg class="messages-bottom-icon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M8 2.5v10M3.5 8.5L8 13l4.5-4.5"/>
+            </svg>
+            <span class="messages-bottom-text">回到底部</span>
+            <span class="messages-bottom-dot hidden" id="messages-bottom-dot" aria-hidden="true"></span>
+          </button>
+        </div>
+
+        <div class="composer">
+          <div class="delegate-tasks hidden" id="delegate-tasks" aria-label="外部委托任务"></div>
+          <div class="trust-bar hidden" id="trust-bar">
+            <div class="trust-row">
+              <span class="trust-icon" aria-hidden="true">🔐</span>
+              <span class="trust-summary" id="trust-summary">授权范围 · 仅阅读</span>
+              <span class="trust-taint hidden" id="trust-taint"></span>
+              <button type="button" class="trust-btn" id="btn-trust-edit" title="调整本会话允许 Agent 自动执行的动作与目标">调整授权</button>
+            </div>
+            <div class="trust-editor hidden" id="trust-editor">
+              <div class="trust-actions" id="trust-actions"></div>
+              <textarea id="trust-extra" rows="2" spellcheck="false" placeholder="追加目标，每行一个：域名或网址（github.com）、`命令`、本机路径（~/Downloads/a.pdf）"></textarea>
+              <div class="trust-editor-ops">
+                <button type="button" class="secondary" id="btn-trust-cancel">取消</button>
+                <button type="button" class="primary" id="btn-trust-save">保存授权</button>
+              </div>
+            </div>
+            <div class="trust-pending hidden" id="trust-pending"></div>
+            <div class="trust-undo hidden" id="trust-undo">
+              <span id="trust-undo-text"></span>
+              <button type="button" class="trust-btn" id="btn-trust-undo">撤销</button>
+            </div>
+          </div>
+          <div class="recall-banner hidden" id="recall-banner">
+            <span class="recall-icon">💡</span>
+            <div class="recall-content">
+              <span class="recall-text" id="recall-text">曾剪藏笔记</span>
+            </div>
+            <div class="recall-ops">
+              <button type="button" class="recall-btn" id="btn-recall-open">查看笔记</button>
+              <button type="button" class="recall-close" id="btn-recall-dismiss" title="忽略">×</button>
+            </div>
+          </div>
+          <div class="attach hidden" id="attach-row">
+            <img id="attach-thumb" alt="附件" />
+            <span id="attach-label">已附加当前画面</span>
+            <button type="button" id="btn-clear-attach">移除</button>
+          </div>
+          <div class="skills" id="skills"></div>
+          <div class="composer-input">
+            <div class="slash-menu hidden" id="slash-menu" role="listbox" aria-label="快捷指令"></div>
+            <div class="input-box">
+              <div class="compose-chip" id="compose-chip">
+                <svg class="ico tiny"><use href="#i-file"/></svg>
+                <span id="compose-chip-label">当前网页</span>
+                <button type="button" id="btn-clear-ref" class="chip-x" aria-label="去掉网页上下文" data-tooltip="去掉网页上下文">×</button>
+              </div>
+              <div class="row">
+                <button class="ghost" type="button" id="btn-shot" data-tooltip="截图" aria-label="截图">
+                  <svg class="ico"><use href="#i-scan"/></svg>
+                </button>
+                <textarea id="input" placeholder="问这页 · Enter 发送 · ⇧Enter 换行"></textarea>
+                <button class="send" type="button" id="btn-send" data-tooltip="发送" aria-label="发送">
+                  <svg class="ico"><use href="#i-up"/></svg>
+                </button>
+              </div>
+              <div class="compose-tools">
+                <span class="media-tiny" id="compose-note">当前网页</span>
+              </div>
+            </div>
+          </div>
+          <div class="model-line" id="model-line">
+            <select id="text-model-pick" class="model-pick hidden" aria-label="文本模型"></select>
+            <span id="model-line-meta">未配置模型 · 先到设置添加服务商</span>
+          </div>
+        </div>
+        </div>
+
+        <div id="sc-drawer-backdrop" class="sc-drawer-backdrop hidden"></div>
+        <aside id="sidechat-pane" class="sc-pane hidden" aria-label="SideChat 旁注分支">
+          <div id="sc-resizer" class="sc-resizer" role="separator" aria-orientation="vertical" aria-label="拖拽调整主对话框与旁注面板宽度" tabindex="0" title="左右拖拽调整面板宽度（双击恢复默认）"></div>
+          <div class="sc-pane-header">
+            <div class="sc-pane-left">
+              <button type="button" id="btn-sc-list" class="sc-nav-btn" title="切换旁注管理列表">
+                ☰ 全部 (<span id="sc-total-count">0</span>)
+              </button>
+              <button type="button" id="sc-thread-title" class="sc-thread-title hidden" title="点击重命名旁注标题"></button>
+            </div>
+            <div class="sc-pane-right">
+              <button type="button" id="btn-sc-new" class="sc-new-btn" title="基于当前最新回复裂变新分支">+ 新建</button>
+              <button type="button" id="btn-sc-close" class="sc-close-btn" title="收起 SideChat" aria-label="收起 SideChat">×</button>
+            </div>
+          </div>
+
+          <div id="sc-quick-strip" class="sc-quick-strip hidden" aria-label="旁注快速切换"></div>
+
+          <div id="sc-list-view" class="sc-list-view">
+            <div class="sc-list-toolbar">
+              <input id="sc-search" class="sc-search" type="search" placeholder="搜索批注原句、标题或笔记…" />
+              <div class="sc-filter-row">
+                <div class="sc-filter-group">
+                  <button type="button" class="sc-filter-btn is-active" data-sc-filter="all">全部</button>
+                  <button type="button" class="sc-filter-btn" data-sc-filter="active">思考中</button>
+                  <button type="button" class="sc-filter-btn" data-sc-filter="resolved">已掌握</button>
+                  <button type="button" class="sc-filter-btn" data-sc-filter="pinned">📌 已凝练</button>
+                </div>
+                <button type="button" id="btn-sc-sort" class="sc-sort-btn" title="切换排序方式">按原文顺序</button>
+              </div>
+            </div>
+            <div id="sc-list-items" class="sc-list-items"></div>
+          </div>
+
+          <div id="sc-thread-view" class="sc-thread-view hidden">
+            <div class="sc-anchor-card">
+              <div class="sc-anchor-top">
+                <div class="sc-anchor-meta-row">
+                  <span id="sc-detail-badge" class="sc-type-badge">划词批注</span>
+                  <span id="sc-detail-meta" class="sc-origin-meta"></span>
+                </div>
+                <div class="sc-anchor-ops">
+                  <button type="button" id="btn-sc-jump" class="sc-op-btn" title="滚动主对话并高亮原句">↗ 定位原文</button>
+                  <button type="button" id="btn-sc-resolve" class="sc-op-btn" title="标记是否已掌握">✓ 标记掌握</button>
+                  <button type="button" id="btn-sc-delete" class="sc-op-btn is-danger" title="删除此旁注及原文高亮">🗑 删除</button>
+                </div>
+              </div>
+              <div id="sc-detail-quote" class="sc-anchor-quote"></div>
+              <div id="sc-pinned-box" class="sc-pinned-box hidden">
+                <div><strong>📌 一句话批注：</strong><span id="sc-pinned-text"></span></div>
+                <div class="sc-pinned-ops">
+                  <button type="button" id="btn-sc-pinned-edit" class="sc-mini-btn" title="编辑">✎</button>
+                  <button type="button" id="btn-sc-pinned-clear" class="sc-mini-btn is-danger" title="清除一句话批注">×</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="sc-messages" class="sc-messages"></div>
+
+            <div class="sc-composer">
+              <div class="sc-micro-row">
+                <button type="button" class="sc-micro-btn" data-sc-micro="analogy">💡 通俗类比</button>
+                <button type="button" class="sc-micro-btn" data-sc-micro="example">🧩 举个例子</button>
+                <button type="button" class="sc-micro-btn" data-sc-micro="deep">🔍 深挖原理</button>
+                <button type="button" id="btn-sc-distill" class="sc-micro-btn is-teal">📌 凝练一句话批注</button>
+              </div>
+              <div class="sc-input-wrap">
+                <textarea id="sc-input" rows="2" placeholder="针对这段内容继续追问（仅保存在此旁注分支）…"></textarea>
+                <button type="button" id="btn-sc-send" class="sc-send-btn">发送</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section id="view-settings" class="settings hidden">
+        <div class="settings-heading">
+          <div class="panel-head">
+            <h2>设置</h2>
+            <button class="secondary link" type="button" id="btn-back">← 返回对话</button>
+          </div>
+          <p class="subtitle">按你的习惯，让 PageLens 更顺手。</p>
+          <div class="settings-tabs" role="tablist" aria-label="设置分类">
+            <button type="button" id="settings-tab-basic" role="tab" aria-selected="true" aria-controls="settings-basic" data-settings-tab="basic">基础配置</button>
+            <button type="button" id="settings-tab-advanced" role="tab" aria-selected="false" aria-controls="settings-advanced" tabindex="-1" data-settings-tab="advanced">高级配置</button>
+          </div>
+        </div>
+
+        <div class="settings-scroll" id="settings-scroll">
+          <div id="settings-basic" role="tabpanel" aria-labelledby="settings-tab-basic">
+            <h3 class="section-label">模型连接 <span class="badge" id="settings-model-state">未配置</span></h3>
+            <div class="card settings-basic-card" id="block-text">
+              <div class="model-top">
+                <div class="model-icon" aria-hidden="true">✳</div>
+                <div class="model-info">
+                  <strong id="settings-provider-name">我的模型服务</strong>
+                  <small id="settings-provider-type">OpenAI 兼容服务</small>
+                </div>
+                <button class="compact secondary edit-model" id="btn-toggle-provider-manager" type="button" aria-expanded="false">管理</button>
+              </div>
+              <label class="field">当前文本模型
+                <select id="settings-text-model" aria-label="当前文本模型"></select>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="mm-same" checked />
+                图片理解使用同一模型
+              </label>
+              <p class="hint" id="mm-hint">用于截图和视频画面，需要模型支持图片输入。</p>
+              <div id="mm-fields" hidden></div>
+              <details class="plain-detail" id="settings-provider-manager">
+                <summary>管理服务商与模型</summary>
+                <div id="text-providers" style="margin-top:10px"></div>
+              </details>
+            </div>
+
+            <h3 class="section-label">回答与外观</h3>
+            <div class="card settings-basic-card" id="block-answer">
+              <div class="two">
+                <label class="field">回答语言
+                  <select id="answer-lang">
+                    <option value="zh-CN">简体中文</option>
+                    <option value="en">English</option>
+                    <option value="page">跟随页面</option>
+                  </select>
+                </label>
+                <label class="field">字体大小
+                  <select id="ui-font">
+                    <option value="md">默认</option>
+                    <option value="lg">较大</option>
+                    <option value="xl">更大</option>
+                  </select>
+                </label>
+              </div>
+              <div class="field" style="margin-bottom:0">界面主题
+                <div class="themes theme-picker" role="group" aria-label="界面主题">
+                  <button type="button" class="theme theme-option" data-ui-theme="default" style="--swatch:linear-gradient(90deg,#f7f6f2 60%,#c45c26 60%)" aria-pressed="true"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>默认</strong><small>原始简洁外观</small></button>
+                  <button type="button" class="theme theme-option" data-ui-theme="cyber" style="--swatch:linear-gradient(90deg,#100c25 60%,#b47bff 60%)" aria-pressed="false"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>赛博</strong><small>紫蓝霓虹 · 故障边框</small></button>
+                  <button type="button" class="theme theme-option" data-ui-theme="terminal" style="--swatch:linear-gradient(90deg,#141413 60%,#f3a66a 60%)" aria-pressed="false"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>终端</strong><small>炭黑控制台 · 橙色提示</small></button>
+                  <button type="button" class="theme theme-option" data-ui-theme="warm" style="--swatch:linear-gradient(90deg,#f4ecdf 60%,#9b5638 60%)" aria-pressed="false"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>暖纸</strong><small>米杏纸色 · 宋体正文</small></button>
+                  <button type="button" class="theme theme-option" data-ui-theme="mint" style="--swatch:linear-gradient(90deg,#f5f7df 60%,#687e24 60%)" aria-pressed="false"><span class="theme-colors" aria-hidden="true"><i></i></span><strong>青柠</strong><small>奶油黄绿 · 清新圆角</small></button>
+                </div>
+              </div>
+              <div class="row" style="margin-top:6px">
+                <p class="hint" style="margin:0">精细配色在「高级配置 → 自定义外观」。</p>
+                <button type="button" class="settings-text-button" data-settings-link="settings-group-colors">自定义配色 →</button>
+              </div>
+              <p class="status" id="theme-status" role="status" aria-live="polite"></p>
+            </div>
+
+            <h3 class="section-label">文稿保存 <span class="muted">可选</span></h3>
+            <div class="card settings-basic-card" id="block-library">
+              <div class="row">
+                <div class="folder">
+                  <span id="library-display-name">Obsidian / Notes</span>
+                  <small id="library-status-desc">用于剪藏和对话笔记</small>
+                </div>
+                <div class="row-btns" style="margin:0">
+                  <button class="compact secondary" type="button" id="btn-library-pick">更换</button>
+                  <button class="compact secondary hidden" type="button" id="btn-library-reauth">重新授权</button>
+                  <button class="compact secondary" type="button" id="btn-library-clear">清除</button>
+                </div>
+              </div>
+              <span class="status hidden" id="library-status"></span>
+              <details class="plain-detail">
+                <summary>目录与日记选项</summary>
+                <label class="field" style="margin-top:8px">文稿文件夹路径
+                  <div class="path-row" style="margin-top:4px">
+                    <input id="library-path" type="text" spellcheck="false" placeholder="/Users/…/Notes 或 ~/Obsidian" />
+                    <button class="compact secondary" type="button" id="btn-library-path">使用路径</button>
+                  </div>
+                </label>
+                <label class="field">日记子目录
+                  <input id="daily-notes-folder" type="text" spellcheck="false" placeholder="例如 Daily 或 日记，留空表示保存在根目录" />
+                </label>
+                <p class="hint">手动路径需要本机服务。</p>
+              </details>
+            </div>
+
+            <details class="card shortcut-card accordion" id="settings-group-shortcuts">
+              <summary>
+                <span class="chev" aria-hidden="true"></span>
+                <span class="group-text"><strong>快捷问题</strong></span>
+                <span class="muted" id="settings-state-shortcuts">0 条</span>
+              </summary>
+              <div class="inner" style="border:0;padding:12px 0 2px">
+                <p class="hint" style="margin-top:0">出现在输入框上方。点一下就把这段话发给模型。</p>
+                <div id="shortcut-list"></div>
+                <button class="compact secondary" type="button" id="btn-add-shortcut" style="margin-top:8px">＋ 添加问题</button>
+              </div>
+            </details>
+          </div>
+
+          <div id="settings-advanced" role="tabpanel" aria-labelledby="settings-tab-advanced" hidden>
+            <p class="intro-tip">按需启用扩展能力。保持默认也能阅读网页、提问和使用截图。</p>
+
+            <div class="group-label">Agent 决策</div>
+            <section class="jev-card" id="block-jev" aria-label="JEV 决策模型">
+              <div class="row">
+                <div class="jev-heading">
+                  <span class="group-icon">
+                    <svg class="ico"><use href="#i-sliders"/></svg>
+                  </span>
+                  <span class="group-text">
+                    <strong>JEV 决策模型</strong>
+                    <small>新 agent-loop 的结构化决策能力</small>
+                  </span>
+                </div>
+                <label class="jev-switch settings-switch">
+                  <span class="switch-state" id="jev-toggle-label">已关闭</span>
+                  <input class="jev-enabled" id="jev-enabled" type="checkbox" role="switch" aria-label="启用 JEV 决策模型" />
+                </label>
+              </div>
+              <p class="hint">为 Agent 提供结构化判断。关闭后保留连接配置。</p>
+              <details class="plain-detail jev-config" id="jev-connection">
+                <summary>连接配置 <span class="connection-state settings-state" id="settings-state-jev">· 待配置</span></summary>
+                <label class="field">模型名称<input id="jev-model" type="text" spellcheck="false" placeholder="jev-latest" /></label>
+                <label class="field">TypeSafe API Key<input id="jev-api-key" type="password" autocomplete="off" placeholder="输入 TypeSafe API Key" /></label>
+                <label class="field">服务地址<input id="jev-url" type="url" spellcheck="false" placeholder="https://api.typesafe.ai/v1/systemone" /></label>
+                <p class="hint">启用后，参与判断的上下文会发送至配置的服务。</p>
+                <div class="row" style="margin-top:8px">
+                  <button class="compact secondary" type="button" id="btn-jev-test">测试连接</button>
+                  <span class="status" id="jev-test-status" role="status"></span>
+                </div>
+              </details>
+            </section>
+
+            <div class="group-label">模型</div>
+            <details class="accordion settings-group" id="settings-group-parameters">
+              <summary>
+                <span class="group-icon">
+                  <svg class="ico"><use href="#i-sliders"/></svg>
+                </span>
+                <span class="group-text">
+                  <strong>模型参数</strong>
+                  <small>视频总结的正文长度上限</small>
+                </span>
+                <span class="state settings-state" id="settings-state-parameters">默认</span>
+                <span class="chev">›</span>
+              </summary>
+              <div class="inner">
+                <div id="block-model-parameters">
+                  <label class="field">单次正文上限（Token）
+                    <input data-k="text.summaryInputTokens" type="number" min="1000" max="2000000" step="1000" value="200000" />
+                  </label>
+                  <p class="hint">默认 200,000；超过才分段总结。按中英文估算，不含提示词和输出。</p>
+                </div>
+              </div>
+            </details>
+
+            <div class="group-label">扩展与本机能力</div>
+            <details class="accordion settings-group" id="settings-group-skills">
+              <summary>
+                <span class="group-icon">
+                  <svg class="ico"><use href="#i-puzzle"/></svg>
+                </span>
+                <span class="group-text">
+                  <strong>Skill 扩展</strong>
+                  <small>启用开关 · Skill 目录</small>
+                </span>
+                <span class="state settings-state" id="settings-state-skills">未启用</span>
+                <span class="chev">›</span>
+              </summary>
+              <div class="inner">
+                <div id="block-skill-folder">
+                  <label class="check">
+                    <input type="checkbox" id="skills-enabled" />
+                    启用 Skill
+                  </label>
+                  <p class="hint">输入 / 或点名 Skill 时读取。关闭后保留目录。</p>
+                  <div id="skill-body" style="margin-top:8px">
+                    <label class="field">Skill 目录
+                      <input id="skill-path" type="text" spellcheck="false" placeholder="~/.cursor/skills 或 /Users/…/skills" />
+                    </label>
+                    <div class="row-btns" style="margin-top:6px">
+                      <button class="compact secondary" type="button" id="btn-skills-pick">选择目录</button>
+                      <button class="compact secondary" type="button" id="btn-skills-path">使用路径</button>
+                      <button class="compact secondary hidden" type="button" id="btn-skills-reauth">重新授权</button>
+                      <button class="compact secondary hidden" type="button" id="btn-skills-refresh">重新扫描</button>
+                      <button class="compact secondary" type="button" id="btn-skills-clear">清除</button>
+                      <span class="status" id="skill-folder-status"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details class="accordion settings-group" id="settings-group-native">
+              <summary>
+                <span class="group-icon">
+                  <svg class="ico"><use href="#i-terminal"/></svg>
+                </span>
+                <span class="group-text">
+                  <strong>本机命令与授权</strong>
+                  <small>命令执行 · 安全授权 · 本机服务</small>
+                </span>
+                <span class="state settings-state" id="settings-state-native">智能审查</span>
+                <span class="chev">›</span>
+              </summary>
+              <div class="inner">
+                <div id="block-native-host">
+                  <label class="check">
+                    <input type="checkbox" id="native-shell" />
+                    允许执行本机命令
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="cdp-input" />
+                    允许调试器接管页面（真实点击/拖拽/组合键、文件上传、弹窗处理、整页截图；使用时 Chrome 会显示「正在调试此浏览器」横幅）
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="agent-bridge" />
+                    允许外部 Agent 控制本扩展（默认关闭；仅在专用 Chrome profile 中开启；只作用于白名单 origin 的标签）
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="agent-inbox" />
+                    启用文件 inbox（默认关闭；轮询 ~/.pagelens/agent-inbox，需 Native Host；粘贴/发布只作用于白名单 origin 的标签，且每次弹窗确认）
+                  </label>
+                  <label class="field">安全授权模式
+                    <select id="hitl-mode">
+                      <option value="balanced">智能审查（推荐）：只读与同源操作直接放行，特权或跨源操作经 AI 预审后弹窗确认</option>
+                      <option value="strict">严格模式：任何特权与 Shell 命令 100% 物理弹窗确认</option>
+                      <option value="autonomous">全自动模式：所有命令自动静默执行，零弹窗中断</option>
+                    </select>
+                  </label>
+                  <p class="hint">智能审查会自动放行只读和同源操作；跨源执行脚本、输入、打开链接等需确认，AI 审查只给风险提示，不会代你放行。你在提问里明确要求的动作与目标（网址、平台、`命令`）会自动放行；网页和工具结果里的内容永远不能授权操作。</p>
+                  <div class="field">
+                    <span class="field-label">以下操作无论谁要求都先让我确认</span>
+                    <div id="irreversible-list" class="irreversible-list"></div>
+                  </div>
+                  <details class="plain-detail" id="inbox-activity-detail">
+                    <summary>外部 Agent 活动（最近 50 条）</summary>
+                    <div class="row-btns" style="margin-top:6px">
+                      <button class="compact secondary" type="button" id="btn-inbox-poll">立即检查 inbox</button>
+                      <button class="compact secondary" type="button" id="btn-inbox-clear">清空记录</button>
+                    </div>
+                    <div id="inbox-activity-list" class="hint" style="margin-top:6px"></div>
+                  </details>
+                  <details class="plain-detail">
+                    <summary>安装与诊断</summary>
+                    <p class="hint">Agent 循环：<code id="loop-engine-label">@mage-ai-lab/agent-loop/mini</code>（npm）</p>
+                    <p class="hint" id="native-host-id" style="margin-top:6px"></p>
+                    <div class="row-btns" style="margin-top:6px">
+                      <button class="compact secondary" type="button" id="btn-native-copy-id">复制扩展 ID</button>
+                      <button class="compact secondary" type="button" id="btn-native-copy-install">复制安装命令</button>
+                      <button class="compact secondary" type="button" id="btn-native-test">测试 host</button>
+                      <span class="status" id="native-host-status"></span>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </details>
+
+            <details class="accordion settings-group" id="settings-group-agents">
+              <summary>
+                <span class="group-icon">
+                  <svg class="ico"><use href="#i-terminal"/></svg>
+                </span>
+                <span class="group-text">
+                  <strong>外部 Agent</strong>
+                  <small>MCP 网关 · token · 审计</small>
+                </span>
+                <span class="state settings-state" id="settings-state-agents">未启用</span>
+                <span class="chev">›</span>
+              </summary>
+              <div class="inner" id="block-agent-gateway">
+                <p class="hint">让 Cursor / Claude Code / Codex / 脚本通过 MCP 或本机 socket（~/.pagelens/bridge.sock）操作这个 Chrome。每个 Agent 用自己的 token，按 scope 与 origin 范围放行，调用不弹窗、全部记审计。需要先安装 Native Host。</p>
+                <label class="check">
+                  <input type="checkbox" id="agent-gateway" />
+                  启用外部 Agent 网关（至少需要一个有效 token）
+                </label>
+                <div class="row-btns">
+                  <span class="status" id="agent-gateway-status" role="status"></span>
+                  <button class="compact secondary" type="button" id="btn-agent-gateway-reconnect">重连</button>
+                </div>
+
+                <div class="divider"></div>
+                <h4>新建 token</h4>
+                <label class="field">名称（如 cursor、claude-code）
+                  <input type="text" id="agent-token-name" maxlength="40" placeholder="cursor" spellcheck="false" />
+                </label>
+                <label class="field">权限
+                  <select id="agent-token-preset">
+                    <option value="read-only">只读：列标签、读页面、截图</option>
+                    <option value="operate" selected>操作：只读 + 开/切标签、点击输入粘贴、写剪贴板</option>
+                    <option value="full">完全：操作 + 页面 JS、下载、上传、cookie、非安全设置、本机命令与文件</option>
+                  </select>
+                </label>
+                <p class="hint" id="agent-token-scopes"></p>
+                <label class="field">允许的网站（每行一个；<code>*</code> = 所有 http/https 网站）
+                  <textarea id="agent-token-origins" rows="3" spellcheck="false"></textarea>
+                </label>
+                <label class="field">出站白名单（可选，每行一个；数据可以额外发往的网站，例如 API 域名。网站范围本身已允许）
+                  <textarea id="agent-token-egress" rows="2" spellcheck="false" placeholder="https://api.example.com"></textarea>
+                </label>
+                <label class="check">
+                  <input type="checkbox" id="agent-token-skip-irreversible" />
+                  此 Agent 免「不可逆动作清单」确认（发布/删除/上传/改设置等将直接执行；每次命中都记入审计）
+                </label>
+                <label class="field">有效期
+                  <select id="agent-token-expiry">
+                    <option value="0">永不过期</option>
+                    <option value="7">7 天</option>
+                    <option value="30" selected>30 天</option>
+                    <option value="90">90 天</option>
+                  </select>
+                </label>
+                <div class="row-btns">
+                  <button class="compact" type="button" id="btn-agent-token-create">创建 token</button>
+                  <span class="status" id="agent-token-status" role="status"></span>
+                </div>
+                <div id="agent-token-reveal" hidden>
+                  <p class="hint"><strong>只显示这一次</strong>，扩展只保存哈希。复制后用下面的命令存到 ~/.pagelens/agents/（0600）并生成 MCP 配置。</p>
+                  <code id="agent-token-value" class="agent-token-value"></code>
+                  <div class="row-btns">
+                    <button class="compact secondary" type="button" id="btn-agent-token-copy">复制 token</button>
+                    <button class="compact secondary" type="button" id="btn-agent-token-copy-setup">复制配置命令</button>
+                    <button class="compact secondary" type="button" id="btn-agent-token-hide">我已保存</button>
+                  </div>
+                  <pre id="agent-token-setup" class="agent-pre"></pre>
+                </div>
+
+                <div class="divider"></div>
+                <h4>已有 token</h4>
+                <ul id="agent-token-list" class="agent-token-list"></ul>
+
+                <div class="divider"></div>
+                <h4>审计</h4>
+                <div class="row-btns">
+                  <button class="compact secondary" type="button" id="btn-agent-audit-view">查看最近 50 条</button>
+                  <button class="compact secondary" type="button" id="btn-agent-audit-export">导出 JSON</button>
+                  <button class="compact secondary" type="button" id="btn-agent-audit-clear">清空</button>
+                  <span class="status" id="agent-audit-status" role="status"></span>
+                </div>
+                <pre id="agent-audit-view" class="agent-pre" hidden></pre>
+              </div>
+            </details>
+
+            <div class="group-label">个性化与诊断</div>
+            <details class="accordion settings-group" id="settings-group-colors">
+              <summary>
+                <span class="group-icon">
+                  <svg class="ico"><use href="#i-palette"/></svg>
+                </span>
+                <span class="group-text">
+                  <strong>自定义外观</strong>
+                  <small>基础配色 · 错误提示配色</small>
+                </span>
+                <span class="state settings-state" id="settings-state-colors">默认</span>
+                <span class="chev">›</span>
+              </summary>
+              <div class="inner">
+                <div class="theme-editor" id="block-custom-appearance">
+                  <h4>当前主题的配色</h4>
+                  <p class="hint">4 个基础色，其他层次自动搭配。每套主题单独保留配色。</p>
+                  <div class="theme-color-grid">
+                    <div class="theme-color-field"><label for="theme-color-surface">背景色</label><div><input id="theme-color-surface" type="color" data-theme-color="surface" aria-label="背景色" /><input type="text" data-theme-color="surface" aria-label="背景色十六进制值" spellcheck="false" maxlength="7" pattern="#[0-9a-fA-F]{6}" /></div></div>
+                    <div class="theme-color-field"><label for="theme-color-ink">正文色</label><div><input id="theme-color-ink" type="color" data-theme-color="ink" aria-label="正文色" /><input type="text" data-theme-color="ink" aria-label="正文色十六进制值" spellcheck="false" maxlength="7" pattern="#[0-9a-fA-F]{6}" /></div></div>
+                    <div class="theme-color-field"><label for="theme-color-accent">主题主色</label><div><input id="theme-color-accent" type="color" data-theme-color="accent" aria-label="主题主色" /><input type="text" data-theme-color="accent" aria-label="主题主色十六进制值" spellcheck="false" maxlength="7" pattern="#[0-9a-fA-F]{6}" /></div></div>
+                    <div class="theme-color-field"><label for="theme-color-teal">辅助色</label><div><input id="theme-color-teal" type="color" data-theme-color="teal" aria-label="辅助色" /><input type="text" data-theme-color="teal" aria-label="辅助色十六进制值" spellcheck="false" maxlength="7" pattern="#[0-9a-fA-F]{6}" /></div></div>
+                  </div>
+                  <div class="divider"></div>
+                  <h4>错误框配色</h4>
+                  <p class="hint">用于失败的工具调用和对话错误提示。</p>
+                  <div class="theme-color-grid">
+                    <div class="theme-color-field"><label for="theme-color-danger-bg">错误背景</label><div><input id="theme-color-danger-bg" type="color" data-theme-color="danger-bg" aria-label="错误背景" /><input type="text" data-theme-color="danger-bg" aria-label="错误背景十六进制值" spellcheck="false" maxlength="7" pattern="#[0-9a-fA-F]{6}" /></div></div>
+                    <div class="theme-color-field"><label for="theme-color-danger">错误文字</label><div><input id="theme-color-danger" type="color" data-theme-color="danger" aria-label="错误文字" /><input type="text" data-theme-color="danger" aria-label="错误文字十六进制值" spellcheck="false" maxlength="7" pattern="#[0-9a-fA-F]{6}" /></div></div>
+                    <div class="theme-color-field"><label for="theme-color-danger-line">错误边框</label><div><input id="theme-color-danger-line" type="color" data-theme-color="danger-line" aria-label="错误边框" /><input type="text" data-theme-color="danger-line" aria-label="错误边框十六进制值" spellcheck="false" maxlength="7" pattern="#[0-9a-fA-F]{6}" /></div></div>
+                  </div>
+                  <p id="theme-editor-status" class="status" role="status"></p><p id="theme-contrast" class="lead" role="status"></p>
+                  <button id="btn-theme-reset" class="compact secondary" type="button" style="margin-top:8px">重置当前主题配色</button>
+                </div>
+              </div>
+            </details>
+
+            <details class="accordion settings-group" id="settings-group-trace">
+              <summary>
+                <span class="group-icon">
+                  <svg class="ico"><use href="#i-activity"/></svg>
+                </span>
+                <span class="group-text">
+                  <strong>运行追踪</strong>
+                  <small>Langfuse · 调用、耗时与用量</small>
+                </span>
+                <span class="state settings-state" id="settings-state-trace">未启用</span>
+                <span class="chev">›</span>
+              </summary>
+              <div class="inner">
+                <div id="block-langfuse">
+                  <label class="check">
+                    <input type="checkbox" id="langfuse-enabled" />
+                    启用 Langfuse 追踪
+                  </label>
+                  <p class="hint">启用后，对话和工具调用会发送至你配置的服务。</p>
+                  <div id="langfuse-fields" style="margin-top:8px">
+                    <label class="field">Host 地址
+                      <input id="langfuse-url" type="text" spellcheck="false" placeholder="http://localhost:3000" />
+                    </label>
+                    <label class="field">Public Key
+                      <input id="langfuse-pk" type="text" spellcheck="false" placeholder="pk-lf-…" />
+                    </label>
+                    <label class="field">Secret Key
+                      <input id="langfuse-sk" type="password" spellcheck="false" placeholder="sk-lf-…" />
+                    </label>
+                    <label class="field">环境标识
+                      <input id="langfuse-env" type="text" spellcheck="false" placeholder="development" />
+                    </label>
+                    <div class="row" style="margin-top:8px">
+                      <button type="button" class="compact secondary" id="btn-langfuse-test">测试连接</button>
+                      <span class="status" id="langfuse-status" role="status"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <div class="settings-footer">
+          <div>
+            <small>密钥仅保存在本机</small>
+            <span class="status" id="save-status" role="status" aria-live="polite"></span>
+          </div>
+          <button class="primary save" type="button" id="btn-save">保存设置</button>
+        </div>
+      </section>
+
+      <section id="view-history" class="settings hidden">
+        <div class="panel-head">
+          <h2>对话历史</h2>
+          <button class="secondary" type="button" id="btn-hist-back">返回对话</button>
+        </div>
+        <p class="lead">每场对话自动保存在本机，带上当时的网页和全文。可打开续聊、导出、入库到文稿文件夹，或删除。</p>
+        <label class="field">搜索
+          <input id="hist-q" placeholder="标题、网站或网址" />
+        </label>
+        <div class="row-btns hist-actions">
+          <button class="secondary" type="button" id="btn-new-window">新建任务窗口</button>
+          <button class="secondary" type="button" id="btn-export-all-md">全部导出 Markdown</button>
+          <button class="secondary" type="button" id="btn-export-all-json">全部导出 JSON</button>
+          <button class="secondary" type="button" id="btn-import-all-obsidian">全部入库</button>
+          <span class="status" id="hist-status"></span>
+        </div>
+        <div id="hist-list" aria-label="按网站分组的对话"></div>
+      </section>
+
+      <section id="view-review" class="settings hidden">
+        <div class="review-header-row panel-head">
+          <h2>💡 知识回顾与复盘</h2>
+          <a href="graph.html" target="_blank" rel="noopener">剪藏知识图谱</a>
+          <button class="secondary mini" type="button" id="btn-review-back">返回对话</button>
+        </div>
+        <p class="lead">按天、周、月聚合你收藏的内容，深入提炼核心认知图谱与个人思考，沉淀长久思维资产。</p>
+
+        <div class="review-tabs" role="tablist">
+          <button type="button" class="review-tab active" data-type="daily">📅 每日复盘</button>
+          <button type="button" class="review-tab" data-type="weekly">📆 每周复盘</button>
+          <button type="button" class="review-tab" data-type="monthly">🗓️ 每月复盘</button>
+          <button type="button" class="review-tab" data-type="history">📚 历史复盘</button>
+          <button type="button" class="review-tab" data-type="sidechats">💬 旁注笔记</button>
+        </div>
+
+        <div class="review-period-bar" id="review-period-bar">
+          <button type="button" class="btn-period-nav" id="btn-period-prev" title="上一周期">‹</button>
+          <div class="review-period-info">
+            <span class="period-title" id="review-period-label">每日复盘</span>
+            <span class="period-sub" id="review-period-stats">正在读取收藏…</span>
+          </div>
+          <button type="button" class="btn-period-nav" id="btn-period-next" title="下一周期">›</button>
+          <input type="date" id="review-date-picker" class="hidden" />
+          <button type="button" class="btn-period-calendar" id="btn-period-pick" title="选择具体日期">📅</button>
+        </div>
+
+        <div class="review-clip-drawer" id="review-clip-drawer">
+          <div class="clip-drawer-header" id="clip-drawer-toggle">
+            <span class="drawer-title" id="clip-drawer-title">📌 本期收藏内容 (0)</span>
+            <span class="drawer-arrow" id="clip-drawer-arrow">▼</span>
+          </div>
+          <div class="clip-drawer-content hidden" id="clip-drawer-content">
+            <div class="clip-drawer-toolbar">
+              <span class="drawer-tip">已勾选用于生成复盘的条目：</span>
+              <button type="button" class="drawer-link-btn" id="btn-clip-select-all">全选</button>
+              <button type="button" class="drawer-link-btn" id="btn-clip-deselect-all">清空</button>
+            </div>
+            <div class="clip-list" id="review-clip-list"></div>
+          </div>
+        </div>
+
+        <div class="review-actions-bar" id="review-actions-bar">
+          <button type="button" class="primary" id="btn-review-generate">✨ 开始 AI 深度复盘</button>
+          <button type="button" class="secondary hidden" id="btn-review-stop">⏹ 停止生成</button>
+          <button type="button" class="secondary" id="btn-review-obsidian" title="导出为独立 Markdown 卡片写入文稿库">📝 入库 Obsidian</button>
+          <button type="button" class="secondary" id="btn-review-daily-note" title="追加至今日日记">📓 写入日记</button>
+          <button type="button" class="secondary" id="btn-review-copy" title="复制 Markdown 文本">📋 复制</button>
+          <button type="button" class="secondary hidden" id="btn-review-delete" title="删除此复盘记录">🗑️</button>
+          <span class="status" id="review-status"></span>
+        </div>
+
+        <div class="review-output-container" id="review-output-container">
+          <div class="review-output-placeholder" id="review-output-empty">
+            <div class="empty-icon">🌱</div>
+            <div class="empty-text">点击「开始 AI 深度复盘」生成认知总结</div>
+            <div class="empty-tip">系统将自动综合本周期内所有收藏原文、AI 提取与个人思考备注</div>
+          </div>
+          <div class="review-output markdown-body hidden" id="review-output"></div>
+        </div>
+
+        <div class="review-history-container hidden" id="review-history-container">
+          <div id="review-history-list"></div>
+        </div>
+
+        <div class="review-sidechats-container hidden" id="review-sidechats-container">
+          <div class="review-sidechats-toolbar">
+            <input id="review-sc-search" class="sc-search" type="search" placeholder="跨会话搜索旁注原句、标题或一句话批注…" />
+            <div class="sc-filter-group">
+              <button type="button" class="sc-filter-btn is-active" data-review-sc-filter="all">全部</button>
+              <button type="button" class="sc-filter-btn" data-review-sc-filter="active">思考中</button>
+              <button type="button" class="sc-filter-btn" data-review-sc-filter="resolved">已掌握</button>
+              <button type="button" class="sc-filter-btn" data-review-sc-filter="pinned">📌 已凝练</button>
+            </div>
+          </div>
+          <div id="review-sc-list" class="review-sc-list"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script src="tooltip.js"></script>
+  <script src="../vendor/marked.min.js"></script>
+  <script src="../vendor/purify.min.js"></script>
+  <script src="../vendor/mermaid.min.js"></script>
+  <script src="../vendor/katex/katex.min.js"></script>
+  <script type="module" src="permission-prompt.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
