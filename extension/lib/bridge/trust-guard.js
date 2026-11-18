@@ -59,6 +59,10 @@ export function matchTokenIrreversible(toolName, args = {}, settings = {}, { tar
     const { id, label } = IRREVERSIBLE_ITEMS.find((i) => i.id === "delete");
     return { id, label, reason: DELETE_TOOLS[toolName] };
   }
+  if (toolName === "flow_size_chart_action" && args.action === "open") {
+    if (!normalizeIrreversibleActions(settings?.irreversibleActions).publish_send) return null;
+    return { id: "publish_send", label: "保存 Shopee 店铺尺码表", reason: "新建并保存 Shopee 店铺尺码表" };
+  }
   const name = IRREVERSIBLE_ALIASES[toolName] || toolName;
   return matchIrreversible(name, args, settings, { targetUrl, elementText });
 }
