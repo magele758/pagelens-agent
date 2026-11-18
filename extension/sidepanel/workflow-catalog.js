@@ -6,11 +6,13 @@ const PLATFORM_PREFERENCE = "pagelens.workflowPlatformId";
 export async function launchWorkflowFeature(feature, platform, handlers) {
   const launch = {
     "product-listing": handlers.openProductListing,
+    "temu-product-listing": handlers.openTemuListing,
     "product-capture": handlers.openProductCapture,
     "tiktok-mx-draft": handlers.openTiktokDraft,
   };
   const opened = Object.hasOwn(launch, feature.id)
     ? await launch[feature.id]?.(feature, platform)
+    : platform === "temu" ? await handlers.openTemuOperations({ mode: feature.id })
     : await handlers.openMarketing({ mode: feature.id, force: true });
   if (!opened) throw new Error("暂时无法打开此工作流。");
 }

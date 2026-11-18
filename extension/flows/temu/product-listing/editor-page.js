@@ -1,0 +1,254 @@
+/** Executed as a self-contained function in the pinned Temu editor document. */
+export async function temuEditorPage({ kind, href, categoryPath, key, value, role, identifier, expectedCount }) {
+  const scope = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
+    location.pathname === "/goods/edit" && location.href === href;
+  const fail = (code, message) => ({ ok: false, code, message });
+  const clean = (text, limit = 200) => String(text ?? "").replace(/\s+/gu, " ").trim().slice(0, limit);
+  const translated = (text) => clean(text).normalize("NFKC").replace(/^[*＊]\s*|[：:]$/gu, "");
+  const visible = (element) => Boolean(element?.isConnected && element.getClientRects().length &&
+    !element.closest('[hidden],[inert],[aria-hidden="true"]') && getComputedStyle(element).visibility !== "hidden");
+  const control = 'input,textarea,select,[contenteditable="true"],[contenteditable="plaintext-only"]';
+  const labels = 'label,[data-field-label],[class*="Form_itemLabelContent_"],[class*="STF_label_"]';
+  const modals = 'dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]';
+  const csselect = '[class*="ST_outerWrapper_"],[role="combobox"],[aria-haspopup="listbox"]';
+  const root = document.getElementById("page_container_id");
+  const blocked = () => [...document.querySelectorAll(modals)].some(visible);
+  const ready = () => scope() && root && visible(root) && !blocked();
+  const isStable = (id) => /^[A-Za-z_][A-Za-z0-9_[\].:-]{1,230}$/u.test(id);
+  const itemLabel = (el) => el.matches(labels) ? el : el.querySelector(labels);
+  const names = {
+    productName: "中文商品名称", productEnName: "英文商品名称", productDesc: "商品描述",
+    productDescription: "商品描述", productEnDesc: "英文商品描述",
+    productOriginCode: "商品产地", "productProperties[15]": "成分比例",
+    "productProperties[7817]": "辅料成分比例",
+  };
+  const shipping = { inputLen: "最长边", inputWidth: "次长边", inputHeight: "最短边", inputWeight: "重量" };
+  const skuNames = {
+    skuCode: "SKU 货号", usSuggestSalesPrice: "制造商建议零售价", stock: "库存", quantity: "库存",
+    "productSkuMultiPack.packIncludeInfo": "共计内含数量", "productSkuSameReferPrice.url": "参考链接",
+  };
+
+  if (!scope()) return fail("PAGE_CHANGED", "Temu 商品页已切换。");
+  if (blocked()) return fail("MODAL_BLOCKED", "Temu 表单上有弹窗，请核对后继续。");
+  if (!ready() || !root.querySelector('[id="productName"],[id="productEnName"],[id^="productProperties["]')) {
+    return fail("EDITOR_LOADING", "商品信息表单还在加载。");
+  }
+  if (categoryPath?.length) {
+    const normalized = text => translated(text).replace(/\s*[>＞›→]\s*/gu, ">");
+    const wanted = normalized(categoryPath.join(">"));
+    const crumbs = [...root.querySelectorAll('label,[class*="itemLabelContent_"],span,div')].filter(el =>
+      visible(el) && el.childElementCount <= 6).map(el => normalized(el.innerText || el.textContent || ""));
+    const seen = crumbs.some(crumb => crumb === wanted || crumb.endsWith(">" + wanted) ||
+      /^(?:\*?商品(?:分类|类目)[:>]?|>)/u.test(crumb) && crumb.endsWith(wanted) ||
+      crumb.startsWith(wanted + "修改") || crumb.startsWith(wanted + " 重新选择"));
+    if (!seen) return fail("EDITOR_LOADING", "暂时无法核对第二步的已选商品类目。");
+  }
+
+  function holderFor(input) {
+    for (let node = input, depth = 0; node && node !== root && depth < 12; node = node.parentElement, depth++) {
+      if (isStable(node.id) && document.getElementById(node.id) === node &&
+          (node === input || [...node.querySelectorAll(control)].filter(el => el.type !== "hidden").length === 1)) return node;
+    }
+    return null;
+  }
+
+  function nearby(input) {
+    const linked = clean(input.getAttribute("aria-label")) || clean(input.getAttribute("aria-labelledby")?.split(/\s+/u)
+      .map(id => document.getElementById(id)?.textContent).filter(Boolean).join(" ")) ||
+      [...(input.labels || [])].filter(visible).map(el => clean(el.textContent)).join(" ");
+    if (linked) return linked;
+    for (let node = input, depth = 0; node?.parentElement && node !== root && depth < 7; node = node.parentElement, depth++) {
+      const parent = node.parentElement;
+      const options = [...parent.querySelectorAll(labels)].filter(el => visible(el) && !el.querySelector(control));
+      if (options.length === 1) return clean(options[0].textContent);
+      if (options.length > 1) {
+        const previous = node.previousElementSibling && itemLabel(node.previousElementSibling);
+        return previous && visible(previous) ? clean(previous.textContent) : "";
+      }
+    }
+    return "";
+  }
+
+  function rowLabelSet(input) {
+    const row = input.closest("tr");
+    if (!row) return [];
+    const cells = [...row.cells];
+    for (let index = row.sectionRowIndex - 1; index >= 0; index--) {
+      for (const cell of row.parentElement.rows[index]?.cells || []) {
+        if (cell.rowSpan === 0 || index + cell.rowSpan > row.sectionRowIndex) cells.push(cell);
+      }
+    }
+    return cells.filter(cell => !cell.querySelector(control) && !cell.querySelector('button,a,[role="combobox"]'))
+      .map(cell => clean(cell.dataset.value || cell.getAttribute("aria-label") || cell.textContent))
+      .filter(text => text && !/^[-–—]+$/u.test(text)).slice(0, 12);
+  }
+
+  function fromField(input) {
+    const holder = holderFor(input);
+    if (!holder || input.matches(':disabled,[readonly]') || input.closest('[aria-disabled="true"],[aria-readonly="true"]')) return null;
+    const id = holder.id;
+    const section = input.closest('[data-testid="beast-core-form-item"],[class*="Form_item_"]');
+    const sku = /^(?:productSkuMap|productSkuVolumeWeightMap)\.([\w-]*)\.(.+)$/u.exec(id);
+    const label = names[id] || shipping[sku?.[2]] || skuNames[sku?.[2]] ||
+      (sku?.[2]?.startsWith("siteSupplierPriceMap.") ? "申报价格（CNY）" : "") ||
+      (/^productSkcList\[\d+\]\.extCode$/u.test(id) ? "颜色货号" : "") || nearby(input);
+    let fieldKind;
+    if (input.localName === "select") fieldKind = "select";
+    else if (input.type === "checkbox" || input.type === "radio") fieldKind = input.type;
+    else if (input.isContentEditable || input.matches('textarea,input[type="text"],input[type="number"],input[type="url"],input:not([type])')) fieldKind = "text";
+    if (!fieldKind || input.closest(csselect) || !label || /密码|验证码|password|captcha|otp/iu.test(label)) return null;
+    const required = Boolean(input.required || input.getAttribute("aria-required") === "true" ||
+      shipping[sku?.[2]] || sku?.[2]?.startsWith("siteSupplierPriceMap.") ||
+      /^[*＊]/u.test(label) || section?.querySelector('[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]'));
+    const options = fieldKind === "select" ? [...input.options].filter(option => option.value && !option.disabled &&
+      !option.closest("optgroup[disabled]")).map(option => ({ label: clean(option.textContent), value: option.value })) : [];
+    const constraint = (attr) => input.hasAttribute(attr) && input.getAttribute(attr) !== "" && Number.isFinite(Number(input.getAttribute(attr)))
+      ? Number(input.getAttribute(attr)) : undefined;
+    return {
+      input, field: {
+        key: id, label: translated(label), kind: fieldKind, required,
+        value: fieldKind === "checkbox" || fieldKind === "radio" ? input.checked :
+          input.isContentEditable ? input.textContent : input.value,
+        options, min: constraint("min"), max: constraint("max"), maxLength: constraint("maxlength"),
+        ...(sku && { skuGroup: sku[1], skuMember: sku[2], rowLabels: rowLabelSet(holder) }),
+      },
+    };
+  }
+
+  const fields = () => [...root.querySelectorAll(control)].filter(el => visible(el) ||
+    (["checkbox", "radio"].includes(el.type) && [...(el.labels || [])].some(visible))).map(fromField).filter(Boolean);
+  const getField = (id) => {
+    const holder = document.getElementById(id);
+    if (!holder || !root.contains(holder)) return null;
+    const inputs = holder.matches(control) ? [holder] : [...holder.querySelectorAll(control)];
+    const matches = inputs.map(fromField).filter(item => item?.field.key === id && (visible(item.input) ||
+      (["checkbox", "radio"].includes(item.input.type) && [...(item.input.labels || [])].some(visible))));
+    return matches.length === 1 ? matches[0] : null;
+  };
+  function issues() {
+    const errors = root.querySelectorAll('[aria-invalid="true"],[data-testid*="error"],[role="alert"],[class*="Form_error_"],[class*="itemError_"]');
+    const notifications = [...document.querySelectorAll('[role="alert"],[data-testid*="toast"],[class*="Toast_content"]')]
+      .filter(el => /失败|错误|未成功|有误|超出|没有权限|error|failed|invalid/iu.test(clean(el.textContent)));
+    return [...new Set([...errors, ...notifications].filter(visible).map(el => clean(el.textContent, 160) || nearby(el)).filter(Boolean))].slice(0, 35);
+  }
+
+  function uploads() {
+    const list = [];
+    for (const area of root.querySelectorAll('[id="noCostumeCarouselImgsI18n.common"],[id$=".previewImgsI18n.common"]')) {
+      const main = area.id === "noCostumeCarouselImgsI18n.common";
+      const sku = /^productSkuMap\.[\w-]*\.previewImgsI18n\.common$/u.test(area.id);
+      if ((!main && !sku) || !visible(area) || !area.querySelector('[class^="upload-trigger_wrap__"]')) continue;
+      const markers = [...area.querySelectorAll('img[src]')].filter(node => visible(node) &&
+        !node.closest('[class^="upload-trigger_wrap__"],[aria-busy="true"],[class*="uploading" i]') &&
+        /^https?:\/\//iu.test(node.src) && !node.matches('[class*="placeholder" i],[class*="icon" i]')).length;
+      if (main) {
+        list.push({ key: area.id, role: "main", mode: "material", multiple: true, markers, minimum: 3 });
+      } else {
+        list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, rowLabels: rowLabelSet(area) });
+      }
+    }
+    for (const input of root.querySelectorAll('input[type="file"]')) {
+      if (input.disabled || input.closest('[aria-disabled="true"]') || input.accept && !/image|png|jpe?g|webp/iu.test(input.accept)) continue;
+      let section = null;
+      let uploadRole = "";
+      for (let node = input.parentElement, depth = 0; node && node !== root && depth < 7; node = node.parentElement, depth++) {
+        const id = node.id;
+        const prompt = clean(node.textContent, 210);
+        const label = translated(prompt);
+        if (/sizeChart|sizeTable|尺码图|尺码表/u.test(id) || /^(?:尺码图|尺码表图片)/u.test(label)) uploadRole = "size-chart";
+        else if (/productSkcList|sku.*image/iu.test(id)) uploadRole = "variant";
+        else if (/detail.*(?:image|pic)|details.*album/iu.test(id) || /^(?:商品)?详情图/u.test(label)) uploadRole = "detail";
+        else if (/(?:album|image|pic)/iu.test(id) || /^(?:商品主图|商品图片|轮播图|素材图片|商品轮播图|正面图)/u.test(label)) uploadRole = "main";
+        if (uploadRole && visible(node)) { section = node; break; }
+      }
+      if (!section || !uploadRole) continue;
+      let selector = "";
+      if (isStable(input.id) && document.getElementById(input.id) === input) selector = `[id="${input.id}"][type="file"]`;
+      else if (isStable(section.id) && document.getElementById(section.id) === section &&
+          section.querySelectorAll('input[type="file"]').length === 1) {
+        selector = `[id="${section.id}"] input[type="file"]`;
+      } else {
+        const steps = [];
+        for (let node = input; node && node !== root; node = node.parentElement) {
+          steps.unshift(`${node.localName}:nth-child(${[...node.parentElement.children].indexOf(node) + 1})`);
+        }
+        selector = `#page_container_id > ${steps.join(" > ")}[type="file"]`;
+      }
+      if (document.querySelectorAll(selector).length !== 1 || document.querySelector(selector) !== input) continue;
+      const owner = uploadRole === "variant" ? section.id.match(/^productSkcList\[(\d+)\]/u)?.[1] : undefined;
+      const spec = owner != null ? document.getElementById(`productSkcList[${owner}].mainSpec[0]`) : null;
+      const match = clean(spec?.querySelector("input")?.value || spec?.querySelector('[class*="ST_selectValueSingle_"]')?.textContent);
+      const markers = [...section.querySelectorAll('img')]
+        .filter(el => visible(el) && !el.closest('button,[role="button"]') &&
+          !el.matches('[class*="icon" i]') && !el.closest('[aria-busy="true"],[class*="uploading" i]') &&
+          !/^data:image\/svg\+xml/iu.test(el.getAttribute("src") || "")).length;
+      const ruleText = clean(section.textContent, 400);
+      const minimum = uploadRole === "main" ? Number(/(?:至少|最少|(?:^|[^\d]))\s*(\d{1,2})\s*(?:至|[-~–—～]|张图|张图片)/u.exec(ruleText)?.[1]) || undefined : undefined;
+      if (list.some(item => item.key === section.id)) continue;
+      list.push({ role: uploadRole, key: section.id || selector, selector, multiple: input.multiple, accept: input.accept,
+        selectedFiles: input.files?.length || 0, markers, ...(minimum && { minimum }), ...(match && { variant: match }) });
+    }
+    return list;
+  }
+
+  if (kind === "inspect") {
+    const list = fields().map(item => item.field).filter((field, _i, all) => all.filter(item => item.key === field.key).length === 1);
+    return { ok: true, fields: list.slice(0, 400), uploads: uploads(), issues: issues(), truncated: list.length > 400 };
+  }
+  if (kind === "upload-target") {
+    const matches = uploads().filter(item => item.role === role && item.key === key && (identifier == null || item.variant === identifier));
+    if (matches.length !== 1) return fail("UPLOAD_CONTROL_MISSING", "没有唯一匹配的图片上传控件。");
+    const match = matches[0];
+    if (expectedCount > 1 && !match.multiple) return fail("UPLOAD_CONTROL_SINGLE", "此控件每次只接收一张图片。");
+    return { ok: true, ...match };
+  }
+  if (kind === "add-parent-spec") {
+    const buttons = [...root.querySelectorAll('button,[role="button"]')].filter(el => visible(el) &&
+      !el.matches('[disabled],[aria-disabled="true"]') && /^添加父规格\s*2$/u.test(clean(el.textContent)));
+    if (buttons.length !== 1) return fail("SPEC_ADD_MISSING", "未找到可用的添加父规格 2 按钮。");
+    buttons[0].click();
+    return { ok: true, status: "opened" };
+  }
+  if (kind !== "write") return fail("UNSUPPORTED_ACTION", "不支持此编辑动作。");
+  const entry = getField(key);
+  if (!entry) return fail("FIELD_MISSING", "不能在当前商品页唯一定位字段。");
+  const { input, field } = entry;
+  const defaultOutcome = { key, label: field.label };
+  let wanted;
+  if (field.kind === "checkbox" || field.kind === "radio") {
+    if (typeof value !== "boolean" || field.kind === "radio" && !value) return fail("VALUE_INVALID", "选项需要明确的布尔值。");
+    wanted = value;
+  } else {
+    if (typeof value !== "string" && typeof value !== "number") return fail("VALUE_INVALID", "字段需要文本或数字。");
+    wanted = String(value);
+    if (field.kind === "select") {
+      const matches = field.options.filter(option => translated(option.label) === translated(wanted) || option.value === wanted);
+      if (matches.length !== 1) return fail("OPTION_MISSING", "下拉列表没有唯一匹配的可选项。");
+      wanted = matches[0].value;
+    }
+    if ((field.required && !wanted.trim()) || field.maxLength != null && wanted.length > field.maxLength ||
+        field.min != null && (!Number.isFinite(Number(wanted)) || Number(wanted) < field.min) ||
+        field.max != null && (!Number.isFinite(Number(wanted)) || Number(wanted) > field.max)) {
+      return fail("VALUE_INVALID", `「${field.label}」超出平台校验范围。`);
+    }
+  }
+  if (field.value === wanted) return { ok: true, status: "unchanged", ...defaultOutcome };
+  if (!ready()) return fail("PAGE_CHANGED", "当前商品或弹窗已变化。");
+  if (typeof wanted === "boolean") input.click();
+  else {
+    if (input.isContentEditable) input.textContent = wanted;
+    else {
+      const prototype = input.localName === "textarea" ? HTMLTextAreaElement.prototype :
+        input.localName === "select" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value")?.set.call(input, wanted);
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    if (input.isConnected && ready()) input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  await new Promise(resolve => setTimeout(resolve, 35));
+  if (!scope() || blocked()) return fail("PAGE_CHANGED", "写入后页面发生变化，请检查结果。");
+  const readback = getField(key);
+  if (readback?.field.value !== wanted || readback?.input.getAttribute("aria-invalid") === "true" ||
+      readback?.input.validity?.valid === false) return fail("READBACK_MISMATCH", `「${field.label}」的填写结果未能核对。`);
+  return { ok: true, status: "filled", ...defaultOutcome };
+}

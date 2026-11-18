@@ -30,6 +30,10 @@ test("only exposes capabilities that match each site's surface and current route
   }
   assert.equal(identifyWorkflowPage("https://agentseller.temu.com/").surface, "seller");
   assert.equal(identifyWorkflowPage("https://www.temu.com/").surface, "retail");
+  assert.deepEqual(featureIds("https://agentseller.temu.com/goods/list"), ["temu-product-listing", "temu-product-data"]);
+  assert.deepEqual(featureIds("https://agentseller.temu.com/activity/marketing-activity"), ["temu-campaign-data", "temu-campaign-draft"]);
+  assert.deepEqual(featureIds("https://seller.kuajingmaihuo.com/labor/account"), ["temu-finance-data"]);
+  assert.deepEqual(featureIds("https://seller.kuajingmaihuo.com/labor/withdraw/apply"), []);
   assert.equal(identifyWorkflowPage("javascript:alert(1)"), null);
 
   const temu = "https://www.temu.com/ca/scarf-g-607461633310534.html?_x_sessn_id=sensitive";
