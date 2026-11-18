@@ -17,18 +17,24 @@ function fixture(html) {
 {
   const key = "productSkcList[0].carouselImgsI18n.common";
   const filenames = ["red-main", "fabric", "fit"];
+  const uploadList = '<div data-testid="beast-core-portal" class="PP_popover_test"><div class="PP_popoverContent_test"><div class="index-module_modalContainer__test"><header>上传列表</header></div></div></div>';
   const { dom, doc, run } = fixture(`
     <div id="${key}"><div class="upload-trigger_wrap__test"><span>素材中心</span></div></div>
-    <div class="MDL_inner_picker" hidden><h2>素材中心</h2><div class="UPD_outerWrapper_test"><input type="file"></div>
-      <div id="cards"></div><div id="count">已选 0 个，可选 10 个</div><button>确认</button></div>
+    <div data-testid="beast-core-modal-mask" id="material-mask">
+      <div data-testid="beast-core-modal"><div class="MDL_inner_picker" hidden><h2>素材中心</h2><a id="refresh-picker">刷新</a><div class="UPD_outerWrapper_test"><input type="file"></div>
+        <div id="cards"></div><div id="count">已选 0 个，可选 10 个</div><button>确认</button></div>
+      </div>
+    </div>
+    <div data-testid="beast-core-modal-mask" id="unrelated-mask">${uploadList}</div>
     <div class="MDL_inner_upload" hidden><h2>本地上传</h2><button id="upload-save">保存</button></div>
     <div class="MDL_inner_crop" hidden><h2>裁剪</h2><button id="crop-submit">确认裁剪</button></div>
     <div class="MDL_inner_unexpected" hidden><h2>其他弹窗</h2><button id="unrelated-save">保存</button></div>
-    <button id="page-save">保存</button>`);
+    <button id="page-save">保存</button><a id="refresh-page">刷新</a>`);
   const picker = doc.querySelector(".MDL_inner_picker");
   const upload = doc.querySelector(".MDL_inner_upload");
   const crop = doc.querySelector(".MDL_inner_crop");
   const unrelated = doc.querySelector(".MDL_inner_unexpected");
+  const mask = doc.querySelector("#material-mask");
   const cards = doc.querySelector("#cards");
   const count = doc.querySelector("#count");
   const events = [];
@@ -43,16 +49,34 @@ function fixture(html) {
     });
   }
   addCard("red-main", "old-red");
+  addCard("fabric-17", "old-fabric");
   doc.querySelector('[class^="upload-trigger_wrap__"] span').onclick = () => { picker.hidden = false; };
   picker.querySelector("button").onclick = () => { picker.hidden = true; };
   doc.querySelector("#crop-submit").onclick = () => { events.push("crop:" + file); crop.hidden = true; };
   doc.querySelector("#upload-save").onclick = () => {
     events.push("save:" + file);
     upload.hidden = true;
-    addCard(file, file + "-new");
+    if (file !== "fabric") addCard(file, file + "-new");
+    mask.insertAdjacentHTML("beforeend", uploadList);
   };
+  doc.querySelector("#refresh-picker").onclick = () => {
+    events.push("refresh:" + file);
+    addCard("fabric-9", "fabric-new");
+  };
+  picker.querySelector("h2").addEventListener("mousedown", () => {
+    const portal = mask.querySelector('[data-testid="beast-core-portal"]');
+    assert.ok(portal, "click away must be sent once for the active upload header");
+    events.push("dismiss:" + file);
+    dom.window.setTimeout(() => {
+      if (file === "fit") {
+        portal.style.opacity = "0";
+        portal.style.pointerEvents = "none";
+      } else portal.remove();
+    }, 100);
+  });
   doc.querySelector("#unrelated-save").onclick = () => events.push("unrelated-save");
   doc.querySelector("#page-save").onclick = () => events.push("page-save");
+  doc.querySelector("#refresh-page").onclick = () => events.push("page-refresh");
   const media = args => run(temuMediaPage, { key, filenames, ...args });
   const opened = await media({ kind: "open" });
   assert.equal(opened.ordered, true);
@@ -67,19 +91,31 @@ function fixture(html) {
   for (const name of filenames) {
     const before = await media({ kind: "inspect" });
     file = name;
-    upload.hidden = false;
-    crop.hidden = false;
+    if (name === "red-main") {
+      addCard(name, name + "-new");
+      mask.insertAdjacentHTML("beforeend", uploadList);
+    } else {
+      upload.hidden = false;
+      crop.hidden = false;
+    }
     const result = await media({ kind: "settle-upload", name, previous: before.knownMedia });
     assert.equal(result.ok, true);
     assert.equal(result.card.identity, name + "-new");
+    assert.equal(result.card.filename, name);
+    assert.equal(result.card.libraryFilename, name === "fabric" ? "fabric-9" : name);
+    const portal = mask.querySelector('[data-testid="beast-core-portal"]');
+    if (name === "fit") assert.equal(portal.style.pointerEvents, "none");
+    else assert.equal(portal, null);
     expected.push(result.card);
   }
+  assert.ok(doc.querySelector('#unrelated-mask [data-testid="beast-core-portal"]'));
   assert.equal(cards.firstElementChild.dataset.materialId, "fit-new");
   const selected = await media({ kind: "select-new", baseline: 0, previous: opened.knownMedia, expected });
   assert.equal(selected.ok, true);
   assert.deepEqual(Array.from(selected.media, item => item.src), filenames.map(name => `https://cdn.invalid/${name}-new`));
   assert.deepEqual(clicked, filenames.map(name => name + "-new"));
-  assert.deepEqual(events, filenames.flatMap(name => ["crop:" + name, "save:" + name]));
+  assert.deepEqual(events, ["dismiss:red-main", "crop:fabric", "save:fabric", "dismiss:fabric", "refresh:fabric",
+    "crop:fit", "save:fit", "dismiss:fit"]);
   assert.equal((await media({ kind: "confirm", baseline: 0, added: filenames.length })).ok, true);
   dom.window.close();
 }

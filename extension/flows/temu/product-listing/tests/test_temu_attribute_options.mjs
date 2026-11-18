@@ -54,7 +54,7 @@ test("searches the active form control, waits for filtered options, and verifies
     <span class="ST_selectValueSingle_test"></span></div></div>
     </div></main><div data-testid="beast-core-portal" hidden>
     <input type="search"><div id="materials" role="listbox"></div>
-    </div>`, { url: href, runScripts: "outside-only" });
+    </div><div class="MDL_inner_unexpected" hidden>其他操作提示</div>`, { url: href, runScripts: "outside-only" });
   t.after(() => dom.window.close());
   const { window } = dom;
   window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
@@ -63,6 +63,7 @@ test("searches the active form control, waits for filtered options, and verifies
   const search = document.querySelector('input[type="search"]');
   const menu = document.querySelector('[role="listbox"]');
   const portal = menu.parentElement;
+  const overlay = document.querySelector(".MDL_inner_unexpected");
   const selection = document.querySelector('[class^="ST_selectValueSingle_"]');
   let clicks = 0;
   let inputEvents = 0;
@@ -77,6 +78,10 @@ test("searches the active form control, waits for filtered options, and verifies
   input.addEventListener("keydown", event => { if (event.key === "Escape") portal.hidden = true; });
   search.addEventListener("input", () => {
     inputEvents++;
+    if (search.value === "blocked") {
+      window.setTimeout(() => { overlay.hidden = false; }, 40);
+      return;
+    }
     window.setTimeout(() => show(search.value.toLowerCase() === "polyester"
       ? [["temu-poly", "聚酯纤维 Polyester"], ["temu-recycled-poly", "再生聚酯纤维 Recycled Polyester"]] : []), 210);
   });
@@ -99,6 +104,9 @@ test("searches the active form control, waits for filtered options, and verifies
   assert.equal(inputEvents, 2);
   assert.equal((await run({ kind: "select", value: "poly", field })).code, "OPTION_MISSING");
   assert.equal(clicks, 1);
+  assert.equal((await run({ kind: "select", value: "blocked", field })).code, "PAGE_CHANGED");
+  assert.equal(clicks, 1);
+  assert.equal(overlay.hidden, false);
 });
 
 test("resolves a full multiselect request before changing choices and verifies the selected chips", async t => {

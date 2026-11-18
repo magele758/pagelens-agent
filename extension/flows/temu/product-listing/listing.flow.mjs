@@ -27,19 +27,20 @@ function optionAliases(value) {
 }
 
 function skuValue(field, row, input) {
-  const dims = [row.lengthCm, row.widthCm, row.heightCm].map(Number).sort((a, b) => b - a);
+  const dims = [row.lengthCm ?? input.lengthCm, row.widthCm ?? input.widthCm, row.heightCm ?? input.heightCm]
+    .map(Number).sort((a, b) => b - a);
   const validDimensions = dims.every(value => Number.isFinite(value) && value > 0);
   const values = {
     skuCode: row.sellerSku, inputLen: validDimensions ? dims[0] : undefined,
     inputWidth: validDimensions ? dims[1] : undefined, inputHeight: validDimensions ? dims[2] : undefined,
-    inputWeight: row.weightG, quantity: row.quantity, stock: row.quantity,
+    inputWeight: row.weightG ?? input.weightG, quantity: row.quantity ?? input.quantity, stock: row.quantity ?? input.quantity,
     usSuggestSalesPrice: row.retailPrice ?? input.retailPrice,
     "productSkuSameReferPrice.url": input.referenceUrl,
     sensitiveAttr: row.sensitiveAttribute ?? input.sensitiveAttribute,
     "productSkuMultiPack.skuClassification": row.skuClassification ?? input.skuClassification,
     "productSkuMultiPack.packIncludeInfo": row.packageContents ?? input.packageContents,
   };
-  const result = field.skuMember.startsWith("siteSupplierPriceMap.") ? row.price : values[field.skuMember];
+  const result = field.skuMember.startsWith("siteSupplierPriceMap.") ? row.price ?? input.price : values[field.skuMember];
   return field.multiple && hasValue(result) && !Array.isArray(result) ? [result] : result;
 }
 
@@ -137,9 +138,18 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     if (colors.length > 20) {
       record("服装颜色", { code: "COLOR_LIMIT", message: `商品资料有 ${colors.length} 个颜色，超过当前试填的 20 色上限。已保留原始规格，请精简该商品的颜色后再试填规格。` });
     }
+    const targets = colors.map(option => keyOf(option.temuValue || option.value));
+    if (new Set(targets).size !== targets.length) {
+      record("服装颜色", { code: "COLOR_MAPPING_CONFLICT", message: "多个货源颜色映射到同一 Temu 色值，请为每色指定不同选项。" });
+      return;
+    }
     for (const option of colors.length <= 20 ? colors : []) {
-      const exists = rows.some(row => keyOf(row.value) === keyOf(option.value));
-      if (exists) continue;
+      const wanted = option.temuValue || option.value;
+      const exists = rows.find(row => keyOf(row.value) === keyOf(wanted));
+      if (exists) {
+        colorLabels.set(keyOf(option.value), exists.value);
+        continue;
+      }
       let blank = rows.find(row => !hasValue(row.value));
       if (!blank) {
         const added = await run("temu_apparel", { kind: "add-color" });
@@ -151,13 +161,13 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
         record(option.value, { code: "SPEC_CONTROL_MISSING", message: "服装颜色表没有空白可填写行。" });
         break;
       }
-      const candidate = standardColor(option.value);
+      const candidate = !option.temuValue && standardColor(wanted);
       const alternate = candidate && !colors.some(other => other !== option &&
-        (keyOf(other.value) === keyOf(candidate) || standardColor(other.value) === candidate)) ? candidate : undefined;
-      const applied = await run("temu_apparel", { kind: "set-color", key: blank.key, value: option.value, alternate });
+        (keyOf(other.temuValue || other.value) === keyOf(candidate) || standardColor(other.value) === candidate)) ? candidate : undefined;
+      const applied = await run("temu_apparel", { kind: "set-color", key: blank.key, value: wanted, alternate });
       record(option.value, applied, blank.key);
       if (!applied?.ok) continue;
-      colorLabels.set(keyOf(option.value), applied.value || option.value);
+      colorLabels.set(keyOf(option.value), applied.value || wanted);
       const live = await run("temu_apparel", { kind: "inspect" });
       if (!live?.ok) { record("服装颜色", live); break; }
       rows = live.rows;

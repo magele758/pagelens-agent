@@ -78,6 +78,45 @@ function dropdown(input, names, onSelect, { closeDelay = 0 } = {}) {
 
 {
   const fixture = page(editor, `
+    <main id="productOriginCode"><label><span>* 商品产地</span></label>
+      <div id="country" ${header}><input placeholder="请选择"></div>
+      <div hidden id="region" ${header}><input placeholder="请选择省份"></div>
+    </main><div id="country-popup" role="listbox" hidden><div role="option">中国大陆</div></div>`);
+  const { document } = fixture;
+  const country = document.querySelector("#country input");
+  const province = document.querySelector("#region input");
+  const menu = document.querySelector("#country-popup");
+  const title = document.querySelector("main label span");
+  let countryChoices = 0;
+  let clickAway = 0;
+  country.setAttribute("aria-controls", menu.id);
+  country.parentElement.addEventListener("click", () => { menu.hidden = false; });
+  menu.querySelector("[role=option]").onclick = () => {
+    countryChoices++;
+    country.value = "中国大陆";
+    province.parentElement.hidden = false;
+  };
+  title.addEventListener("mousedown", () => {
+    clickAway++;
+    menu.hidden = true;
+  });
+  dropdown(province, [["浙江"]]);
+  const result = await fixture.run({ kind: "origin", origin: [["中国大陆"], ["浙江省"]] });
+  assert.equal(result.ok, true, result.message);
+  assert.equal(countryChoices, 1);
+  assert.equal(clickAway, 1);
+  assert.equal(province.value, "浙江");
+  assert.equal(menu.hidden, true);
+  menu.hidden = false;
+  assert.equal((await fixture.run({ kind: "origin", origin: [["中国大陆"], ["浙江省"]] })).ok, true);
+  assert.equal(menu.hidden, true);
+  assert.equal(countryChoices, 1);
+  assert.equal(clickAway, 2);
+  fixture.close();
+}
+
+{
+  const fixture = page(editor, `
     <main id="productOriginCode"><label>商品产地</label>
       <div id="country" ${header}><input placeholder="请选择"></div>
       <div hidden id="region" ${header}><input placeholder="请选择省份"></div>

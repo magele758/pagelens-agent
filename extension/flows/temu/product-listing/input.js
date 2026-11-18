@@ -99,10 +99,11 @@ function normalizeVariants(raw, image, sales) {
   const legacy = object(raw.variant);
   const name = text(legacy.name);
   const entries = name ? list(legacy.options ?? [legacy]) : [];
-  const images = option => {
+  const optionDetails = option => {
     const imagePath = image(option?.imagePath);
     const gallery = option?.galleryImages;
-    return { ...(imagePath && { imagePath }),
+    const temuValue = text(option?.temuValue);
+    return { ...(imagePath && { imagePath }), ...(temuValue && { temuValue }),
       ...(Array.isArray(gallery) && { galleryImages: [...new Set(gallery.map(image).filter(Boolean))] }) };
   };
   const variantGroups = Array.isArray(raw.variantGroups) ? raw.variantGroups.flatMap(group => {
@@ -110,12 +111,12 @@ function normalizeVariants(raw, image, sales) {
     const options = list(group?.options).flatMap(option => {
       const value = text(option?.value ?? option);
       if (!value) return [];
-      return [{ value, ...images(option) }];
+      return [{ value, ...optionDetails(option) }];
     });
     return name && options.length ? [{ name, options }] : [];
   }) : entries.length ? [{ name, options: entries.flatMap(entry => {
     const value = text(entry?.option);
-    return value ? [{ value, ...images(entry) }] : [];
+    return value ? [{ value, ...optionDetails(entry) }] : [];
   }) }] : [];
 
   const sourceRows = Array.isArray(raw.skus) ? raw.skus : entries.flatMap(entry => {

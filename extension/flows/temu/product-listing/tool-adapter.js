@@ -124,7 +124,8 @@ export function createTemuListingToolCaller({
       }
       const known = new Map(paths.flatMap(path => {
         const accepted = verifiedMaterials.get(path);
-        return accepted && previous.some(card => card.filename === accepted.filename && card.identity === accepted.identity)
+        return accepted && previous.some(card => card.filename === accepted.filename && card.identity === accepted.identity &&
+          card.src === accepted.src && card.libraryFilename === accepted.libraryFilename)
           ? [[path, accepted]] : [];
       }));
       let snapshot = picker;

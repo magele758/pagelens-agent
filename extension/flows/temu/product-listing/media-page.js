@@ -61,6 +61,7 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
   if (!dialog || foreignModals().length) {
     return fail("MODAL_BLOCKED", "素材中心页面已变化。");
   }
+  if (uploadLists(dialog).length) return fail("UPLOAD_PENDING", "素材中心的上传列表尚未关闭。");
   if (kind === "cancel") {
     const button = enabledButton(dialog, "取消");
     if (!button) return fail("UPLOAD_UNVERIFIED", "素材中心暂时不能关闭。");
@@ -89,9 +90,14 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       return fail("UPLOAD_UNVERIFIED", "当前素材选择或上传文件名与计划不一致。");
     }
     const existing = new Set(previous.map(card => card.identity));
-    const approved = new Map(expected.map(card => [card.filename, card.identity]));
-    const find = name => unique(mediaCards(dialog).filter(card => card.filename === name &&
-      (approved.has(name) ? approved.get(name) === card.identity : !existing.has(card.identity))));
+    const approved = new Map(expected.map(card => [card.filename, card]));
+    const find = name => {
+      const accepted = approved.get(name);
+      return unique(mediaCards(dialog).filter(card => card.filename === name && (accepted ?
+        card.identity === accepted.identity && card.libraryFilename === (accepted.libraryFilename ?? name) &&
+          (!accepted.src || card.src === accepted.src) :
+        card.libraryFilename === name && !existing.has(card.identity))));
+    };
     const missing = filenames.filter(name => !find(name));
     if (missing.length) return fail("UPLOAD_PENDING", "尚未出现所有新上传的素材卡片。");
     const media = [];
@@ -113,15 +119,55 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
   button.click();
   return await waitFor(() => !picker()) ? { ok: true } : fail("UPLOAD_UNVERIFIED", "素材中心尚未关闭。");
 
-  function receipt({ identity, filename, src }) {
-    return { identity, filename, src };
+  function receipt({ identity, filename, libraryFilename, src }) {
+    return { identity, filename, libraryFilename, src };
+  }
+
+  function isActiveUploadList(portal) {
+    const content = portal.querySelector('[class*="PP_popoverContent_"]');
+    return Boolean(content && [portal, content].every(area => {
+      if (!visible(area)) return false;
+      const style = getComputedStyle(area);
+      const box = area.getBoundingClientRect();
+      const offscreen = box.bottom < 0 || box.right < 0 || box.top >= innerHeight || box.left >= innerWidth;
+      return !(style.opacity === "0" && (offscreen || style.pointerEvents === "none"));
+    }));
+  }
+
+  function uploadLists(dialog) {
+    const modal = dialog.closest('[data-testid="beast-core-modal"]');
+    const mask = modal?.parentElement;
+    if (!mask?.matches('[data-testid="beast-core-modal-mask"]')) return [];
+    return [...mask.children].filter(portal => portal.matches('[data-testid="beast-core-portal"][class*="PP_popover_"]') &&
+      isActiveUploadList(portal) && [...portal.querySelectorAll('[class*="PP_popoverContent_"] [class*="index-module_modalContainer"] header')]
+        .some(header => visible(header) && clean(header.textContent) === "上传列表"));
+  }
+
+  function clickPickerHeading(dialog) {
+    const heading = unique([...dialog.querySelectorAll('h1,h2,h3,[role="heading"],span,div')].filter(node =>
+      visible(node) && !node.childElementCount && clean(node.textContent) === "素材中心" &&
+      !node.closest('button,a,[role="button"],[role="tab"]')));
+    if (!heading) return false;
+    const { x, y, width, height } = heading.getBoundingClientRect();
+    const options = { bubbles: true, cancelable: true, composed: true, button: 0,
+      clientX: x + width / 2, clientY: y + height / 2 };
+    const pointer = { ...options, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    heading.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
+    heading.dispatchEvent(new MouseEvent("mousedown", { ...options, buttons: 1 }));
+    heading.dispatchEvent(new PointerEvent("pointerup", pointer));
+    heading.dispatchEvent(new MouseEvent("mouseup", options));
+    heading.dispatchEvent(new MouseEvent("click", options));
+    return true;
   }
 
   async function settleUpload() {
     if (!name || !filenames.includes(name)) return fail("UPLOAD_UNVERIFIED", "上传文件与素材计划不一致。");
     const existing = new Set(previous.map(card => card.identity));
     let cropped = false;
-    let saved = false;
+    let savedAt = 0;
+    let refreshed = false;
+    let closingList;
+    let lastCard;
     const outcome = await waitFor(() => {
       if (picker() !== dialog) return fail("MODAL_BLOCKED", "处理上传时素材中心已切换。");
       const alert = [...document.querySelectorAll('[role="alert"],[data-testid*="toast" i],[class*="Toast_content"]')]
@@ -144,28 +190,43 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
         return null;
       }
       const saveArea = crop || upload;
-      if (saveArea && saveArea !== dialog && saveArea !== known && !saved) {
+      if (saveArea && saveArea !== dialog && saveArea !== known && !savedAt) {
         const save = enabledButton(saveArea, "保存");
         if (save) {
-          saved = true;
+          savedAt = Date.now();
           save.click();
         }
         return null;
       }
       if (extra.length) return null;
-      const lists = [...document.querySelectorAll('[class*="popover" i],[data-testid="beast-core-popover"]')].filter(node =>
-        visible(node) && hasTitle(node, "上传列表"));
-      const list = unique(lists.filter(node => !lists.some(other => node !== other && node.contains(other))));
-      if (list) {
-        const heading = unique([...dialog.querySelectorAll('h1,h2,h3,[role="heading"],span,div')].filter(node =>
-          visible(node) && !list.contains(node) && !node.childElementCount && clean(node.textContent) === "素材中心"));
-        if (heading) heading.click();
+      if (closingList && isActiveUploadList(closingList)) return null;
+      const lists = uploadLists(dialog);
+      if (lists.length > 1) return fail("MODAL_BLOCKED", "素材中心出现多个上传列表，需要核对。");
+      if (lists.length) {
+        closingList = lists[0];
+        if (!clickPickerHeading(dialog)) return fail("UPLOAD_UNVERIFIED", "未找到可安全关闭上传列表的位置。");
+        lastCard = null;
         return null;
       }
-      const card = unique(mediaCards(dialog).filter(card => card.filename === name && !existing.has(card.identity)));
-      return card && { ok: true, card: receipt(card) };
+      const matches = mediaCards(dialog).filter(card => card.filename === name && !existing.has(card.identity) &&
+        (card.libraryFilename === name || cropped && savedAt));
+      if (matches.length > 1) return fail("UPLOAD_UNVERIFIED", "出现多张同名的新素材，无法核对这次上传的文件。");
+      const [card] = matches;
+      if (card && card.identity === lastCard?.identity && card.src === lastCard?.src) return { ok: true, card: receipt(card) };
+      lastCard = card;
+      if (!card && savedAt && !refreshed && Date.now() - savedAt >= 900) {
+        refreshed = true;
+        const refresh = unique([...dialog.querySelectorAll('button,a,[role="link"],[role="button"]')].filter(node => {
+          const href = node.getAttribute("href");
+          return visible(node) && !node.disabled && node.getAttribute("aria-disabled") !== "true" && clean(node.textContent) === "刷新" &&
+            (!href || href === "#" || /^javascript:\s*(?:void\(0\))?;?$/u.test(href));
+        }));
+        refresh?.click();
+      }
+      return null;
     }, 18000);
-    return outcome || fail("UPLOAD_PENDING", "尚未核对到本次文件在素材中心生成的新图片。");
+    return outcome || fail("UPLOAD_PENDING", closingList && isActiveUploadList(closingList) ?
+      "素材中心的上传列表尚未关闭。" : "尚未核对到本次文件在素材中心生成的新图片。");
   }
 
   function mediaCards(dialog) {
@@ -176,8 +237,10 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       if (!visible(label)) continue;
       const labelText = label.getAttribute("title") || label.getAttribute("alt") ||
         (label.childElementCount <= 1 ? label.textContent : "");
-      const filename = clean(labelText).replace(/\.(?:jpe?g|png|webp)$/iu, "");
-      if (!names.has(filename)) continue;
+      const libraryFilename = clean(labelText).replace(/\.(?:jpe?g|png|webp)$/iu, "");
+      const sourceOfCrop = libraryFilename.replace(/-\d+$/u, "");
+      const candidates = [...new Set([libraryFilename, sourceOfCrop])].filter(filename => names.has(filename));
+      if (!candidates.length) continue;
       const start = label.querySelector("img") ? label : label.parentElement;
       for (let card = start, depth = 0; card && card !== dialog && depth < 6; card = card.parentElement, depth++) {
         const image = unique([...card.querySelectorAll("img[src]")].filter(node => visible(node) &&
@@ -186,7 +249,9 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
         const url = new URL(image.currentSrc || image.src);
         const src = url.origin + url.pathname;
         const identity = clean(card.getAttribute("data-material-id") || card.getAttribute("data-id")) || src;
-        found.set(filename + "\0" + identity, { filename, identity, src, target: image });
+        for (const filename of candidates) {
+          found.set(filename + "\0" + libraryFilename + "\0" + identity, { filename, libraryFilename, identity, src, target: image });
+        }
         break;
       }
     }

@@ -27,6 +27,8 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
   const groupSelector = '[data-testid="beast-core-select-header"],[class*="ST_head_"]';
   const optionSelector = '[role="option"],[data-testid="beast-core-select-option"]';
   const categorySearch = 'input[placeholder="搜索类目"]';
+  const interactive = 'a,button,input,select,textarea,summary,[role="button"],[role="tab"],[role="link"],[contenteditable="true"]';
+  const labelOf = element => clean(element.textContent).replace(/^[*＊]\s*/u, "").replace(/[:：]$/u, "");
 
   async function until(get, timeout = 1800) {
     const end = Date.now() + timeout;
@@ -51,7 +53,7 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
     const pinned = holder && fieldFromInput(within(holder));
     if (pinned) return pinned;
     const tags = [...document.querySelectorAll('label,[data-field-label],[class*="Form_itemLabelContent_"],span,div')].filter((element) =>
-      shown(element) && element.childElementCount <= 1 && clean(element.textContent).replace(/^[*＊]\s*/u, "").replace(/[:：]$/u, "") === label);
+      shown(element) && element.childElementCount <= 1 && labelOf(element) === label);
     const results = new Map();
     for (const tag of tags) {
       for (let group = tag.parentElement, depth = 0; group && group !== document.body && depth < 7; group = group.parentElement, depth++) {
@@ -103,11 +105,36 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
 
   async function close(field, menu) {
     if (!shown(menu)) return true;
-    field.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-    field.input.blur();
-    if (await until(() => !shown(menu), 350)) return true;
-    if (onPage() && !modal() && portalMenus().length === 1 && portalMenus()[0] === menu && shown(field.head)) field.head.click();
-    return Boolean(await until(() => !shown(menu), 700));
+    const ownsMenu = () => onPage() && !modal() && unique(portalMenus()) === menu;
+    if (!ownsMenu()) return false;
+    const active = document.activeElement;
+    if (field.wrapper.contains(active) || menu.contains(active)) {
+      active.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      if (shown(menu)) active.blur();
+    }
+    if (await until(() => !shown(menu), 160)) return true;
+    if (ownsMenu()) {
+      // Choosing a country can leave the portal mounted while Temu renders the province.
+      // A pointer event on the static field label follows the portal's outside-press handling.
+      const title = originMode ? "商品产地" : "经营站点";
+      const targets = [...document.querySelectorAll('label,[data-field-label],[class*="Form_itemLabelContent_"],span,div')].filter(element =>
+        shown(element) && labelOf(element) === title && !field.wrapper.contains(element) && !menu.contains(element) &&
+        !element.closest(interactive) && !element.querySelector(interactive) && !element.closest("label")?.control &&
+        ![...element.children].some(child => labelOf(child) === title));
+      const outside = unique(targets) || document.body;
+      const rect = outside.getBoundingClientRect();
+      const options = { bubbles: true, composed: true, cancelable: true, button: 0,
+        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        if (!ownsMenu()) break;
+        const OutsideEvent = type.startsWith("pointer") ? globalThis.PointerEvent || MouseEvent : MouseEvent;
+        outside.dispatchEvent(new OutsideEvent(type, { ...options, pointerType: "mouse", isPrimary: true }));
+        await pause(0);
+      }
+      if (await until(() => !shown(menu), 250)) return true;
+    }
+    if (ownsMenu() && shown(field.head)) field.head.click();
+    return Boolean(await until(() => !shown(menu), 450));
   }
 
   const categoryColumns = () => [...document.querySelectorAll(categorySearch)].filter(shown);
@@ -160,7 +187,11 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
       };
       const target = await until(currentField, 5000);
       if (!target) return fail("找不到当前类目的商品产地控件，请在 Temu 核对。");
-      if (matches(selected(target))) continue;
+      if (matches(selected(target))) {
+        const existing = relatedMenu(target);
+        if (existing && !await close(target, existing)) return fail(`产地「${labels[0]}」已选择，下拉尚未关闭。`);
+        continue;
+      }
       const opened = await open(target);
       if (!opened) return fail("无法确认产地下拉属于当前字段，请关闭其他下拉后重试。");
       const option = await until(() => unique(choices(opened.menu).filter(entry => !unavailable(entry) && matches(entry.textContent))));
@@ -169,11 +200,12 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
         return fail(`Temu 当前找不到唯一可选的产地「${labels[0]}」。`);
       }
       option.click();
-      if (!await until(() => {
+      const confirmed = await until(() => {
         const fresh = currentField();
-        return fresh && matches(selected(fresh));
-      })) return fail(`Temu 尚未确认产地「${labels[0]}」。`);
-      if (!await close(target, opened.menu)) return fail(`产地「${labels[0]}」已选择，下拉尚未关闭。`);
+        return fresh && matches(selected(fresh)) ? fresh : null;
+      });
+      if (!await close(confirmed || target, opened.menu)) return fail(`产地「${labels[0]}」下拉尚未关闭。`);
+      if (!confirmed) return fail(`Temu 尚未确认产地「${labels[0]}」。`);
     }
     return { ok: true };
   }

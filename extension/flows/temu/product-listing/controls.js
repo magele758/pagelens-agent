@@ -10,7 +10,7 @@ export async function temuControls(request) {
   const LABEL = 'label,[data-field-label],[class*="Form_itemLabelContent_"],[class*="STF_label_"]';
   const FORM_ITEM = '[data-testid="beast-core-form-item"],[class*="Form_item_"]';
   const REQUIRED = '[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]';
-  const MODAL = 'dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]';
+  const MODAL = 'dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"],[class*="MDL_inner_"]';
   const MAX_FIELDS = 100;
   const MAX_OPTIONS = 400;
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -267,6 +267,7 @@ export async function temuControls(request) {
 
   async function close(control, menu) {
     if (!validPage() || !menu || !visible(menu)) return true;
+    if (blocked()) return false;
     const input = control.input;
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
     if (visible(menu) && input === document.activeElement) input.blur();
@@ -355,7 +356,10 @@ export async function temuControls(request) {
 
   async function search(control, menu, query, expected) {
     const input = searchInput(control, menu);
-    const active = () => visible(menu) ? menu : associatedMenu(control);
+    const active = () => {
+      if (!validPage() || blocked() || menus().length !== 1) return null;
+      return visible(menu) ? menu : associatedMenu(control);
+    };
     if (!input || !validPage() || blocked() || menus().length !== 1) return null;
     if (input.value === query) return menu;
     const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -394,7 +398,9 @@ export async function temuControls(request) {
         if (searched) menu = searched;
         else result = fail("SEARCH_UNAVAILABLE", "该下拉没有可安全输入的搜索框。");
       } else await poll(() => containsOptions(menu), 1400);
-      if (!result) {
+      if (!validPage()) result = fail("PAGE_CHANGED", "当前 Temu 商品草稿已变化。");
+      else if (blocked()) result = fail("MODAL_BLOCKED", "Temu 表单上有弹窗，请核对后继续。");
+      else if (!result) {
         const rows = choices(menu);
         const field = observed(control, menu, rows);
         result = { ok: true, field, options: field.options, ...(term && { filtered: true }) };
@@ -402,7 +408,7 @@ export async function temuControls(request) {
     } finally {
       closed = await close(control, menu);
     }
-    return closed ? result : fail("MENU_STILL_OPEN", "Temu 的选项菜单尚未关闭。");
+    return closed || result?.code === "MODAL_BLOCKED" ? result : fail("MENU_STILL_OPEN", "Temu 的选项菜单尚未关闭。");
   }
 
   function checkValues(field, value) {
@@ -436,6 +442,7 @@ export async function temuControls(request) {
     } finally {
       closed = await close(live || control, menu);
     }
+    if (!validPage() || blocked()) return fail("PAGE_CHANGED", "页面或弹窗发生变化，请检查填写结果。", changed);
     if (!closed) return fail("MENU_STILL_OPEN", "Temu 的选项菜单尚未关闭。", changed);
     return result?.ok ? { ...result, options: result.observed.options } : result;
 
@@ -495,8 +502,8 @@ export async function temuControls(request) {
       if (unwanted.some((row) => row.disabled)) return fail("OPTION_DISABLED", "当前包含无法取消的选项。");
       const wanted = desired.filter((row) => !prior.some((choice) => same(row, choice)));
       for (const choice of [...wanted, ...unwanted]) {
-        if (!validPage() || blocked()) return fail("PAGE_CHANGED", "页面或弹窗发生变化，已停止填写。", changed);
         const current = await find(choice.value, clean(query, 120) && !checked.multiple ? query : choice.aliases[0] || choice.label, choice);
+        if (!validPage() || blocked()) return fail("PAGE_CHANGED", "页面或弹窗发生变化，已停止填写。", changed);
         if (!current) return fail("OPTION_CHANGED", "下拉选项已变化。", changed);
         current.element.click();
         changed = true;

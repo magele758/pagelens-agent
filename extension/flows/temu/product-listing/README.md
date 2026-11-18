@@ -8,6 +8,8 @@
 
 服装每个颜色的 `variantGroups[].options[].imagePath` 对应第一张轮播图。用同一选项的 `galleryImages` 数组按顺序补充材质效果、版型效果、细节特写和工艺特写。多个颜色共用这些图时，可以填写 `temu.sharedGalleryImages`。颜色有自己的 `galleryImages` 时优先使用该数组。图片路径写成相对于当前商品目录的路径，例如 `images/blue-main.jpg`。
 
+货源的颜色名称与 Temu 色值不同时，在颜色选项上填当前类目的 `temuValue`。例如保留货源名称「黑白条纹」，用页面支持的「花色」作为 Temu 色值。SKU 和图片仍按货源颜色绑定。
+
 图片上传需要本次勾选同意。素材中心出现新素材后，先核对文件名和素材标识，再把图片选入商品轮播、SKU 预览或详情装修。详情装修使用它自己的「保存」应用编辑结果。商品试填止于主表单复核。若出现无法复核的页面状态，侧栏显示回读未完成。服装尺码按当前页面可用选项匹配；颜色超过 20 个时保留目录内容，试填其余可填写字段。
 
 目录输入和试填边界可分别运行 `node scripts/run-tests.mjs test_temu_listing_input test_temu_listing` 验证。
