@@ -12,7 +12,7 @@ import {
 import { chooseAttributes, chooseCategory } from "../tools/tiktok-mx-ptc.mjs";
 import { registeredListing } from "./mx-ptc-inspect.mjs";
 
-const categoryPath = value => (value || "").trim().split(/\s+[-/>]\s+/).filter(Boolean);
+const categoryPath = value => (value || "").trim().split(/\s*>\s*|\s+[-/]\s+/).filter(Boolean);
 const categoryMatches = (a, b) => categoryPath(a).join("/") === categoryPath(b).join("/");
 const selection = catalog => Object.fromEntries(catalog.map(field => [field.name, field.selected]));
 
@@ -80,16 +80,15 @@ export async function repairHostedDraft(parameters, request, planners = {}) {
     if (!reply?.ok) throw Error(reply?.error || "Draft repair form operation failed");
     return reply.result;
   };
-  const inspect = snapshotCode(true, true);
-  const guarded = sellerVerification.toString() + "\nif(location.href!==" + JSON.stringify(link) +
-    "||sellerVerification())throw Error('Wrong editor or seller verification');";
+  const inspect = snapshotCode(true, true, repair === "attributes");
+  const guarded = "if(location.href!==" + JSON.stringify(link) + ")throw Error('Wrong editor');";
   await fs.mkdir(lock);
   try {
     const { source, copy, dir } = await (planners.registeredListing ?? registeredListing)(sourceId, draftId);
     tab = await group.open(link, [], false);
     await group.waitForUrl(tab, link);
     const before = await browser(guarded + inspect);
-    if (before.title !== copy.title) throw Error("Seller draft title differs from registration");
+    if (before.captcha || before.title !== copy.title) throw Error("Seller draft title differs from registration or verification is required");
     steps.opened = Date.now();
     let expectedCategory = before.category, plan, planned, candidates;
     if (repair === "attributes") {
@@ -106,7 +105,7 @@ export async function repairHostedDraft(parameters, request, planners = {}) {
       steps.planned = Date.now();
       if (Object.keys(toWrite).length) checkSelection(plan, await browser(attributeCode(link, toWrite)));
     } else {
-      if (categoryPath(before.category).length >= 3) throw Error("Category repair requires an empty category");
+      if (!/^(?:|搜索|请选择(?:商品)?类目)$/.test(before.category.trim())) throw Error("Category repair requires an empty category");
       const terms = [...new Set((queries ?? [copy.category?.search]).filter(Boolean).map(term => term.trim()))];
       if (!terms.length) throw Error("A category search term is required");
       const paths = new Map();
@@ -114,10 +113,10 @@ export async function repairHostedDraft(parameters, request, planners = {}) {
         const { selector } = await browser(repairCategorySearchCode(link));
         const reply = await inEditor("trusted_type", { selector, value: term, clear: true });
         if (!reply?.ok) throw Error(reply?.error || "Seller category search failed");
-        return (await browser(repairCategoryOptionsCode(link))).choices;
+        return (await browser("await new Promise(resolve=>setTimeout(resolve,250));\n" + repairCategoryOptionsCode(link))).choices;
       }
       for (const term of terms)
-        for (const label of await search(term)) paths.set(label, term);
+        for (const label of await search(term)) if (!paths.has(label)) paths.set(label, term);
       candidates = [...paths.keys()];
       const { choice } = await (planners.chooseCategory ?? chooseCategory)(source, candidates);
       const term = paths.get(choice.label);
@@ -137,7 +136,8 @@ export async function repairHostedDraft(parameters, request, planners = {}) {
     if (changed) {
       await inEditor("activate_tab", {});
       group.pendingForm = tab;
-      signal = await browser(saveDraftCode(link));
+      const verification = sellerVerification.toString() + "\nif(sellerVerification())throw Error('Seller verification is required');";
+      signal = await browser(verification + saveDraftCode(link));
       steps.saveSent = Date.now();
       if (/提交失败|保存失败/.test(signal?.message || "")) throw Error(signal.message);
       if (signal?.message?.includes("草稿保存成功") && /\/product\/edit-draft\//.test(signal.url || "") && signal.url !== link)

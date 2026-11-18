@@ -871,6 +871,7 @@ assert.equal(cold.copy.salesAndShipping.skus[0].priceMXN, 220);
     if (tool === "trusted_type") { assert.equal(args.value, "Frame"); return { ok: true }; }
     assert.equal(tool, "run_js");
     const code = args.code;
+    assert.ok(code.length <= 8000, "Repair script exceeds the bridge limit");
     if (code.endsWith("return performance.timeOrigin")) return { ok: true, result: 1 };
     if (code.includes("Expected a full category path")) {
       const path = "Home - Home Decor - Frames";

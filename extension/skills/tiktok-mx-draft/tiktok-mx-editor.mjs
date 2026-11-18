@@ -119,8 +119,9 @@ function repairCategoryInput(control) {
   const own = control.querySelector(selector);
   if (usable(own)) return { input: own, selector: `#product-cascader-select-view ${selector}` };
   const inputs = [...document.querySelectorAll(selector)].filter(usable);
-  if (inputs.length === 1 && document.activeElement === inputs[0])
-    return { input: inputs[0], selector: `${selector}:focus` };
+  const region = control.closest("[data-id]") || control.parentElement;
+  if (inputs.length === 1 && (region?.contains(inputs[0]) || document.activeElement === inputs[0]))
+    return { input: inputs[0], selector };
   return null;
 }
 
@@ -141,7 +142,7 @@ export function repairCategorySearchCode(url) {
     const control = document.querySelector("#product-cascader-select-view");
     if (!control?.getClientRects().length) throw Error("Draft category selector unavailable");
     const current = control.innerText.trim();
-    if (repairCategoryInput(control)?.input !== document.activeElement) control.click();
+    if (!repairCategoryInput(control)) control.click();
     for (let i = 0; i < 20; i++) {
       guard();
       const field = repairCategoryInput(control);
@@ -168,7 +169,7 @@ export function repairCategoryOptionsCode(url, exactLabel = null) {
       guard();
       const control = document.querySelector("#product-cascader-select-view");
       const field = control && repairCategoryInput(control);
-      if (field?.input !== document.activeElement || !field.input.value.trim())
+      if (!field?.input.value.trim())
         throw Error("Search the current draft category before reading choices");
       const owner = field.input.closest('[role="combobox"]');
       const controlId = field.input.getAttribute("aria-controls") || owner?.getAttribute("aria-controls");
