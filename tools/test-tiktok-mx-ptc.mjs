@@ -287,6 +287,45 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
   process.env.PAGELENS_HOME = home;
   const draft = await import("./tiktok-mx-draft.mjs?draft-test");
   {
+    const source = String(1783000000000000000n + BigInt(process.pid));
+    const prefix = "pagelens-mx-" + source + "-";
+    const title = "Recorded draft";
+    const priorId = "1738598351871051340";
+    const url = "https://shop.tiktok.com/jp/pdp/example-product/" + source;
+    const link = "https://seller.tiktokshopglobalselling.com/product/edit-draft/" + priorId + "?shop_region=MX";
+    const receipt = { id: priorId, link, title, verified: true, readback: { url: link, title } };
+    const fixture = async (capture, savedReceipt) => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+      await fs.writeFile(path.join(dir, "source.json"), JSON.stringify(capture));
+      await fs.writeFile(path.join(dir, "listing.json"), JSON.stringify({ title }));
+      await fs.writeFile(path.join(dir, "receipt.json"), savedReceipt);
+    };
+    let browserCalls = 0;
+    const create = () => draft.createHostedDraft(source, 0.1161, async () => {
+      browserCalls++;
+      throw Error("Reached the browser fixture");
+    });
+    try {
+      await fixture({ id: source + "0", url: url + "0" }, JSON.stringify(receipt));
+      await fixture({ id: source, url: url + "0" }, JSON.stringify(receipt));
+      await fixture({ id: source, url }, "{truncated");
+      await fixture({ id: source, url }, JSON.stringify(receipt) + " ".repeat(1024 * 1024));
+      await fixture({ id: source, url }, JSON.stringify({
+        ...receipt, link: link.replace("shop_region=MX", "shop_region=GB"),
+      }));
+      await assert.rejects(create, /Reached the browser fixture/);
+      await fixture({ id: source, url }, JSON.stringify(receipt));
+      await assert.rejects(create, /Verified local history includes draft IDs 1738598351871051340/);
+      assert.equal(browserCalls, 1, "historical evidence stops creation before the browser is called");
+      await assert.rejects(fs.stat(path.join(home, "mx-draft-sources", source + ".json")), { code: "ENOENT" });
+    } finally {
+      for (const entry of await fs.readdir(os.tmpdir(), { withFileTypes: true })) {
+        if (entry.isDirectory() && entry.name.startsWith(prefix))
+          await fs.rm(path.join(os.tmpdir(), entry.name), { recursive: true, force: true });
+      }
+    }
+  }
+  {
     const create = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
     const saved = "https://seller.tiktokshopglobalselling.com/product/edit-draft/1738623714154153548?shop_region=MX";
     const tabs = new Map();
