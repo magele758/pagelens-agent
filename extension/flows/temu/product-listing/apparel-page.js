@@ -16,7 +16,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
     return exact.length === 1 ? exact[0] : !exact.length && inputs.length === 1 ? inputs[0] : null;
   };
   const colorComponent = '[class*="colour-spec-select_colorSpecSelect__"]';
-  const colorPopover = '[class*="colour-spec-select_searchContainer__"]';
+  const colorPopover = '[class*="colour-spec-select_allItemContainer__"],[class*="colour-spec-select_searchContainer__"]';
   const colorOption = '[class*="colour-spec-select_selectItem__"]';
   const triggerSelector = '[class*="ST_head_"],[data-testid="beast-core-popover-trigger-wrapper"]';
   const colorWrapper = input => input?.closest(colorComponent) || input?.closest('[class*="ST_outerWrapper_"]');

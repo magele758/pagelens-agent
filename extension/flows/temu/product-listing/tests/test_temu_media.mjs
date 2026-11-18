@@ -120,7 +120,8 @@ function fixture(html) {
   dom.window.close();
 }
 
-for (const trustedHover of [false, true]) {
+for (const menuLocation of ["synthetic", "same-mask", "body-portal"]) {
+  const trustedHover = menuLocation !== "synthetic";
   const { dom, doc, run } = fixture(`
     <div data-testid="beast-core-modal-mask" id="decoration-mask">
       <div data-testid="beast-core-modal"><div class="MDL_inner_decoration"><h2>详情页装修</h2>
@@ -136,8 +137,9 @@ for (const trustedHover of [false, true]) {
   const picture = doc.querySelector("#picture");
   const activations = [];
   const reveal = () => {
-    doc.querySelector("#decoration-mask").insertAdjacentHTML("beforeend", `
-      <div data-testid="beast-core-portal"><div id="material-hint"><div>从素材中心添加</div><span>快速选择已有素材</span></div></div>`);
+    const owner = menuLocation === "body-portal" ? doc.body : doc.querySelector("#decoration-mask");
+    owner.insertAdjacentHTML("beforeend", `
+      <div data-testid="beast-core-portal"><div id="material-hint"><div id="material-title">从素材中心添加</div><p>快速选择已有素材</p></div></div>`);
     doc.querySelector("#material-hint").onclick = () => { activations.push("picker"); picker.hidden = false; };
   };
   picture.addEventListener("mouseover", event => {
@@ -169,6 +171,15 @@ for (const trustedHover of [false, true]) {
     assert.equal(sidebar.scrollTop, 300);
     assert.equal(doc.body.scrollTop, 0);
     reveal();
+  }
+  if (menuLocation === "body-portal") {
+    doc.body.insertAdjacentHTML("beforeend", '<div id="distant-menu"><div id="distant-title">从素材中心添加</div><p>快速选择已有素材</p></div>');
+    doc.querySelector("#distant-menu").onclick = () => activations.push("distant-menu");
+    const title = doc.querySelector("#material-title");
+    const distant = doc.querySelector("#distant-title");
+    title.getBoundingClientRect = () => ({ left: 90, top: 318, width: 100, height: 20 });
+    distant.getBoundingClientRect = () => ({ left: 610, top: 318, width: 100, height: 20 });
+    doc.elementFromPoint = (x, y) => x === 140 && y === 328 ? title : distant;
   }
   const result = await media({ kind: "open", trustedHover });
   assert.equal(result.ok, true);

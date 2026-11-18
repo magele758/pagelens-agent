@@ -328,22 +328,39 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     if (!item) return fail("UPLOAD_CONTROL_MISSING", "找不到详情装修图片组件。");
     const modal = active.closest('[data-testid="beast-core-modal"]');
     const mask = modal?.parentElement;
+    const entrySelector = 'button,a,span,div,p,strong,h3,h4,label,[role="menuitem"],[role="button"]';
+    const entriesIn = area => [...area.querySelectorAll(entrySelector)].filter(node =>
+      clean(node.textContent) === "从素材中心添加" && ![...node.children].some(child => clean(child.textContent) === "从素材中心添加") &&
+      visible(node) && !node.closest('[disabled],[aria-disabled="true"]'));
     function materialEntries() {
       const portals = mask?.matches('[data-testid="beast-core-modal-mask"]') ? [...mask.children].filter(node =>
         visible(node) && node.matches('[data-testid="beast-core-portal"]')) : [];
-      return [...new Set([active, ...portals].flatMap(area => [...area.querySelectorAll('button,a,span,div,p,strong,h3,h4,[role="menuitem"],[role="button"]')]
-        .filter(node => visible(node) && clean(node.textContent) === "从素材中心添加" &&
-          ![...node.children].some(child => clean(child.textContent) === "从素材中心添加") &&
-          !node.closest('[disabled],[aria-disabled="true"]'))))];
+      return [...new Set([active, ...portals].flatMap(entriesIn))];
     }
     if (trustedHover) {
-      const matchesMenu = node => {
-        for (let row = node.parentElement, depth = 0; row && row !== active && row !== mask && depth < 3; row = row.parentElement, depth++) {
-          if (hasTitle(row, "快速选择已有素材")) return true;
+      const menuRow = node => {
+        for (let row = node.parentElement, depth = 0; row && row !== active && row !== mask && row !== document.body && depth < 3; row = row.parentElement, depth++) {
+          if ([...row.querySelectorAll(entrySelector)].some(subtitle => !subtitle.childElementCount &&
+            clean(subtitle.textContent) === "快速选择已有素材" && visible(subtitle))) return row;
         }
-        return false;
+        return null;
       };
-      const add = await waitFor(() => foreground() && item === imageItem(active) && unique(materialEntries().filter(matchesMenu)));
+      const add = await waitFor(() => {
+        if (!foreground() || item !== imageItem(active)) return null;
+        const scoped = materialEntries().filter(menuRow);
+        if (scoped.length) return unique(scoped);
+
+        // Temu can render this hover menu in a body portal outside the decoration mask.
+        const tile = item.getBoundingClientRect();
+        return unique(entriesIn(document.body).filter(node => {
+          const title = node.getBoundingClientRect();
+          if (title.width <= 0 || title.height <= 0 || title.left < tile.left - 8 || title.left > tile.right + 130 ||
+              title.top < tile.bottom - 10 || title.top > tile.bottom + 100) return false;
+          const row = menuRow(node);
+          const hit = row && document.elementFromPoint(title.left + title.width / 2, title.top + title.height / 2);
+          return Boolean(hit && row.contains(hit));
+        }));
+      });
       if (!add || !foreground()) return fail("UPLOAD_CONTROL_MISSING", "悬停后找不到详情装修的素材中心入口。");
       add.click();
       return { ok: true };

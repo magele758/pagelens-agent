@@ -227,16 +227,26 @@ function sizeFixture(labels) {
     <div class="colour-spec-select_colorSpecSelect__test">
       <span data-testid="beast-core-popover-trigger-wrapper"><input placeholder="选择或自定义颜色"></span>
     </div></div>
-    <div data-testid="beast-core-portal">
-      <div class="colour-spec-select_searchContainer__test" id="alternate-colors" hidden>
-        <div class="colour-spec-select_selectItem__test" hidden>黑色</div>
+    <div data-testid="beast-core-portal"><div class="PP_popoverContent_test">
+      <div class="colour-spec-select_allItemContainer__test" id="all-colors" hidden>
+        <div class="colour-spec-select_leftContainer__test"><div class="colour-spec-select_groupItem__test">黑色</div></div>
       </div>
-    </div>`);
+      <div class="colour-spec-select_searchContainer__test" id="alternate-colors" hidden>
+        <div class="colour-spec-select_selectItem__test">黑色</div>
+      </div>
+    </div></div>`);
   const input = page.doc.querySelector("input");
+  const allItems = page.doc.getElementById("all-colors");
   const menu = page.doc.getElementById("alternate-colors");
   const option = menu.firstElementChild;
-  input.addEventListener("focus", () => { menu.hidden = false; });
-  input.addEventListener("input", () => { option.hidden = input.value !== "黑色"; });
+  let groupClicks = 0;
+  allItems.querySelector('[class*="colour-spec-select_groupItem__"]').addEventListener("click", () => { groupClicks++; });
+  input.addEventListener("focus", () => { allItems.hidden = false; });
+  input.addEventListener("input", () => {
+    if (allItems.hidden || input.value !== "黑色") return;
+    allItems.hidden = true;
+    menu.hidden = false;
+  });
   option.addEventListener("click", () => {
     menu.hidden = true;
     input.value = "";
@@ -245,6 +255,7 @@ function sizeFixture(labels) {
   const result = await page.run({ kind: "set-color", key, value: "B - Black", alternate: "黑色" });
   assert.equal(result.value, "黑色");
   assert.equal(result.status, "filled");
+  assert.equal(groupClicks, 0);
   assert.equal(input.value, "");
   page.close();
 }
