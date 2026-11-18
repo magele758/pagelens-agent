@@ -4,7 +4,7 @@
  */
 
 import { scopeChromeCall, tabInWindow } from "./window-scope.js";
-import { permissionForChromeMethod, requireHostUrl, requireOptionalFeature } from "./optional-permissions.js";
+import { permissionForChromeMethod, requestTabHostAccess, requireHostUrl, requireOptionalFeature } from "./optional-permissions.js";
 
 const BLOCKED_PROTOCOLS = new Set([
   "chrome:",
@@ -239,18 +239,17 @@ export function toToolText(value) {
   }
 }
 
-async function assertInjectable(tabId) {
+async function assertInjectable(tabId, { interactive = true } = {}) {
   if (!tabId) throw new Error("没有可操作的标签");
-  const tabsDenied = await requireOptionalFeature("tabs");
-  if (tabsDenied) throw new Error(tabsDenied);
   const tab = await chrome.tabs.get(tabId);
-  if (restrictedUrl(tab?.url)) throw new Error(`受限页，无法注入：${tab?.url || ""}`);
-  const hostDenied = await requireHostUrl(tab?.url || "");
+  if (!tab?.url) throw new Error(await requestTabHostAccess(tabId, { interactive }));
+  if (restrictedUrl(tab.url)) throw new Error(`受限页，无法注入：${tab.url}`);
+  const hostDenied = await requireHostUrl(tab.url, { interactive, tabId });
   if (hostDenied) throw new Error(hostDenied);
 }
 
-export async function inject(tabId, func, args = [], { world, frameId } = {}) {
-  await assertInjectable(tabId);
+export async function inject(tabId, func, args = [], { world, frameId, interactive } = {}) {
+  await assertInjectable(tabId, { interactive });
   const target = Number.isInteger(frameId) && frameId > 0 ? { tabId, frameIds: [frameId] } : { tabId };
   const opts = { target, func, args };
   if (world) opts.world = world;
@@ -259,8 +258,8 @@ export async function inject(tabId, func, args = [], { world, frameId } = {}) {
 }
 
 /** 在标签的所有 frame（含跨域 iframe）里各执行一次，返回 [{ frameId, result }]。 */
-export async function injectFrames(tabId, func, args = [], { world } = {}) {
-  await assertInjectable(tabId);
+export async function injectFrames(tabId, func, args = [], { world, interactive } = {}) {
+  await assertInjectable(tabId, { interactive });
   const opts = { target: { tabId, allFrames: true }, func, args };
   if (world) opts.world = world;
   const entries = (await chrome.scripting.executeScript(opts)) || [];
@@ -390,44 +389,38 @@ export async function ensureTaskGroup(tabId, { groupId, title, color, windowId }
   }
 }
 
-export async function captureTab(tabId, windowId) {
-  const tabsDenied = await requireOptionalFeature("tabs");
-  if (tabsDenied) throw new Error(tabsDenied);
-  let targetTab = null;
+export async function captureTab(tabId, windowId, { userGesture } = {}) {
+  let targetTab;
   if (tabId) {
-    try {
-      targetTab = await tabInWindow(tabId, windowId);
-    } catch (err) {
-      if (windowId != null) throw err;
-      targetTab = null;
-    }
-  }
-  if (!targetTab && chrome.tabs?.query) {
-    try {
-      const query = { active: true };
-      if (windowId != null) query.windowId = windowId;
-      else query.currentWindow = true;
-      const [active] = await chrome.tabs.query(query);
-      targetTab = active || null;
-    } catch {
-      targetTab = null;
-    }
+    targetTab = await tabInWindow(tabId, windowId);
+  } else if (chrome.tabs?.query) {
+    const query = { active: true };
+    if (windowId != null) query.windowId = windowId;
+    else query.currentWindow = true;
+    [targetTab] = await chrome.tabs.query(query);
+    if (windowId != null && targetTab?.windowId !== windowId) targetTab = null;
   }
 
-  if (targetTab) {
-    if (restrictedUrl(targetTab.url)) {
-      throw new Error(`受限页，无法截图：${targetTab.url || "系统页面"}`);
-    }
-    const hostDenied = await requireHostUrl(targetTab.url || "");
-    if (hostDenied) throw new Error(hostDenied);
-    if (!targetTab.active && targetTab.id) {
-      await chrome.tabs.update(targetTab.id, { active: true });
-      await sleep(280);
-    }
+  if (!targetTab) throw new Error("没有可截取的标签");
+  if (!targetTab.url) throw new Error(await requestTabHostAccess(targetTab.id));
+  if (restrictedUrl(targetTab.url)) {
+    throw new Error(`受限页，无法截图：${targetTab.url}`);
+  }
+  const hostDenied = await requireHostUrl(targetTab.url, { userGesture, tabId: targetTab.id });
+  if (hostDenied) throw new Error(hostDenied);
+  if (!targetTab.active && targetTab.id) {
+    await chrome.tabs.update(targetTab.id, { active: true });
+    await sleep(280);
   }
 
-  const win = targetTab?.windowId ?? windowId;
+  const win = targetTab.windowId ?? windowId;
   if (win == null) throw new Error("没有可截取的窗口");
+  if (chrome.tabs?.query) {
+    const [active] = await chrome.tabs.query({ active: true, windowId: win });
+    if (active?.id !== targetTab.id || active?.url !== targetTab.url) {
+      throw new Error("当前标签页已变化，请在要截图的页面重试。");
+    }
+  }
 
   try {
     return await chrome.tabs.captureVisibleTab(win, { format: "jpeg", quality: 80 });

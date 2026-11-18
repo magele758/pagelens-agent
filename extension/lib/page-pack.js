@@ -14,7 +14,7 @@ function emptyPack(tab) {
   };
 }
 
-export async function loadTabPack(tabId) {
+export async function loadTabPack(tabId, options = {}) {
   if (!tabId) throw new Error("没有可操作的标签");
   const tab = await chrome.tabs.get(tabId);
   if (restrictedUrl(tab?.url)) {
@@ -22,7 +22,7 @@ export async function loadTabPack(tabId) {
   }
   let pack;
   try {
-    pack = await inject(tabId, extractPage);
+    pack = await inject(tabId, extractPage, [], options);
   } catch {
     pack = null;
   }

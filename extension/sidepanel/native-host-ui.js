@@ -47,7 +47,7 @@ function renderNativeHostStatus() {
 
 async function refreshNativeHost({ silent = false } = {}) {
   if (!silent) paintNativeHostStatus(state.nativeHost, "测试中…");
-  const res = await pingNativeHost();
+  const res = await pingNativeHost({ interactive: !silent, userGesture: !silent });
   state.nativeHost = {
     checked: true,
     ok: res.ok === true,

@@ -721,9 +721,9 @@ async function sendWindowPrompt(text, userText, options) {
 
   try {
     console.info("[pagelens] sendPrompt executeLoop");
-    if (state.share && state.tab) {
+    if (state.share && state.tab && !state.chatRef?.context) {
       try {
-        await withTimeout(refreshTab(), 8000, "读当前页超时，先用已缓存内容。");
+        await withTimeout(refreshTab({ interactive: true }), 8000, "读当前页超时，先用已缓存内容。");
       } catch (err) {
         console.warn("[pagelens] refreshTab", err);
         pushTraceItem(botMsg, { kind: "meta", name: "读页", ok: false });
@@ -853,7 +853,7 @@ async function captureTab(tabId) {
     return null;
   }
   try {
-    return await captureVisible(id, state.windowId);
+    return await captureVisible(id, state.windowId, { userGesture: globalThis.navigator?.userActivation?.isActive });
   } catch (err) {
     pushError("截图失败：" + err.message);
     return null;

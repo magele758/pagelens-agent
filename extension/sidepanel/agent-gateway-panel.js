@@ -85,8 +85,11 @@ export function createAgentGatewayPanel({ root, copyText, onGatewayChanged = () 
     $("agent-token-scopes").textContent = (SCOPE_PRESETS[preset] || []).map((s) => `${s}（${SCOPE_LABELS[s]}）`).join("、");
   }
 
+  let visibleTokens = [];
+
   async function paintTokens() {
     const list = await listAgentTokens();
+    visibleTokens = list;
     const ul = $("agent-token-list");
     ul.replaceChildren();
     if (!list.length) {
@@ -127,21 +130,25 @@ export function createAgentGatewayPanel({ root, copyText, onGatewayChanged = () 
   }
 
   async function setEnabled(next) {
-    const tokens = await loadAgentTokens();
-    if (next && !hasActiveToken(tokens)) {
-      $("agent-gateway").checked = false;
-      setStatus("agent-gateway-status", "请先在下面创建一个 token。", "bad");
-      return;
-    }
+    const now = Date.now();
+    const currentToken = visibleTokens.some((token) => token.state === "active" &&
+      (token.expiresAt == null || token.expiresAt > now));
     if (next) {
-      const gate = await ensureOptionalAccess({ permission: "nativeMessaging", force: true });
+      const options = { permission: "nativeMessaging", force: true, userGesture: true };
+      const directRequest = currentToken ? ensureOptionalAccess(options) : null;
+      if (!hasActiveToken(await loadAgentTokens())) {
+        $("agent-gateway").checked = false;
+        setStatus("agent-gateway-status", "请先在下面创建一个 token。", "bad");
+        return;
+      }
+      const gate = await (directRequest || ensureOptionalAccess(options));
       if (!gate.granted && !gate.skipped && !gate.required) {
         $("agent-gateway").checked = false;
         setStatus("agent-gateway-status", gate.message || "未授予本机助手权限。", "bad");
         return;
       }
     }
-    const saved = await modifySettings((latest) => ({ ...latest, agentGatewayEnabled: next }));
+    const saved = await saveSettings({ ...(await loadSettings()), agentGatewayEnabled: next });
     enabled = saved.agentGatewayEnabled === true;
     onGatewayChanged(enabled);
     paintGateway();
