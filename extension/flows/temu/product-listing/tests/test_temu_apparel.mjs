@@ -60,6 +60,58 @@ function sizeFixture(labels) {
 {
   const key = "productSkcList[0].mainSpec[0]";
   const page = fixture(`<div id="${key}">
+    <div class="colour-spec-select_colorSpecSelect__test"><input placeholder="选择或自定义颜色"></div>
+    </div><div id="productSkcList[1].mainSpec[0]">
+    <div class="colour-spec-select_colorSpecSelect__test"><input placeholder="选择或自定义颜色"></div>
+    </div><div data-testid="beast-core-portal">
+    <div class="PP_popoverContent_test">
+      <div class="colour-spec-select_searchContainer__test" hidden>
+        <input type="search"><div class="colour-spec-select_selectItem__test" hidden>花色</div>
+      </div>
+    </div></div><div id="foreign" role="listbox">其他列表</div>`);
+  const { doc } = page;
+  const [input, other] = doc.querySelectorAll('input[placeholder]');
+  const menu = doc.querySelector('[class*="colour-spec-select_searchContainer__"]');
+  const option = menu.lastElementChild;
+  const search = menu.querySelector("input");
+  let clicks = 0;
+  let scrolls = 0;
+  doc.elementFromPoint = () => input;
+  input.getBoundingClientRect = () => ({ left: 120, top: 300, width: 90, height: 30 });
+  input.scrollIntoView = () => { scrolls++; };
+  input.addEventListener("click", () => { assert.fail("the authorized continuation must not replay a synthetic opener"); });
+  search.addEventListener("input", () => { option.hidden = search.value !== "花色"; });
+  option.addEventListener("click", () => {
+    clicks++;
+    input.placeholder = "花色";
+    input.value = "";
+    menu.hidden = true;
+  });
+  assert.equal((await page.run({ kind: "color-target", key })).code, "MENU_STILL_OPEN");
+  doc.getElementById("foreign").hidden = true;
+  input.value = "in-progress";
+  assert.equal((await page.run({ kind: "color-target", key })).code, "SPEC_CONTROL_MISSING");
+  input.value = "";
+  const point = await page.run({ kind: "color-target", key });
+  assert.equal(point.ok, true, point.message);
+  assert.equal(point.x, 165);
+  assert.equal(point.y, 315);
+  assert.equal(scrolls, 1);
+  other.focus();
+  menu.hidden = false;
+  assert.equal((await page.run({ kind: "set-color", key, value: "花色", allowOpened: true })).code, "MENU_STILL_OPEN");
+  assert.equal(clicks, 0);
+  input.focus();
+  const committed = await page.run({ kind: "set-color", key, value: "花色", allowOpened: true });
+  assert.equal(committed.status, "filled", committed.message);
+  assert.equal(clicks, 1);
+  assert.equal(other.placeholder, "选择或自定义颜色");
+  page.close();
+}
+
+{
+  const key = "productSkcList[0].mainSpec[0]";
+  const page = fixture(`<div id="${key}">
       <div class="ST_outerWrapper_test"><div class="ST_head_test">
         <input placeholder="选择或自定义颜色" aria-controls="colors" value="typed filter">
       </div></div>

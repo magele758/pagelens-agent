@@ -111,11 +111,44 @@ export function createTemuListingToolCaller({
     return { ok: true };
   }
 
+  async function pointAt(target, click = false) {
+    if (!target.ok) return target;
+    const { x, y } = target;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
+      return failure("CONTROL_NOT_VISIBLE", "无法核对当前 Temu 控件的点击位置。");
+    }
+    const stopped = await getConsistentTab();
+    if (stopped) return stopped;
+    signal?.throwIfAborted();
+    await cdp.send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    if (click) {
+      await cdp.send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await cdp.send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+    }
+    return { ok: true };
+  }
+
+  async function apparel(args) {
+    const request = { href, kind: args.kind, key: args.key, value: args.value, alternate: args.alternate };
+    const first = await runInPage(temuApparelPage, request);
+    if (args.kind !== "set-color" || first.code !== "COLOR_MENU_UNAVAILABLE") return first;
+    const point = await runInPage(temuApparelPage, { href, kind: "color-target", key: args.key });
+    const clicked = await pointAt(point, true);
+    return clicked.ok ? await runInPage(temuApparelPage, { ...request, allowOpened: true }) : clicked;
+  }
+
   async function uploadMaterial(key, paths) {
     const filenames = paths.map(path => path.split(/[/\\]/u).at(-1).replace(/\.(?:jpe?g|png|webp)$/iu, ""));
     if (new Set(filenames).size !== filenames.length) return failure("UPLOAD_DENIED", "一起上传的图片需要不同的文件名。");
     const media = (kind, args) => runInPage(temuMediaPage, { href, kind, key, filenames, ...args });
-    const picker = await media("open");
+    let openedWithHover = false;
+    if (key === "decoration-images") {
+      const point = await media("detail-target");
+      const hovered = await pointAt(point);
+      if (!hovered.ok) return hovered;
+      openedWithHover = true;
+    }
+    const picker = await media("open", { trustedHover: openedWithHover });
     if (!picker.ok) return picker;
     let confirmed;
     try {
@@ -270,7 +303,7 @@ export function createTemuListingToolCaller({
             if (!["inspect", "add-color", "set-color", "set-sizes", "select-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
               return failure("ACTION_UNSUPPORTED", "此操作不属于服装试填。");
             }
-            return await runInPage(temuApparelPage, { href, kind: args.kind, key: args.key, value: args.value, alternate: args.alternate });
+            return await apparel(args);
           case "temu_description":
             return await fillDetails(args);
           case "temu_origin":

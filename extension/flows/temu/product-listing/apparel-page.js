@@ -1,5 +1,5 @@
 /** The apparel editor renders SKC colors separately from its size selector. */
-export async function temuApparelPage({ href, kind, key, value, alternate }) {
+export async function temuApparelPage({ href, kind, key, value, alternate, allowOpened = false }) {
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
   const visible = node => Boolean(node?.isConnected && node.getClientRects().length &&
@@ -18,7 +18,17 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
   const colorComponent = '[class*="colour-spec-select_colorSpecSelect__"]';
   const colorPopover = '[class*="colour-spec-select_searchContainer__"]';
   const colorOption = '[class*="colour-spec-select_selectItem__"]';
+  const triggerSelector = '[class*="ST_head_"],[data-testid="beast-core-popover-trigger-wrapper"]';
   const colorWrapper = input => input?.closest(colorComponent) || input?.closest('[class*="ST_outerWrapper_"]');
+  const visiblePopup = node => visible(node) && (getComputedStyle(node).opacity || "1") !== "0";
+  const standardMenus = () => {
+    const listboxes = [...document.querySelectorAll('[role="listbox"]')].filter(visiblePopup);
+    const fallbacks = [...document.querySelectorAll('[class*="ST_dropdown_"]')].filter(menu => visiblePopup(menu) &&
+      menu.querySelector('[role="option"],[data-testid="beast-core-select-option"]') && !listboxes.some(listbox => menu.contains(listbox)));
+    return [...listboxes, ...fallbacks.filter(menu => !fallbacks.some(parent => parent !== menu && parent.contains(menu)))];
+  };
+  const nativeMenus = () => [...document.querySelectorAll(colorPopover)].filter(menu =>
+    visiblePopup(menu) && (menu.closest('[data-testid="beast-core-portal"]') || root?.contains(menu)));
   const holders = () => [...root?.querySelectorAll(colorSelector) || []].filter(holder => visible(holder) &&
     /^productSkcList\[\d{1,3}\]\.mainSpec\[0\]$/u.test(holder.id) &&
     (colorField(holder)?.placeholder === emptyColor || selectedColor(holder)));
@@ -36,12 +46,21 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
     key: holder.id,
     value: selectedColor(holder),
   }));
+  const target = () => holders().find(row => row.id === key);
+  const findAnchor = () => {
+    const holder = target();
+    const input = colorField(holder);
+    const wrapper = colorWrapper(input);
+    if (!wrapper || !input || input.disabled || input.closest('[aria-disabled="true"],[data-disabled="true"]')) return null;
+    return { holder, input, wrapper, trigger: input.closest(triggerSelector) };
+  };
 
   if (!onPage() || blocked()) return fail("PAGE_CHANGED", "Temu 服装规格页已切换或有弹窗。");
   if (["composition-inspect", "composition-add", "composition-percentage"].includes(kind)) return composition();
   if (kind === "set-sizes") return setSizes();
   if (kind === "select-size-chart") return selectChart();
   if (kind === "inspect") return { ok: true, rows: rows() };
+  if (kind === "color-target") return colorTarget();
   if (kind === "set-color") return setColor();
   if (kind !== "add-color") return fail("ACTION_UNSUPPORTED", "此操作不属于服装规格试填。");
   const before = holders();
@@ -68,9 +87,36 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
   }
   return fail("SPEC_VALUES_NOT_RENDERED", "添加后没有出现新的服装颜色行。");
 
+  async function colorTarget() {
+    const anchor = findAnchor();
+    const resting = current => current?.wrapper.matches(colorComponent) && !selectedColor(current.holder) &&
+      current.input.placeholder === emptyColor && !clean(current.input.value);
+    const menuOpen = () => standardMenus().length || nativeMenus().length;
+    if (menuOpen()) return fail("MENU_STILL_OPEN", "存在下拉选项打开，请关闭后再选择颜色。");
+    if (!resting(anchor)) return fail("SPEC_CONTROL_MISSING", "当前颜色行没有可安全点按的空白输入框。");
+    anchor.input.scrollIntoView?.({ block: "center", inline: "nearest" });
+    let previousPoint;
+    const deadline = Date.now() + 600;
+    do {
+      if (!onPage() || blocked()) return fail("PAGE_CHANGED", "准备点按服装颜色时页面已切换。");
+      if (menuOpen()) return fail("MENU_STILL_OPEN", "存在下拉选项打开，请关闭后再选择颜色。");
+      const current = findAnchor();
+      if (!resting(current)) return fail("SPEC_CONTROL_MISSING", "当前颜色行的输入框已变化。");
+      const rect = current.input.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      if (rect.width && rect.height && x >= 0 && y >= 0 && x < innerWidth && y < innerHeight &&
+          (typeof document.elementFromPoint !== "function" || document.elementFromPoint(x, y) === current.input)) {
+        if (previousPoint?.x === x && previousPoint.y === y && previousPoint.input === current.input) return { ok: true, x, y };
+        previousPoint = { x, y, input: current.input };
+      } else previousPoint = undefined;
+      await new Promise(resolve => setTimeout(resolve, 40));
+    } while (Date.now() < deadline);
+    return fail("SPEC_CONTROL_MISSING", "颜色输入框被遮挡或仍在视口外。");
+  }
+
   async function setColor() {
     if (typeof value !== "string" || !clean(value) || value.length > 80) return fail("VALUE_INVALID", "颜色值为空或超过长度限制。");
-    const target = () => holders().find(row => row.id === key);
     const holder = target();
     const input = colorField(holder);
     if (!holder) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
@@ -88,6 +134,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
       if (control.isConnected && onPage()) control.dispatchEvent(new Event("change", { bubbles: true }));
     };
     const wrapper = colorWrapper(input);
+    if (allowOpened && !wrapper?.matches(colorComponent)) return fail("SPEC_CONTROL_MISSING", "当前颜色行已变化。");
     let committed = wanted;
     if (wrapper) {
       const picked = await pickColor();
@@ -116,17 +163,9 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
 
     async function pickColor() {
       const nativePopover = wrapper.matches(colorComponent);
-      const triggerSelector = '[class*="ST_head_"],[data-testid="beast-core-popover-trigger-wrapper"]';
-      const findAnchor = () => {
-        const liveHolder = target();
-        const liveInput = colorField(liveHolder);
-        const liveWrapper = colorWrapper(liveInput);
-        if (!liveWrapper || !liveInput || liveInput.disabled) return null;
-        return { holder: liveHolder, input: liveInput, wrapper: liveWrapper, trigger: liveInput.closest(triggerSelector) };
-      };
-      const menus = () => [...document.querySelectorAll(nativePopover ? colorPopover : '[role="listbox"]')].filter(menu =>
-        visible(menu) && (getComputedStyle(menu).opacity || "1") !== "0" &&
+      const menus = () => (nativePopover ? nativeMenus() : standardMenus()).filter(menu =>
         (target()?.contains(menu) || menu.closest('[data-testid="beast-core-portal"],[class*="ST_dropdown_"]')));
+      let trustedMenu;
       const related = () => {
         const anchor = findAnchor();
         const visibleMenus = menus();
@@ -135,25 +174,38 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
           clean(node?.getAttribute("aria-controls") || node?.getAttribute("aria-owns")).split(/\s+/u)).filter(Boolean);
         const [menu] = visibleMenus;
         const owned = anchor.holder.contains(menu) || ids.some(id => menu.id === id || document.getElementById(id)?.contains(menu));
+        if (allowOpened) {
+          if (!nativePopover || standardMenus().some(other => other !== menu && !menu.contains(other) && !other.contains(menu))) return null;
+          const active = document.activeElement;
+          if (!anchor.wrapper.contains(active) && !((owned || trustedMenu === menu) && menu.contains(active))) return null;
+          trustedMenu = menu;
+          return menu;
+        }
         // The color-specific portal was absent before opening this single pinned row.
         return owned || nativePopover || !ids.length &&
           (anchor.holder.contains(document.activeElement) || menu.contains(document.activeElement)) ? menu : null;
       };
-      if (menus().length) return fail("MENU_STILL_OPEN", "页面已有下拉选项打开。");
-      input.focus({ preventScroll: true });
-      let menu = await waitFor(related, 180);
-      if (!menu && !menus().length && onPage() && !blocked()) {
-        const anchor = findAnchor();
-        (anchor?.trigger || anchor?.input)?.click();
-        menu = await waitFor(related, 650);
-      }
-      if (!menu && !menus().length && onPage() && !blocked()) {
-        const anchor = findAnchor();
-        if (anchor?.trigger && anchor.input) anchor.input.click();
-        menu = await waitFor(related, 800);
+      let menu;
+      if (allowOpened) {
+        menu = await waitFor(related, 1250);
+        if (!menu && menus().length) return fail("MENU_STILL_OPEN", "无法确认已打开的颜色菜单属于当前行。");
+      } else {
+        if (menus().length || nativePopover && standardMenus().length) return fail("MENU_STILL_OPEN", "页面已有下拉选项打开。");
+        input.focus({ preventScroll: true });
+        menu = await waitFor(related, 180);
+        if (!menu && !menus().length && onPage() && !blocked()) {
+          const anchor = findAnchor();
+          (anchor?.trigger || anchor?.input)?.click();
+          menu = await waitFor(related, 650);
+        }
+        if (!menu && !menus().length && onPage() && !blocked()) {
+          const anchor = findAnchor();
+          if (anchor?.trigger && anchor.input) anchor.input.click();
+          menu = await waitFor(related, 800);
+        }
       }
       if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
-      if (!menu) return fail("SPEC_CONTROL_MISSING", "Temu 没有打开当前服装颜色的选项列表。");
+      if (!menu) return fail("COLOR_MENU_UNAVAILABLE", "Temu 没有打开当前服装颜色的选项列表。");
 
       function exactChoice() {
         const menu = related();

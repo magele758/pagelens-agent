@@ -1,5 +1,5 @@
 /** Read and operate the material picker only while the new Temu draft remains open. */
-export async function temuMediaPage({ href, kind, key, filenames = [], previous = [], expected = [], name, baseline, added }) {
+export async function temuMediaPage({ href, kind, key, filenames = [], previous = [], expected = [], name, baseline, added, trustedHover = false }) {
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
   const clean = value => String(value ?? "").replace(/\s+/gu, " ").trim();
@@ -47,6 +47,7 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
   if (!onPage()) return fail("PAGE_CHANGED", "Temu 商品页已切换。");
   const detail = key === "decoration-images";
   if (!detail && !isImageArea(key)) return fail("UPLOAD_CONTROL_MISSING", "图片目标不属于当前商品轮播或 SKU 预览图。");
+  if (kind === "detail-target") return detail ? detailTarget() : fail("ACTION_UNSUPPORTED", "悬停只用于详情装修图片组件。");
   if (kind === "open") {
     const opened = detail ? await openDetails() : openListing();
     if (!opened.ok) return opened;
@@ -269,12 +270,61 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     return { ok: true };
   }
 
+  function decorationForeground(active) {
+    return active && decoration() === active && modals().every(node => node === active || node.contains(active));
+  }
+
+  function imageItem(active) {
+    return unique([...active.querySelectorAll('div[draggable="true"] [class*="side-left_sectionItem__"]')].filter(node =>
+      visible(node) && [...node.querySelectorAll('span')].some(label => visible(label) && clean(label.textContent) === "图片")));
+  }
+
+  async function detailTarget() {
+    const active = decoration();
+    if (!decorationForeground(active)) return fail("MODAL_BLOCKED", "详情装修弹窗不在前台。");
+    const item = imageItem(active);
+    if (!item) return fail("UPLOAD_CONTROL_MISSING", "找不到详情装修图片组件。");
+
+    function hitTarget() {
+      if (!decorationForeground(active) || item !== imageItem(active)) return null;
+      const viewport = active.getBoundingClientRect();
+      const bounds = item.getBoundingClientRect();
+      const left = Math.max(0, viewport.left, bounds.left);
+      const top = Math.max(0, viewport.top, bounds.top);
+      const right = Math.min(innerWidth, viewport.right, bounds.right);
+      const bottom = Math.min(innerHeight, viewport.bottom, bounds.bottom);
+      if (right - left < 2 || bottom - top < 2) return null;
+      const x = Math.floor((left + right) / 2);
+      const y = Math.floor((top + bottom) / 2);
+      const hit = document.elementFromPoint(x, y);
+      return hit && item.contains(hit) ? { ok: true, x, y } : null;
+    }
+
+    const ready = hitTarget();
+    if (ready) return ready;
+    // Avoid scrolling the page behind the modal or triggering its sticky controls.
+    for (let parent = item.parentElement; parent && active.contains(parent); parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      const container = parent.getBoundingClientRect();
+      const bounds = item.getBoundingClientRect();
+      if (/^(auto|scroll)$/u.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
+        parent.scrollTop += bounds.top < container.top ? bounds.top - container.top : Math.max(0, bounds.bottom - container.bottom);
+      }
+      if (/^(auto|scroll)$/u.test(style.overflowX) && parent.scrollWidth > parent.clientWidth) {
+        parent.scrollLeft += bounds.left < container.left ? bounds.left - container.left : Math.max(0, bounds.right - container.right);
+      }
+    }
+    const target = await waitFor(hitTarget, 600);
+    if (!onPage()) return fail("PAGE_CHANGED", "Temu 商品页已切换。");
+    if (!decorationForeground(active)) return fail("MODAL_BLOCKED", "详情装修弹窗已切换。");
+    return target || fail("DETAIL_HOVER_TARGET_BLOCKED", "详情装修图片组件当前被遮挡或不在视口内。");
+  }
+
   async function openDetails() {
     const active = decoration();
-    const foreground = () => active && decoration() === active && modals().every(node => node === active || node.contains(active));
+    const foreground = () => decorationForeground(active);
     if (!foreground()) return fail("MODAL_BLOCKED", "详情装修弹窗不在前台。");
-    const item = unique([...active.querySelectorAll('div[draggable="true"] [class*="side-left_sectionItem__"]')]
-      .filter(node => visible(node) && [...node.querySelectorAll('span')].some(label => visible(label) && clean(label.textContent) === "图片")));
+    const item = imageItem(active);
     if (!item) return fail("UPLOAD_CONTROL_MISSING", "找不到详情装修图片组件。");
     const modal = active.closest('[data-testid="beast-core-modal"]');
     const mask = modal?.parentElement;
@@ -285,6 +335,18 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
         .filter(node => visible(node) && clean(node.textContent) === "从素材中心添加" &&
           ![...node.children].some(child => clean(child.textContent) === "从素材中心添加") &&
           !node.closest('[disabled],[aria-disabled="true"]'))))];
+    }
+    if (trustedHover) {
+      const matchesMenu = node => {
+        for (let row = node.parentElement, depth = 0; row && row !== active && row !== mask && depth < 3; row = row.parentElement, depth++) {
+          if (hasTitle(row, "快速选择已有素材")) return true;
+        }
+        return false;
+      };
+      const add = await waitFor(() => foreground() && item === imageItem(active) && unique(materialEntries().filter(matchesMenu)));
+      if (!add || !foreground()) return fail("UPLOAD_CONTROL_MISSING", "悬停后找不到详情装修的素材中心入口。");
+      add.click();
+      return { ok: true };
     }
     const existing = new Set(materialEntries());
     const { x, y, width, height } = item.getBoundingClientRect();

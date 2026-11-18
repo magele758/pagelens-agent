@@ -42,7 +42,7 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
       assert.equal(request.href, editor);
       assert.equal(request.kind, "upload-target");
       const gallery = slots.get(request.key) || [];
-      result = { ok: true, mode: "material", markers: gallery.length, sources: gallery.map(card => card.src) };
+      result = { ok: true, mode: "material", markers: gallery.length, images: gallery.map(card => card.src) };
     } else if (func === temuDecorationPage) {
       events.push(["decoration", request.kind, request]);
       assert.equal(request.href, editor);
@@ -57,7 +57,12 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
       const snapshot = () => ({ ok: true, count: selected.length, available: 10 - selected.length,
         ordered: key.startsWith("productSkcList["), selector: "#picker input[type=file]", knownMedia });
       switch (kind) {
+        case "detail-target":
+          assert.equal(key, "decoration-images");
+          result = { ok: true, x: 103, y: 219 };
+          break;
         case "open":
+          assert.equal(request.trustedHover, key === "decoration-images");
           selected = [];
           result = snapshot();
           break;
@@ -101,6 +106,10 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
   } } };
   const cdp = { async send(target, command, params) {
     assert.equal(target, tabId);
+    if (command === "Input.dispatchMouseEvent") {
+      assert.deepEqual(params, { type: "mouseMoved", x: 103, y: 219 });
+      return {};
+    }
     if (command === "Runtime.evaluate") return { result: { objectId: "current-file-input" } };
     if (command === "DOM.setFileInputFiles") {
       assert.equal(params.objectId, "current-file-input");
@@ -150,7 +159,8 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
   const { call, events } = await listingFixture({ uploadError: "UPLOAD_REJECTED" });
   assert.equal((await call("temu_description", { description: "Never saved", paths: [detail] })).code, "UPLOAD_REJECTED");
   assert.deepEqual(events.map(event => event.slice(0, 2)), [
-    ["decoration", "begin"], ["media", "open"], ["cdp", "files"], ["media", "settle-upload"], ["media", "cancel"], ["decoration", "cancel"],
+    ["decoration", "begin"], ["media", "detail-target"], ["media", "open"], ["cdp", "files"],
+    ["media", "settle-upload"], ["media", "cancel"], ["decoration", "cancel"],
   ]);
 }
 

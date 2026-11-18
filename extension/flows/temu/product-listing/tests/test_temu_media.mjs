@@ -120,7 +120,7 @@ function fixture(html) {
   dom.window.close();
 }
 
-{
+for (const trustedHover of [false, true]) {
   const { dom, doc, run } = fixture(`
     <div data-testid="beast-core-modal-mask" id="decoration-mask">
       <div data-testid="beast-core-modal"><div class="MDL_inner_decoration"><h2>详情页装修</h2>
@@ -133,15 +133,44 @@ function fixture(html) {
     <div class="MDL_inner_picker" hidden><h2>素材中心</h2><div class="UPD_outerWrapper_test"><input type="file"></div>
       <span>已选 0 个，可选 10 个</span></div>`);
   const picker = doc.querySelector(".MDL_inner_picker");
+  const picture = doc.querySelector("#picture");
   const activations = [];
-  doc.querySelector("#picture").addEventListener("mouseover", event => {
-    assert.equal(event.relatedTarget, doc.documentElement);
+  const reveal = () => {
     doc.querySelector("#decoration-mask").insertAdjacentHTML("beforeend", `
       <div data-testid="beast-core-portal"><div id="material-hint"><div>从素材中心添加</div><span>快速选择已有素材</span></div></div>`);
     doc.querySelector("#material-hint").onclick = () => { activations.push("picker"); picker.hidden = false; };
+  };
+  picture.addEventListener("mouseover", event => {
+    assert.equal(trustedHover, false, "with trusted hover the menu should already be present, with no extra synthetic gesture");
+    assert.equal(event.relatedTarget, doc.documentElement);
+    reveal();
   });
   doc.querySelector("#wrong-entry").onclick = () => activations.push("wrong-entry");
-  const result = await run(temuMediaPage, { kind: "open", key: "decoration-images", filenames: ["detail"] });
+  const media = args => run(temuMediaPage, { key: "decoration-images", filenames: ["detail"], ...args });
+  if (trustedHover) {
+    doc.querySelector(".MDL_inner_decoration").getBoundingClientRect = () => ({ left: 20, top: 20, right: 800, bottom: 500 });
+    picture.getBoundingClientRect = () => ({ left: 40, top: 100, right: 120, bottom: 200 });
+    doc.elementFromPoint = () => doc.querySelector("#wrong-entry");
+    assert.equal((await media({ kind: "detail-target" })).code, "DETAIL_HOVER_TARGET_BLOCKED");
+
+    const sidebar = doc.querySelector('[class^="side-left_left__"]');
+    sidebar.style.overflowY = "auto";
+    sidebar.getBoundingClientRect = () => ({ left: 30, top: 20, right: 170, bottom: 300 });
+    Object.defineProperties(sidebar, { scrollHeight: { value: 700 }, clientHeight: { value: 280 } });
+    picture.getBoundingClientRect = () => ({ left: 40, top: 500 - sidebar.scrollTop, right: 120, bottom: 600 - sidebar.scrollTop });
+    doc.elementFromPoint = (x, y) => x === 80 && y === 250 ? picture.querySelector("span") : null;
+    doc.body.insertAdjacentHTML("beforeend", '<div class="MDL_inner_foreign" id="foreign-modal"><h2>其它弹窗</h2></div>');
+    assert.equal((await media({ kind: "detail-target" })).code, "MODAL_BLOCKED");
+    assert.equal(sidebar.scrollTop, 0);
+    doc.querySelector("#foreign-modal").remove();
+    const hit = await media({ kind: "detail-target" });
+    assert.equal(hit.ok, true);
+    assert.deepEqual([hit.x, hit.y], [80, 250]);
+    assert.equal(sidebar.scrollTop, 300);
+    assert.equal(doc.body.scrollTop, 0);
+    reveal();
+  }
+  const result = await media({ kind: "open", trustedHover });
   assert.equal(result.ok, true);
   assert.equal(doc.querySelector(result.selector).type, "file");
   assert.deepEqual(activations, ["picker"]);
