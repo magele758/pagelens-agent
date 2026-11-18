@@ -338,14 +338,19 @@ export async function temuControls(request) {
 
   function choices(menu) {
     return [...menu.querySelectorAll(OPTION)].filter(element => visible(element) && !menu.contains(element.parentElement.closest(OPTION))).map(element => {
-      const label = clean(element.textContent, 500);
+      const descriptions = [...element.querySelectorAll('[class^="name-label_name__"]')];
+      const description = descriptions.length === 1 ? descriptions[0] : null;
+      const primary = description && clean([...description.childNodes].filter(node => node.nodeType === 3)
+        .map(node => node.textContent).join(" "), 500);
+      const translation = description && clean(description.querySelector('[class^="name-label_enName__"]')?.textContent);
+      const label = primary || clean(element.textContent, 500);
       const value = clean(element.getAttribute("data-value") || element.getAttribute("value") || label, 1000);
       const normalized = label.normalize("NFKC");
       const parts = /^([\p{Script=Han}\d\s]+?(?:\([\p{Script=Han}\d\s]+\))?)\s*[(\[]?([a-z][a-z\d\s?'’/-]*?)[)\]]?$/iu.exec(normalized);
       const qualified = /^([\p{Script=Han}\d\s]+?)\s*\([\p{Script=Han}\d\s]+\)$/u.exec(parts?.[1] || normalized);
       const childLabels = Array.from(element.querySelectorAll("span,[aria-label]"))
         .map((node) => clean(node.getAttribute("aria-label") || node.textContent));
-      const aliases = [...new Set([element.getAttribute("aria-label"), ...(parts?.slice(1) || []), qualified?.[1], ...childLabels])]
+      const aliases = [...new Set([element.getAttribute("aria-label"), ...(parts?.slice(1) || []), qualified?.[1], translation, ...childLabels])]
         .map(alias => clean(alias)).filter(alias => alias && key(alias) !== key(label)).slice(0, 12);
       const status = element.getAttribute("data-checked") ?? element.getAttribute("aria-selected");
       const disabled = element.matches('[data-disabled="true"],[aria-disabled="true"],[disabled],a[href]') ||

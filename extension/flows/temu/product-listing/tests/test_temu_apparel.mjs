@@ -125,6 +125,53 @@ function sizeFixture(labels) {
 {
   const key = "productSkcList[0].mainSpec[0]";
   const page = fixture(`<div id="${key}">
+    <div class="additional colour-spec-select_colorSpecSelect__test">
+      <span data-testid="beast-core-popover-trigger-wrapper"><input placeholder="选择或自定义颜色" readonly></span>
+    </div></div>
+    <div data-testid="beast-core-portal" hidden>
+      <div class="additional colour-spec-select_searchContainer__test">
+        <input type="search"><div class="additional colour-spec-select_selectItem__test" hidden>花色</div>
+        <div class="additional colour-spec-select_selectItem__test" hidden>花色条纹</div>
+      </div>
+    </div>`);
+  const { doc } = page;
+  const initial = doc.querySelector("input[readonly]");
+  const trigger = initial.parentElement;
+  const portal = doc.querySelector('[data-testid="beast-core-portal"]');
+  const search = portal.querySelector("input");
+  const options = portal.querySelectorAll('[class*="colour-spec-select_selectItem__"]');
+  let opened = 0;
+  let wrongClicks = 0;
+  trigger.addEventListener("click", event => {
+    if (event.target !== trigger) return;
+    opened++;
+    initial.replaceWith(initial.cloneNode(true));
+    setTimeout(() => {
+      portal.hidden = false;
+      search.focus();
+    }, 80);
+  });
+  search.addEventListener("input", () => {
+    for (const option of options) option.hidden = search.value !== "花色";
+  });
+  options[0].addEventListener("click", () => {
+    trigger.querySelector("input").placeholder = "花色";
+    portal.hidden = true;
+  });
+  options[1].addEventListener("click", () => { wrongClicks++; });
+  const result = await page.run({ kind: "set-color", key, value: "花色" });
+  assert.equal(result.status, "filled", result.message);
+  assert.equal(result.value, "花色");
+  assert.equal(search.value, "花色");
+  assert.equal(opened, 1);
+  assert.equal(wrongClicks, 0);
+  assert.equal(initial.isConnected, false);
+  page.close();
+}
+
+{
+  const key = "productSkcList[0].mainSpec[0]";
+  const page = fixture(`<div id="${key}">
     <div class="colour-spec-select_colorSpecSelect__test">
       <span data-testid="beast-core-popover-trigger-wrapper"><input placeholder="选择或自定义颜色"></span>
     </div></div>

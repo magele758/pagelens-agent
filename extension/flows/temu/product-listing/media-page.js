@@ -271,15 +271,33 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
 
   async function openDetails() {
     const active = decoration();
-    if (!active || modals().some(node => node !== active && !node.contains(active))) return fail("MODAL_BLOCKED", "详情装修弹窗不在前台。");
-    const item = unique([...active.querySelectorAll('[class^="side-left_sectionItem__"] span')]
-      .filter(node => visible(node) && clean(node.textContent) === "图片"));
+    const foreground = () => active && decoration() === active && modals().every(node => node === active || node.contains(active));
+    if (!foreground()) return fail("MODAL_BLOCKED", "详情装修弹窗不在前台。");
+    const item = unique([...active.querySelectorAll('div[draggable="true"] [class*="side-left_sectionItem__"]')]
+      .filter(node => visible(node) && [...node.querySelectorAll('span')].some(label => visible(label) && clean(label.textContent) === "图片")));
     if (!item) return fail("UPLOAD_CONTROL_MISSING", "找不到详情装修图片组件。");
-    item.click();
-    const add = await waitFor(() => unique([...active.querySelectorAll('button,a,[role="button"],span')]
-      .filter(node => visible(node) && clean(node.textContent) === "从素材中心添加" &&
-        ![...node.children].some(child => clean(child.textContent) === "从素材中心添加"))));
-    if (!add || active !== decoration()) return fail("UPLOAD_CONTROL_MISSING", "找不到详情装修的素材中心入口。");
+    const modal = active.closest('[data-testid="beast-core-modal"]');
+    const mask = modal?.parentElement;
+    function materialEntries() {
+      const portals = mask?.matches('[data-testid="beast-core-modal-mask"]') ? [...mask.children].filter(node =>
+        visible(node) && node.matches('[data-testid="beast-core-portal"]')) : [];
+      return [...new Set([active, ...portals].flatMap(area => [...area.querySelectorAll('button,a,span,div,p,strong,h3,h4,[role="menuitem"],[role="button"]')]
+        .filter(node => visible(node) && clean(node.textContent) === "从素材中心添加" &&
+          ![...node.children].some(child => clean(child.textContent) === "从素材中心添加") &&
+          !node.closest('[disabled],[aria-disabled="true"]'))))];
+    }
+    const existing = new Set(materialEntries());
+    const { x, y, width, height } = item.getBoundingClientRect();
+    const mouse = { bubbles: true, cancelable: true, composed: true,
+      relatedTarget: document.documentElement, clientX: x + width / 2, clientY: y + height / 2 };
+    const pointer = { ...mouse, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    // The component opens its image-source menu on hover, not on a DOM click.
+    item.dispatchEvent(new PointerEvent("pointerover", pointer));
+    item.dispatchEvent(new MouseEvent("mouseover", mouse));
+    item.dispatchEvent(new PointerEvent("pointerenter", { ...pointer, bubbles: false }));
+    item.dispatchEvent(new MouseEvent("mouseenter", { ...mouse, bubbles: false }));
+    const add = await waitFor(() => foreground() && unique(materialEntries().filter(node => !existing.has(node))));
+    if (!add || !foreground()) return fail("UPLOAD_CONTROL_MISSING", "找不到详情装修的素材中心入口。");
     add.click();
     return { ok: true };
   }

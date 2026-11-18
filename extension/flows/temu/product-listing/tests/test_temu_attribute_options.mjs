@@ -74,6 +74,14 @@ test("searches the active form control, waits for filtered options, and verifies
     menu.innerHTML = items.map(([id, name]) => `<div role="option" data-value="${id}">${name}</div>`).join("");
     const material = menu.querySelector('[data-value="temu-poly"]');
     if (material) {
+      const name = document.createElement("span");
+      name.className = "name-label_name__test";
+      name.textContent = material.textContent;
+      const translation = document.createElement("span");
+      translation.className = "name-label_enName__test";
+      translation.textContent = "Polyester";
+      name.append(translation);
+      material.replaceChildren(name);
       material.getBoundingClientRect = () => materialScrolled ? { height: 28, top: 130, bottom: 158 } : { height: 28, top: 220, bottom: 248 };
       material.scrollIntoView = () => { materialScrolled = true; };
     }
@@ -99,7 +107,7 @@ test("searches the active form control, waits for filtered options, and verifies
   menu.addEventListener("click", event => {
     assert.equal(materialScrolled, true, "a clipped material option is revealed before selection");
     clicks++;
-    selection.textContent = event.target.textContent;
+    selection.textContent = event.target.querySelector(".name-label_name__test")?.firstChild.textContent || event.target.textContent;
   });
   const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
   const [field] = (await run({ kind: "inspect" })).fields;

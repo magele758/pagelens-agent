@@ -15,10 +15,10 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
     const exact = inputs.filter(node => node.placeholder === emptyColor);
     return exact.length === 1 ? exact[0] : !exact.length && inputs.length === 1 ? inputs[0] : null;
   };
-  const colorComponent = '[class^="colour-spec-select_colorSpecSelect__"]';
-  const colorPopover = '[class^="colour-spec-select_searchContainer__"]';
-  const colorOption = '[class^="colour-spec-select_selectItem__"]';
-  const colorWrapper = input => input?.closest(`${colorComponent},[class*="ST_outerWrapper_"]`);
+  const colorComponent = '[class*="colour-spec-select_colorSpecSelect__"]';
+  const colorPopover = '[class*="colour-spec-select_searchContainer__"]';
+  const colorOption = '[class*="colour-spec-select_selectItem__"]';
+  const colorWrapper = input => input?.closest(colorComponent) || input?.closest('[class*="ST_outerWrapper_"]');
   const holders = () => [...root?.querySelectorAll(colorSelector) || []].filter(holder => visible(holder) &&
     /^productSkcList\[\d{1,3}\]\.mainSpec\[0\]$/u.test(holder.id) &&
     (colorField(holder)?.placeholder === emptyColor || selectedColor(holder)));
@@ -82,10 +82,10 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
     if (!input || input.disabled) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
     if (input.maxLength > 0 && value.length > input.maxLength) return fail("VALUE_INVALID", "颜色值超过 Temu 字数限制。");
 
-    const setText = (text = value) => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, text);
-      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-      if (input.isConnected && onPage()) input.dispatchEvent(new Event("change", { bubbles: true }));
+    const setText = (control, text) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(control, text);
+      control.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      if (control.isConnected && onPage()) control.dispatchEvent(new Event("change", { bubbles: true }));
     };
     const wrapper = colorWrapper(input);
     let committed = wanted;
@@ -96,7 +96,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
     } else {
       if (input.readOnly) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
       input.focus();
-      setText();
+      setText(input, value);
       input.blur();
     }
     const deadline = Date.now() + 1900;
@@ -116,23 +116,44 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
 
     async function pickColor() {
       const nativePopover = wrapper.matches(colorComponent);
-      const menus = () => [...document.querySelectorAll(nativePopover
-        ? `[data-testid="beast-core-portal"] ${colorPopover}` : '[role="listbox"]')].filter(menu =>
+      const triggerSelector = '[class*="ST_head_"],[data-testid="beast-core-popover-trigger-wrapper"]';
+      const findAnchor = () => {
+        const liveHolder = target();
+        const liveInput = colorField(liveHolder);
+        const liveWrapper = colorWrapper(liveInput);
+        if (!liveWrapper || !liveInput || liveInput.disabled) return null;
+        return { holder: liveHolder, input: liveInput, wrapper: liveWrapper, trigger: liveInput.closest(triggerSelector) };
+      };
+      const menus = () => [...document.querySelectorAll(nativePopover ? colorPopover : '[role="listbox"]')].filter(menu =>
         visible(menu) && (getComputedStyle(menu).opacity || "1") !== "0" &&
-        (holder.contains(menu) || menu.closest('[data-testid="beast-core-portal"],[class*="ST_dropdown_"]')));
-      const head = input.closest('[class*="ST_head_"],[data-testid="beast-core-popover-trigger-wrapper"]');
+        (target()?.contains(menu) || menu.closest('[data-testid="beast-core-portal"],[class*="ST_dropdown_"]')));
       const related = () => {
+        const anchor = findAnchor();
         const visibleMenus = menus();
-        const ids = [input, head, wrapper].flatMap(node =>
+        if (!anchor || visibleMenus.length !== 1) return null;
+        const ids = [anchor.input, anchor.trigger, anchor.wrapper].flatMap(node =>
           clean(node?.getAttribute("aria-controls") || node?.getAttribute("aria-owns")).split(/\s+/u)).filter(Boolean);
-        const known = visibleMenus.filter(menu => holder.contains(menu) || ids.some(id =>
-          menu.id === id || document.getElementById(id)?.contains(menu)));
-        return known.length === 1 ? known[0] :
-          !known.length && visibleMenus.length === 1 && holder.contains(document.activeElement) ? visibleMenus[0] : null;
+        const [menu] = visibleMenus;
+        const owned = anchor.holder.contains(menu) || ids.some(id => menu.id === id || document.getElementById(id)?.contains(menu));
+        // The color-specific portal was absent before opening this single pinned row.
+        return owned || nativePopover || !ids.length &&
+          (anchor.holder.contains(document.activeElement) || menu.contains(document.activeElement)) ? menu : null;
       };
       if (menus().length) return fail("MENU_STILL_OPEN", "页面已有下拉选项打开。");
       input.focus({ preventScroll: true });
-      if (!related() && input.isConnected && onPage() && !blocked()) input.click();
+      let menu = await waitFor(related, 180);
+      if (!menu && !menus().length && onPage() && !blocked()) {
+        const anchor = findAnchor();
+        (anchor?.trigger || anchor?.input)?.click();
+        menu = await waitFor(related, 650);
+      }
+      if (!menu && !menus().length && onPage() && !blocked()) {
+        const anchor = findAnchor();
+        if (anchor?.trigger && anchor.input) anchor.input.click();
+        menu = await waitFor(related, 800);
+      }
+      if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
+      if (!menu) return fail("SPEC_CONTROL_MISSING", "Temu 没有打开当前服装颜色的选项列表。");
 
       function exactChoice() {
         const menu = related();
@@ -152,7 +173,14 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
         return null;
       }
       async function search(label, timeout) {
-        if (input.isConnected && !input.readOnly && onPage() && !blocked()) setText(label);
+        const currentMenu = related();
+        const editable = control => visible(control) && !control.readOnly && !control.disabled && /^(?:text|search)$/u.test(control.type);
+        const inputs = [...currentMenu?.querySelectorAll("input") || []].filter(editable);
+        const editor = inputs.length === 1 ? inputs[0] : !inputs.length && findAnchor()?.input;
+        if (editor && editable(editor) && onPage() && !blocked()) {
+          editor.focus({ preventScroll: true });
+          if (editor.value !== label) setText(editor, label);
+        }
         const until = Date.now() + timeout;
         do {
           if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
@@ -163,12 +191,23 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
         return null;
       }
 
+      async function waitFor(find, timeout) {
+        const deadline = Date.now() + timeout;
+        do {
+          if (!onPage() || blocked()) return null;
+          const resolved = find();
+          if (resolved) return resolved;
+          await new Promise(resolve => setTimeout(resolve, 35));
+        } while (Date.now() < deadline);
+        return null;
+      }
+
       let pick = alternateLabel ? await search(alternateLabel, 1000) : null;
       if (pick) return pick;
       if (pick !== false) pick = await search(value, 1450);
       if (pick) return pick;
 
-      const menu = related();
+      menu = related();
       const current = colorField(target());
       if (pick !== false && current && !current.readOnly && !current.disabled && current.placeholder === emptyColor &&
           clean(current.value) === wanted && onPage() && !blocked()) {
@@ -186,8 +225,11 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
         }
         return { ok: true, value: wanted };
       }
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-      input.blur();
+      const active = document.activeElement;
+      if (current && (findAnchor()?.wrapper.contains(active) || menu?.contains(active))) {
+        active.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+        active.blur();
+      }
       if (visible(menu)) return fail("MENU_STILL_OPEN", "服装颜色下拉尚未关闭，请核对当前页。");
       return fail("SPEC_OPTION_MISSING", `Temu 没有唯一匹配的「${wanted}」颜色。`);
     }

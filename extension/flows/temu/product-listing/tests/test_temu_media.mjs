@@ -122,6 +122,34 @@ function fixture(html) {
 
 {
   const { dom, doc, run } = fixture(`
+    <div data-testid="beast-core-modal-mask" id="decoration-mask">
+      <div data-testid="beast-core-modal"><div class="MDL_inner_decoration"><h2>详情页装修</h2>
+        <div class="editor_editor__test"><div class="side-left_left__test"><div class="side-left_sectionBox__test">
+          <div draggable="true"><div class="side-left_sectionItem__test" id="picture"><span>图片</span></div></div>
+        </div></div></div>
+        <div id="wrong-entry"><span>从素材中心添加</span></div>
+      </div></div>
+    </div>
+    <div class="MDL_inner_picker" hidden><h2>素材中心</h2><div class="UPD_outerWrapper_test"><input type="file"></div>
+      <span>已选 0 个，可选 10 个</span></div>`);
+  const picker = doc.querySelector(".MDL_inner_picker");
+  const activations = [];
+  doc.querySelector("#picture").addEventListener("mouseover", event => {
+    assert.equal(event.relatedTarget, doc.documentElement);
+    doc.querySelector("#decoration-mask").insertAdjacentHTML("beforeend", `
+      <div data-testid="beast-core-portal"><div id="material-hint"><div>从素材中心添加</div><span>快速选择已有素材</span></div></div>`);
+    doc.querySelector("#material-hint").onclick = () => { activations.push("picker"); picker.hidden = false; };
+  });
+  doc.querySelector("#wrong-entry").onclick = () => activations.push("wrong-entry");
+  const result = await run(temuMediaPage, { kind: "open", key: "decoration-images", filenames: ["detail"] });
+  assert.equal(result.ok, true);
+  assert.equal(doc.querySelector(result.selector).type, "file");
+  assert.deepEqual(activations, ["picker"]);
+  dom.window.close();
+}
+
+{
+  const { dom, doc, run } = fixture(`
     <div class="decoration_operate__test"><button>开始装修</button></div>
     <div class="MDL_inner_decoration" hidden><h2>详情页装修</h2><div class="side-left_sectionItem__test"><span>文本</span></div>
       <div id="preview"></div><textarea placeholder="请输入" hidden></textarea><button id="save">保存</button></div>`);
