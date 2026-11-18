@@ -3,13 +3,26 @@ import { $ } from "./dom.js";
 
 const PLATFORM_PREFERENCE = "pagelens.workflowPlatformId";
 
-export function bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft }) {
+export async function launchWorkflowFeature(feature, platform, handlers) {
+  const launch = {
+    "product-listing": handlers.openProductListing,
+    "product-capture": handlers.openProductCapture,
+    "tiktok-mx-draft": handlers.openTiktokDraft,
+  };
+  const opened = Object.hasOwn(launch, feature.id)
+    ? await launch[feature.id]?.(feature, platform)
+    : await handlers.openMarketing({ mode: feature.id, force: true });
+  if (!opened) throw new Error("暂时无法打开此工作流。");
+}
+
+export function bindWorkflowCatalog(handlers) {
   const entry = $("btn-ptc-flow");
   const dialog = $("workflow-catalog-dialog");
   const platform = $("workflow-platform");
   const list = $("workflow-feature-list");
   const empty = $("workflow-feature-empty");
   const close = $("workflow-catalog-close");
+  const library = $("workflow-catalog-library");
   const status = $("workflow-catalog-status");
   const buttons = new Map();
   let current = workflowPlatforms[0];
@@ -27,14 +40,7 @@ export function bindWorkflowCatalog({ openProductListing, openMarketing, openTik
     opening = true;
     dialog.close();
     try {
-      const launch = {
-        "product-listing": openProductListing,
-        "tiktok-mx-draft": openTiktokDraft,
-      };
-      const opened = Object.hasOwn(launch, feature.id)
-        ? await launch[feature.id]?.(feature)
-        : await openMarketing({ mode: feature.id, force: true });
-      if (!opened) throw new Error("暂时无法打开此工作流。");
+      await launchWorkflowFeature(feature, current.id, handlers);
     } catch (error) {
       open();
       status.textContent = error?.message || "暂时无法打开此工作流。";
@@ -107,5 +113,9 @@ export function bindWorkflowCatalog({ openProductListing, openMarketing, openTik
   restorePlatform();
   entry.addEventListener("click", open);
   close.addEventListener("click", () => dialog.close());
+  library?.addEventListener("click", () => {
+    dialog.close();
+    void handlers.openProductLibrary?.();
+  });
   return open;
 }

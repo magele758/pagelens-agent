@@ -54,6 +54,8 @@ import { pickTargetTab, refreshTab } from "./tab-context.js";
 import { applyUiTheme, bindThemeEditor } from "./theme.js";
 import { delegatePanel, trustPanel } from "./trust-runtime.js";
 import { bindWorkflowCatalog } from "./workflow-catalog.js";
+import { bindWorkflowShortcuts } from "./workflow-shortcuts.js";
+import { bindProductCapturePanel } from "./product-capture-panel.js";
 import { bindShopeeMarketingPanel } from "../flows/shopee/marketing-panel.js";
 import { bindPtcFlow } from "../flows/shopee/product-listing/sidepanel/flow-ui.js";
 import { skillCommandText } from "../lib/slash.js";
@@ -201,7 +203,10 @@ function wire() {
       input.focus();
     },
   });
-  openCatalog = bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft });
+  const captureActions = bindProductCapturePanel({ getTargetTab: pickTargetTab, downloadText });
+  const workflowHandlers = { openProductListing, openMarketing, openTiktokDraft, ...captureActions };
+  openCatalog = bindWorkflowCatalog(workflowHandlers);
+  bindWorkflowShortcuts({ getTargetTab: pickTargetTab, handlers: workflowHandlers });
   try {
   on("btn-settings", "click", () => {
     if (state.view === "settings") {

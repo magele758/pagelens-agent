@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="sidechat.css" />
   <link rel="stylesheet" href="settings.css" />
   <link rel="stylesheet" href="workflow-catalog.css" />
+  <link rel="stylesheet" href="product-capture.css" />
   <link rel="stylesheet" href="../flows/shopee/marketing-panel.css" />
   <link rel="stylesheet" href="../vendor/katex/katex.min.css" />
 </head>
@@ -244,6 +245,11 @@
             <button type="button" id="btn-clear-attach">移除</button>
           </div>
           <div class="skills" id="skills"></div>
+          <section class="workflow-shortcuts" id="workflow-shortcuts" aria-label="当前页面工作流" hidden>
+            <span class="workflow-shortcut-site" id="workflow-shortcut-site"></span>
+            <div class="workflow-shortcut-items" id="workflow-shortcut-items"></div>
+            <p id="workflow-shortcut-status" role="status"></p>
+          </section>
           <div class="composer-input">
             <div class="slash-menu hidden" id="slash-menu" role="listbox" aria-label="快捷指令"></div>
             <div class="input-box">
@@ -901,7 +907,10 @@
   <dialog id="workflow-catalog-dialog" aria-labelledby="workflow-catalog-title">
     <header class="ptc-heading">
       <h2 id="workflow-catalog-title">工作流</h2>
-      <button type="button" id="workflow-catalog-close" class="icon-btn" aria-label="关闭工作流列表">×</button>
+      <div class="workflow-dialog-actions">
+        <button type="button" id="workflow-catalog-library" class="secondary mini">商品库</button>
+        <button type="button" id="workflow-catalog-close" class="icon-btn" aria-label="关闭工作流列表">×</button>
+      </div>
     </header>
     <fieldset class="workflow-platform-picker">
       <legend>平台</legend>
@@ -910,6 +919,29 @@
     <ul class="workflow-feature-list" id="workflow-feature-list" aria-label="可执行功能"></ul>
     <p id="workflow-feature-empty" role="status" hidden></p>
     <p id="workflow-catalog-status" role="status"></p>
+  </dialog>
+  <dialog id="product-capture-dialog" aria-labelledby="product-capture-title">
+    <header class="ptc-heading">
+      <h2 id="product-capture-title">提取商品</h2>
+      <button type="button" id="product-capture-close" class="icon-btn" aria-label="关闭商品资料">×</button>
+    </header>
+    <p id="product-capture-status" role="status"></p>
+    <ul id="product-capture-library" aria-label="保存的商品" hidden></ul>
+    <section id="product-capture-preview" aria-labelledby="product-capture-name" hidden>
+      <h3 id="product-capture-name"></h3>
+      <p id="product-capture-summary"></p>
+      <dl id="product-capture-fields"></dl>
+      <details class="product-capture-data">
+        <summary>查看完整商品数据</summary>
+        <pre id="product-capture-json"></pre>
+      </details>
+      <div class="product-capture-actions">
+        <button type="button" id="product-capture-save" class="primary">保存到插件</button>
+        <button type="button" id="product-capture-download" class="secondary">下载 JSON</button>
+        <button type="button" id="product-capture-directory" class="secondary">保存到目录</button>
+        <button type="button" id="product-capture-back" class="secondary" hidden>返回商品库</button>
+      </div>
+    </section>
   </dialog>
   <dialog id="shopee-marketing-dialog" aria-labelledby="shopee-marketing-title">
     <header class="ptc-heading">

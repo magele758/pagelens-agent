@@ -4,6 +4,11 @@ import { CLIPPINGS_STORAGE_KEY } from '../../extension/lib/clippings.js';
 const tabs = ['video', 'article'].map((kind, i) => ({
   id: 17 + i, windowId: 1, title: 'Fixture ' + kind, url: 'https://fixture.invalid/' + kind,
 }));
+tabs.push(
+  { id: 19, windowId: 1, title: 'Fixture Shopee seller', url: 'https://seller.shopee.cn/portal/marketing?cnsc_shop_id=42' },
+  { id: 20, windowId: 1, title: 'Fixture Amazon product', url: 'https://www.amazon.com/dp/B07MW4YRY9' },
+  { id: 21, windowId: 1, title: 'Fixture Temu seller', url: 'https://agentseller.temu.com/' },
+);
 let tab = tabs[0];
 const activations = new Set();
 document.addEventListener('fixture-activate-tab', event => {

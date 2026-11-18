@@ -12,6 +12,42 @@
 
 #workflow-catalog-dialog::backdrop { background: #1c191766; }
 
+.workflow-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+  margin: 0 0 5px;
+  font-size: 11px;
+}
+
+.workflow-shortcuts[hidden],
+#workflow-shortcut-status:empty { display: none; }
+
+.workflow-shortcut-site { color: var(--muted); font-weight: 600; }
+
+.workflow-shortcut-items {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.workflow-shortcut-items button {
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.workflow-shortcut-items button:hover { background: var(--accent-soft); border-color: var(--accent); }
+.workflow-shortcut-items button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+#workflow-shortcut-status { width: 100%; margin: 0; color: var(--danger); }
+
 .workflow-platform-picker {
   min-inline-size: 0;
   margin: 12px 0;
