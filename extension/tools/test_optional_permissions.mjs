@@ -86,11 +86,14 @@ for (const name of PREVIOUS_API) {
 for (const pattern of PREVIOUS_HOSTS) {
   assert.equal(declaredHosts.has(pattern), true, `upgrade keeps host ${pattern}`);
 }
-assert.deepEqual([...manifest.permissions].sort(), [...INSTALL_API].sort());
-assert.deepEqual([...(manifest.optional_permissions || [])].sort(), [...OPTIONAL_API].sort());
-assert.deepEqual([...(manifest.host_permissions || [])].sort(), []);
-assert.deepEqual([...(manifest.optional_host_permissions || [])].sort(), [...PREVIOUS_HOSTS].sort());
-assert.equal(manifest.permissions.includes("cookies"), false, "cookies is requested on first use");
+const GRANTED_API = [...new Set([...INSTALL_API, ...OPTIONAL_API])];
+assert.equal(manifest.name, "chrome-auto-agent");
+assert.deepEqual([...manifest.permissions].sort(), [...GRANTED_API].sort());
+assert.deepEqual(manifest.optional_permissions || [], []);
+assert.deepEqual([...(manifest.host_permissions || [])].sort(), [...PREVIOUS_HOSTS].sort());
+assert.deepEqual(manifest.optional_host_permissions || [], []);
+assert.equal(manifest.permissions.includes("cookies"), true, "cookies is granted at install");
+assert.equal(manifest.permissions.includes("nativeMessaging"), true, "native messaging is granted at install");
 assert.equal(manifest.permissions.includes("debugger"), true, "Chrome cannot make debugger optional");
 assert.equal((manifest.optional_permissions || []).includes("debugger"), false);
 for (const name of ["tts", "tabCapture"]) {
