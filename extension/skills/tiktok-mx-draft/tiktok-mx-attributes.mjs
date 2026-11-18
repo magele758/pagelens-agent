@@ -79,7 +79,18 @@ export async function sellerAttributes(expectedUrl, plan = null) {
         selected: choices.filter(e => e.getAttribute("aria-selected") === "true").map(e => e.innerText.trim()) });
     } finally {
       portal();
-      if (expanded()) toggle();
+      if (expanded()) {
+        guard();
+        const input = box()?.querySelector('input:not([type="hidden"]):not(:disabled)');
+        if (input) {
+          // The trigger can leave a searchable multi-select open. Escape is handled by its input.
+          input.dispatchEvent(new KeyboardEvent("keydown", {
+            key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true,
+          }));
+          if (expanded()) await pause(100);
+        }
+        if (expanded()) toggle();
+      }
       await waitForClosed();
     }
   }
