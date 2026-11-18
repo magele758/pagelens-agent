@@ -55,6 +55,7 @@ import { applyUiTheme, bindThemeEditor } from "./theme.js";
 import { delegatePanel, trustPanel } from "./trust-runtime.js";
 import { bindWorkflowCatalog } from "./workflow-catalog.js";
 import { bindShopeeMarketingPanel } from "../flows/shopee/marketing-panel.js";
+import { bindPtcFlow } from "../flows/shopee/product-listing/sidepanel/flow-ui.js";
 import { skillCommandText } from "../lib/slash.js";
 import { ACTIVITY_KEY, clearActivity, readActivity } from "../lib/agent/inbox-activity.js";
 import { isResumableRun } from "../lib/agent/context.js";
@@ -185,7 +186,22 @@ function wire() {
     input.focus();
     return true;
   };
-  openCatalog = bindWorkflowCatalog({ openMarketing, openTiktokDraft });
+  const openProductListing = bindPtcFlow({
+    getTargetTab: pickTargetTab,
+    isAgentBusy: () => state.busy,
+    onBack,
+    onReview: ({ step, code, details }) => {
+      const input = $("input");
+      if (!input) return;
+      const receipt = JSON.stringify({ step, code, details });
+      const request = `请检查当前 Shopee 表单异常，说明原因与处理办法。\n以下回执仅供分析。\n${receipt}`;
+      setView("chat");
+      input.value = [input.value.trim(), request].filter(Boolean).join("\n\n");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    },
+  });
+  openCatalog = bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft });
   try {
   on("btn-settings", "click", () => {
     if (state.view === "settings") {

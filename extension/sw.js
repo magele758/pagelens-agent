@@ -12,6 +12,7 @@ import { AGENT_TASK_EVENTS, onAgentTaskEvent } from "./lib/agent/delegate.js";
 import { installWindowMail } from "./lib/window-mail.js";
 import { installDelegate } from "./lib/agent/delegate-sw.js";
 import { installAgentGateway } from "./lib/bridge/gateway.js";
+import { nativeSend } from "./lib/native-host.js";
 
 applyOptionalLocalSettings().catch(() => {});
 installWindowMail(installDelegate());
@@ -52,6 +53,17 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "pl.ptc.readDirectory" || msg?.type === "pl.ptc.readSizeChartChunk") {
+    if (_sender?.id !== chrome.runtime.id || _sender?.url !== chrome.runtime.getURL("sidepanel/index.html")) return false;
+    const { path, root, folder, expectedPath, offset, revision, asset } = msg;
+    const request = msg.type === "pl.ptc.readDirectory"
+      ? { op: "fs", action: "loadProductDirectory", path }
+      : { op: "fs", action: "readProductSizeChartChunk", root, folder, expectedPath, offset, revision, asset };
+    nativeSend(request, { interactive: false })
+      .then(sendResponse)
+      .catch(error => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
   if (msg?.type === "pl.agentInbox.poll") {
     pollAgentInboxOnce()
       .then(sendResponse)

@@ -17,7 +17,7 @@ export async function browserFixture(name) {
   for (const node of document.querySelectorAll('script, link')) node.remove();
   const styles = graph ? ['graph.css'] : [
     'styles.css', 'themes.css', 'sidechat.css', 'settings.css', 'workflow-catalog.css',
-    '../flows/shopee/marketing-panel.css',
+    '../flows/shopee/marketing-panel.css', '../flows/shopee/product-listing/sidepanel/dialog.css',
   ];
   for (const file of styles) {
     const style = document.createElement('style');

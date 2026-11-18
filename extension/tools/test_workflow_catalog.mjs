@@ -34,8 +34,10 @@ test("selects a platform and opens the requested workflow without running it", a
   const onBack = () => openCatalog();
   const openMarketing = bindShopeeMarketingPanel({ getTargetTab: async () => tab, onBack });
   let selectedSkill;
+  let listingOpened = false;
+  const openProductListing = () => { listingOpened = true; return true; };
   const openTiktokDraft = feature => { selectedSkill = feature; return true; };
-  openCatalog = bindWorkflowCatalog({ openMarketing, openTiktokDraft });
+  openCatalog = bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft });
 
   const picker = byId("workflow-platform");
   const choices = () => [...document.querySelectorAll("#workflow-feature-list button")];
@@ -53,8 +55,12 @@ test("selects a platform and opens the requested workflow without running it", a
   picker.value = "shopee";
   picker.dispatchEvent(new window.Event("change"));
   assert.deepEqual(choices().map(item => item.dataset.workflow), [
-    "campaign-data", "campaign-draft", "voucher-data", "voucher-draft",
+    "product-listing", "campaign-data", "campaign-draft", "voucher-data", "voucher-draft",
   ]);
+
+  await launch("product-listing");
+  assert.ok(listingOpened);
+  openCatalog();
 
   for (const [id, title, readVisible] of [
     ["campaign-data", "活动数据", true],
