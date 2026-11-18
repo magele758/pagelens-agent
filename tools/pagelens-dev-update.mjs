@@ -25,6 +25,7 @@ const tests = [
   "tools/test-tiktok-mx-commerce.mjs",
   "tools/test-tiktok-mx-ptc.mjs",
   "tools/test-pagelens-directed-ptc.mjs",
+  "tools/test-pagelens-draft-repair-routing.mjs",
 ];
 const help = `Usage:
   node tools/pagelens-dev-update.mjs test

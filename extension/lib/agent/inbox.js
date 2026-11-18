@@ -619,19 +619,23 @@ export async function executeJob(
     now = () => Date.now(),
     auditLog = getAuditLog(),
     approvals = null,
+    directed = false,
   } = {},
 ) {
   const action = String(job?.action || "").trim();
+  const repairing = action === "ptc_repair_mx_draft";
+  if (repairing && (!directed || job.token != null))
+    return { ok: false, error: "TikTok draft repair requires a directed inbox request without a token" };
   let auth = null;
   if (job?.token != null && action !== "bridge_call") {
     const res = await authorizeJobToken(job, action, loadTokens, now);
     if (res.error) return res.error;
     auth = res.record;
   }
-  if (action === "ptc_inspect_mx_draft" || action === "ptc_create_mx_draft") {
+  if (repairing || action === "ptc_inspect_mx_draft" || action === "ptc_create_mx_draft") {
     const bridge = getBridge();
     if (!bridge) return { ok: false, error: "PageLens bridge unavailable" };
-    const run = action === "ptc_create_mx_draft" ? runNativeDraft : inspectDraftJob;
+    const run = action === "ptc_inspect_mx_draft" ? inspectDraftJob : runNativeDraft;
     return { ok: true, result: await run(job, bridge) };
   }
   if (action === "clipboard_write") return runClipboardWrite(job);
@@ -884,7 +888,7 @@ export async function pollAgentInboxOnce(deps = {}) {
           throw new Error("Agent prompts and cancellations use the shared inbox");
         result = development
           ? { ok: true, result: await developmentInboxJob(job, { directed, queued: names.length > 1 }) }
-          : await executeJob(job, { ...deps, settings });
+          : await executeJob(job, { ...deps, settings, directed });
       } catch (err) {
         result = { ok: false, error: err?.message || String(err) };
         if (development && err?.code === "DEVELOPMENT_BUSY") result.errorCode = err.code;

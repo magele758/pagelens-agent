@@ -23,6 +23,7 @@ jobs:
           node tools/test-tiktok-mx-commerce.mjs
           node tools/test-tiktok-mx-ptc.mjs
           node tools/test-pagelens-directed-ptc.mjs
+          node tools/test-pagelens-draft-repair-routing.mjs
       - name: Native host tests
         run: node native/test_host.mjs
       - name: Native gateway (socket broker + MCP shim) tests

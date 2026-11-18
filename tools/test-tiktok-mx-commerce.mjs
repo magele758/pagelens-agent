@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { attributeCode, checkAttributes, mxEditor, runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
+import { attributeCode, checkAttributes, mxEditor, repairCategoryOptionsCode, repairCategorySearchCode,
+  runMxDraftJob, runMxDraftRead, saveDraftCode } from "./tiktok-mx-editor.mjs";
 import { JSDOM } from "jsdom";
 import {
   commercialPlan,
@@ -627,5 +628,70 @@ console.log(
   assert.ok(portals.every(menu => menu.hidden), "the final delayed close must finish before returning");
   assert.equal(doc.querySelector("#foreign").hidden, false);
   assert.deepEqual(JSON.parse(JSON.stringify(catalog.map(({ name, selected }) => [name, selected]))), Object.entries(plan));
+  fixture.window.close();
+}
+
+// Targeted repair uses the existing editor's exact search choices and save button.
+{
+  const url = "https://seller.tiktokshopglobalselling.com/product/edit-draft/1738598470326847052?shop_region=MX";
+  const choice = "Pet Supplies - Pet Accessories - Keepsakes";
+  const unavailable = "Pet Supplies - Pet Accessories - Decorations";
+  const disabledClass = "Pet Supplies - Pet Accessories - Gifts";
+  const fixture = new JSDOM('<body><div id="product-cascader-select-view">Old</div>' +
+    '<div class="core-cascader-list-search-item" title="Other - Portal - Item"></div>' +
+    '<button id="save">另存为草稿</button><button id="submit">提交</button></body>', { url, runScripts: "outside-only" });
+  const win = fixture.window, doc = win.document;
+  Object.defineProperty(win.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
+  win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
+  const control = doc.querySelector("#product-cascader-select-view");
+  let selected = 0;
+  control.onclick = () => {
+    if (control.querySelector("input")) return;
+    control.insertAdjacentHTML("beforeend", '<input class="core-cascader-view-input" aria-controls="category-results">');
+    const panel = doc.createElement("ul");
+    panel.id = "category-results";
+    doc.body.append(panel);
+    for (const [label, disabled] of [[choice, null], [unavailable, "aria"], [disabledClass, "class"]]) {
+      const row = doc.createElement("li");
+      row.className = "core-cascader-list-search-item";
+      row.title = label;
+      if (disabled === "aria") row.setAttribute("aria-disabled", "true");
+      if (disabled === "class") row.classList.add("core-cascader-list-search-item-disabled");
+      row.onclick = () => {
+        assert.equal(disabled, null);
+        doc.body.insertAdjacentHTML("beforeend", '<div role="dialog">更改商品类目？属性信息将被清除<button>继续</button></div>');
+        const dialog = doc.querySelector('[role="dialog"]');
+        dialog.querySelector("button").onclick = () => {
+          control.textContent = choice;
+          panel.remove();
+          dialog.remove();
+          selected++;
+        };
+      };
+      panel.append(row);
+    }
+  };
+  const run = code => win.eval("(async()=>{" + code + "})()");
+  assert.throws(() => repairCategorySearchCode(url.replace("edit-draft/1738598470326847052", "create")), /existing MX/);
+  await assert.rejects(run(repairCategoryOptionsCode(url)), /Search the current draft/);
+  const search = await run(repairCategorySearchCode(url));
+  const input = doc.querySelector(search.selector);
+  assert.equal(input, doc.activeElement);
+  input.value = "Pet";
+  const choices = await run(repairCategoryOptionsCode(url));
+  assert.deepEqual([...choices.choices], [choice]);
+  assert.equal(choices.choice, null);
+  await assert.rejects(run(repairCategoryOptionsCode(url, unavailable)), /disabled/);
+  await assert.rejects(run(repairCategoryOptionsCode(url, disabledClass)), /disabled/);
+  await assert.rejects(run(repairCategoryOptionsCode(url, "Keepsakes")), /full category path/);
+  assert.equal(selected, 0);
+  assert.equal((await run(repairCategoryOptionsCode(url, choice.replaceAll(" - ", "/")))).choice, choice);
+  assert.equal(selected, 1);
+  doc.querySelector("#submit").onclick = () => assert.fail("Draft repair must not submit a product");
+  doc.querySelector("#save").onclick = () => {
+    doc.body.insertAdjacentHTML("beforeend", '<div role="alert">草稿保存成功</div>');
+  };
+  await assert.rejects(run(saveDraftCode(url.replace("1738598470326847052", "1738598470326847053"))), /changed/);
+  assert.equal((await run(saveDraftCode(url))).message, "草稿保存成功");
   fixture.window.close();
 }
