@@ -47,12 +47,16 @@ document.querySelector("#sku_stock_10004_16066 svg").addEventListener("click", (
   dialog.innerHTML = `
     ${title}
     <section>${input("bulk")}<button>批量填写</button></section>
-    <table class="performance-table_performanceTable__mock"><thead><tr><th>颜色</th><th>尺码</th><th>发货仓</th>
-      <th>当前库存<span>（选填）</span></th><th>覆盖站点</th></tr></thead><tbody>
+    <table class="another-class performance-table_performanceTable__mock"><thead><tr><th>颜色</th><th>尺码</th><th>发货仓</th>
+      <th>当前库存 （选填，若填写请确保库存数准确）</th><th>覆盖站点</th></tr></thead><tbody>
       <tr><td rowspan="${warehouseConflict ? 2 : 1}">花色</td><td rowspan="2">S ${currentSku}</td>
         <td>123</td><td>${input("current")}</td><td>美国站</td></tr>
       ${otherRow}</tbody></table>
     <button id="confirm">确认</button><button id="cancel">取消</button>`;
+  // Match the live React tree, where the header cells are direct children.
+  const head = dialog.querySelector("thead");
+  head.replaceChildren(...head.rows[0].cells);
+  assert.equal(head.rows.length, 0);
   dialog.querySelector("#confirm").addEventListener("click", () => {
     confirmed++;
     assert.equal(dialog.querySelector("#other").value, "19");

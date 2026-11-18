@@ -29,15 +29,22 @@ export async function temuStockPage({ href, kind, key, value, warehouse }) {
   const numeric = value => (typeof value === "string" || typeof value === "number") &&
     /^\d+$/u.test(clean(value)) && Number.isSafeInteger(Number(value));
 
-  function columns(table, names) {
-    const lastHeader = table.tHead?.rows[table.tHead.rows.length - 1];
-    if (!lastHeader) return [];
-    return [...lastHeader.cells].filter(cell => cell.colSpan === 1 && visible(cell) && names.some(name =>
-      exact(cell, name)));
+  function headerCells(table) {
+    const head = table.tHead;
+    if (!head) return [];
+    const lastRow = head.rows[head.rows.length - 1];
+    // Temu's React table also mounts the header cells directly into <thead>.
+    return lastRow ? [...lastRow.cells] : [...head.children].filter(cell => cell.matches("th,td"));
   }
 
-  function columnIndex(header) {
-    return [...header.parentElement.cells].slice(0, header.cellIndex).reduce((total, cell) => total + cell.colSpan, 0);
+  function columns(table, names) {
+    return headerCells(table).filter(cell => cell.colSpan === 1 && visible(cell) && names.some(name =>
+      exact(cell, name) || name === "当前库存" && /^当前库存\s*\(选填[^()]*\)$/u.test(labelKey(cell.textContent))));
+  }
+
+  function columnIndex(table, header) {
+    const cells = headerCells(table);
+    return cells.slice(0, cells.indexOf(header)).reduce((total, cell) => total + cell.colSpan, 0);
   }
 
   function tableRows(table) {
@@ -74,7 +81,7 @@ export async function temuStockPage({ href, kind, key, value, warehouse }) {
   }
 
   function modalInput(dialog) {
-    const table = unique([...dialog.querySelectorAll('table[class^="performance-table_performanceTable__"]')].filter(node =>
+    const table = unique([...dialog.querySelectorAll('table[class*="performance-table_performanceTable__"]')].filter(node =>
       visible(node) && columns(node, ["当前库存"]).length === 1 && columns(node, ["发货仓"]).length === 1 &&
       columns(node, ["覆盖站点"]).length === 1));
     if (!table) return null;
@@ -82,8 +89,8 @@ export async function temuStockPage({ href, kind, key, value, warehouse }) {
     const [warehouseColumn] = columns(table, ["发货仓"]);
     const marker = unique([...table.querySelectorAll("tbody td")].filter(cell => visible(cell) && exact(cell, "当前sku")));
     if (!marker) return null;
-    const warehouseIndex = columnIndex(warehouseColumn);
-    const stockIndex = columnIndex(stock);
+    const warehouseIndex = columnIndex(table, warehouseColumn);
+    const stockIndex = columnIndex(table, stock);
     const rows = tableRows(table).filter(({ row }) => visible(row));
     const current = rows.find(({ row }) => row === marker.parentElement);
     if (!current) return null;

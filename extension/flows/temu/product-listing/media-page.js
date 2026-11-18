@@ -234,25 +234,49 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     if (!filenames.length) return [];
     const names = new Set(filenames);
     const found = new Map();
+    function matchingNames(text) {
+      const libraryFilename = clean(text).replace(/\.(?:jpe?g|png|webp)$/iu, "");
+      const sourceOfCrop = libraryFilename.replace(/-\d+$/u, "");
+      const candidates = [...new Set([libraryFilename, sourceOfCrop])].filter(filename => names.has(filename));
+      return { libraryFilename, candidates };
+    }
+    function record({ libraryFilename, candidates }, image, card) {
+      const url = new URL(image.currentSrc || image.src);
+      const src = url.origin + url.pathname;
+      const identity = clean(card.getAttribute("data-material-id") || card.getAttribute("data-id")) || src;
+      for (const filename of candidates) {
+        found.set(filename + "\0" + libraryFilename + "\0" + identity, { filename, libraryFilename, identity, src, target: image });
+      }
+    }
+
+    const cardTemplate = 'div[class*="index-module_itemContainer__"] > div[class*="index-module_cardContainer__"]';
+    const libraryCards = [...dialog.querySelectorAll(cardTemplate)].filter(visible);
+    if (libraryCards.length) {
+      for (const card of libraryCards) {
+        const holder = unique([...card.querySelectorAll(':scope > div[class*="index-module_itemContent__"] > div[class*="index-module_materialName__"]')].filter(visible));
+        const label = holder && unique([...holder.querySelectorAll('div[data-testid="beast-core-ellipsis"] > div[class*="elli_outerWrapper_"]')]);
+        if (!label) continue;
+        const matched = matchingNames(label.getAttribute("title") || holder.getAttribute("title") || label.innerText || label.textContent);
+        if (!matched.candidates.length) continue;
+        const image = unique([...card.querySelectorAll(':scope > div[class*="index-module_cover__"] > div[class*="index-module_imageContainer__"] > img[src]')]
+          .filter(node => visible(node) && /^https:\/\//iu.test(node.currentSrc || node.src)));
+        if (image) record(matched, image, card);
+      }
+      return [...found.values()];
+    }
+
     for (const label of dialog.querySelectorAll('span,div,p,[title],img[alt]')) {
       if (!visible(label)) continue;
       const labelText = label.getAttribute("title") || label.getAttribute("alt") ||
         (label.childElementCount <= 1 ? label.textContent : "");
-      const libraryFilename = clean(labelText).replace(/\.(?:jpe?g|png|webp)$/iu, "");
-      const sourceOfCrop = libraryFilename.replace(/-\d+$/u, "");
-      const candidates = [...new Set([libraryFilename, sourceOfCrop])].filter(filename => names.has(filename));
-      if (!candidates.length) continue;
+      const matched = matchingNames(labelText);
+      if (!matched.candidates.length) continue;
       const start = label.querySelector("img") ? label : label.parentElement;
       for (let card = start, depth = 0; card && card !== dialog && depth < 6; card = card.parentElement, depth++) {
         const image = unique([...card.querySelectorAll("img[src]")].filter(node => visible(node) &&
           /^https:\/\//iu.test(node.src) && !node.closest('a[href]') && !node.matches('[class*="icon" i]')));
         if (!image) continue;
-        const url = new URL(image.currentSrc || image.src);
-        const src = url.origin + url.pathname;
-        const identity = clean(card.getAttribute("data-material-id") || card.getAttribute("data-id")) || src;
-        for (const filename of candidates) {
-          found.set(filename + "\0" + libraryFilename + "\0" + identity, { filename, libraryFilename, identity, src, target: image });
-        }
+        record(matched, image, card);
         break;
       }
     }

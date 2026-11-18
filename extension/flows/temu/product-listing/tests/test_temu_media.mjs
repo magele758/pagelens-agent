@@ -42,8 +42,15 @@ function fixture(html) {
   let file;
 
   function addCard(name, identity) {
-    cards.insertAdjacentHTML("afterbegin", `<div data-material-id="${identity}"><img src="https://cdn.invalid/${identity}?thumbnail=1"><span>${name}.jpg</span></div>`);
-    cards.firstElementChild.querySelector("img").addEventListener("click", () => {
+    cards.insertAdjacentHTML("afterbegin", `
+      <div class="index-module_itemContainer__test"><div class="index-module_cardContainer__test" data-material-id="${identity}">
+        <div class="index-module_cover__test"><div class="index-module_imageContainer__test"><img width="144" src="https://cdn.invalid/${identity}?thumbnail=1"></div></div>
+        <div class="index-module_itemContent__test">
+          <div class="index-module_materialName__test"><div data-testid="beast-core-ellipsis"><div class="elli_outerWrapper_test">${name}.jpg</div></div></div>
+          <img class="status-badge" src="https://cdn.invalid/status-${identity}.png">
+        </div>
+      </div></div>`);
+    cards.firstElementChild.querySelector('[class*="index-module_imageContainer__"] > img').addEventListener("click", () => {
       clicked.push(identity);
       count.textContent = `已选 ${clicked.length} 个，可选 ${10 - clicked.length} 个`;
     });
@@ -109,7 +116,7 @@ function fixture(html) {
     expected.push(result.card);
   }
   assert.ok(doc.querySelector('#unrelated-mask [data-testid="beast-core-portal"]'));
-  assert.equal(cards.firstElementChild.dataset.materialId, "fit-new");
+  assert.equal(cards.firstElementChild.firstElementChild.dataset.materialId, "fit-new");
   const selected = await media({ kind: "select-new", baseline: 0, previous: opened.knownMedia, expected });
   assert.equal(selected.ok, true);
   assert.deepEqual(Array.from(selected.media, item => item.src), filenames.map(name => `https://cdn.invalid/${name}-new`));

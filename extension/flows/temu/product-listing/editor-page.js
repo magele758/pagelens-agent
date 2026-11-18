@@ -212,7 +212,9 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
         const prompt = clean(input?.placeholder);
         const saved = prompt && !/^(?:选择或自定义颜色|请选择颜色|请选择|请输入)$/u.test(prompt) &&
           (!input.value || clean(input.value) === prompt) ? prompt : "";
-        const variant = clean(color?.querySelector('[class*="ST_selectValueSingle_"]')?.textContent || saved);
+        const legacy = color && !color.querySelector('[class*="colour-spec-select_colorSpecSelect__"]')
+          ? color.querySelector('input[placeholder="选择或自定义颜色"]')?.value : "";
+        const variant = clean(color?.querySelector('[class*="ST_selectValueSingle_"]')?.textContent || saved || legacy);
         if (variant) list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, images, variant, minimum: 3 });
       }
     }
