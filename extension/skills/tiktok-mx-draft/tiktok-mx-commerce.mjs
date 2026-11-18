@@ -285,88 +285,128 @@ function commerceDom(localizedColor) {
   };
 }
 
-export async function sellerVariants(ui, plan) {
-  const {
-    all,
-    field,
-    text,
-    norm,
-    visible,
-    wait,
-    sleep,
-    names,
-    options,
-    optionLabels,
-    axisMatches,
-    axisKey,
-    brandValue,
-  } = ui;
+export async function sellerBrand(ui, brand) {
+  const { all, field, text, norm, visible, wait, sleep, brandValue } = ui;
   ui.verifyEditor();
-  if (brandValue() !== plan.brand) {
-    const box = field("brand").querySelector("[role=combobox]");
-    box.querySelector(".core-select-view")?.click();
-    const menu = () =>
-      document.getElementById(box.getAttribute("aria-controls"));
-    const match = () =>
-      all("[role=option]", menu() || box).find(
-        (e) =>
-          visible(e) &&
-          text(e)
-            .split("\n")
-            .some((v) => norm(v) === norm(plan.brand)),
-      );
-    await sleep(200);
-    if (!match()) {
-      const input = box.querySelector("input");
-      if (input && !input.readOnly) {
-        input.focus();
-        document.execCommand("insertText", false, plan.brand);
-      }
+  if (brandValue() === brand) return true;
+  const box = field("brand").querySelector("[role=combobox]");
+  box.querySelector(".core-select-view")?.click();
+  const menu = () =>
+    document.getElementById(box.getAttribute("aria-controls"));
+  const match = () =>
+    all("[role=option]", menu() || box).find(e =>
+      visible(e) && text(e).split("\n").some(v => norm(v) === norm(brand)));
+  await sleep(200);
+  if (!match()) {
+    const input = box.querySelector("input");
+    if (input && !input.readOnly) {
+      input.focus();
+      document.execCommand("insertText", false, brand);
     }
-    (await wait(match, "brand " + plan.brand)).click();
-    await wait(() => norm(brandValue()) === norm(plan.brand), "selected brand");
   }
+  (await wait(match, "brand " + brand)).click();
+  await wait(() => norm(brandValue()) === norm(brand), "selected brand");
+  return true;
+}
+
+export async function sellerVariantAxis(ui, axis) {
+  const { all, text, visible, wait, sleep, names, options, optionLabels, axisMatches, axisKey } = ui;
+  ui.verifyEditor();
   const toggle = all("button[role=switch]").find(
     (e) => text(e.parentElement.parentElement.parentElement) === "添加变体",
   );
   if (toggle?.getAttribute("aria-checked") === "false") toggle.click();
   const name = await wait(() => names()[0], "variant name");
-  if (names().length !== 1)
-    throw new Error("Existing draft has a different variant structure");
-  const box = name.querySelector("[role=combobox]");
-  if (!axisMatches(name, plan.axis)) {
-    if (options().some((e) => optionLabels(e).length))
-      throw new Error("Existing variant name differs: " + ui.axisLabels(name).join(" / "));
-    box.querySelector("input").click();
-    await sleep(200);
-    const popup = control => document.getElementById(
-      control.getAttribute("aria-controls") || control.getAttribute("aria-owns"),
-    );
-    const menu = () => popup(box) || name;
-    const item = 'li,[role=menuitem],[role=option]';
-    const axis = axisKey(plan.axis);
-    const exact = all(item, menu()).find(e =>
-      visible(e) && !e.querySelector(item) && e.getAttribute("aria-disabled") !== "true" &&
-      [text(e), ...all("span", e).map(text)].some(label => axisKey(label) === axis));
-    if (exact) exact.click();
-    else {
-      const button = (label, root) => all("button", root).find(e => visible(e) && text(e) === label);
-      const customize = await wait(() => button("新增", menu()), "add variant name");
-      customize.click();
-      const add = await wait(() => button("添加", popup(customize) || menu()), "custom name");
-      const input = add.parentElement.querySelector("input:not([readonly])");
-      if (!input) throw Error("Custom variant name input unavailable");
-      input.focus();
-      document.execCommand("insertText", false, plan.axis);
-      await wait(() => !add.disabled, "custom name enabled");
-      await sleep(200);
-      add.click();
-    }
-    await wait(
-      () => names()[0] && axisMatches(names()[0], plan.axis),
-      "selected variant name",
-    );
+  const selected = () => {
+    const slots = names();
+    return slots.length === 1 && axisMatches(slots[0], axis);
+  };
+  if (selected()) return true;
+  const slotId = name.dataset.id;
+  const emptySlot = () => {
+    const slots = names();
+    const slot = slots[0];
+    if (slots.length !== 1 || slot.dataset.id !== slotId)
+      throw Error("Variant name slot changed before selection");
+    const placeholder = slot.querySelector("[role=combobox] input")?.placeholder;
+    const labels = ui.axisLabels(slot).filter(label => label && label !== placeholder);
+    if (labels.length || options().some(e => optionLabels(e).length) || ui.rows().length)
+      throw Error("Existing variant name differs: " + labels.join(" / "));
+    return slot;
+  };
+  const popup = control => document.getElementById(
+    control?.getAttribute("aria-controls") || control?.getAttribute("aria-owns"),
+  );
+  const controls = () => {
+    const slot = emptySlot();
+    const box = slot.querySelector("[role=combobox]");
+    const trigger = box?.querySelector("input");
+    if (!trigger) throw Error("Variant name input unavailable");
+    const portal = popup(box);
+    const expanded = box.getAttribute("aria-expanded") ?? trigger.getAttribute("aria-expanded");
+    return { trigger, menu: portal || slot, open: expanded === null ? visible(portal) : expanded === "true" };
+  };
+  const button = (menu, label) => {
+    const footer = menu.querySelector(".core-cascader-list-footer") || menu;
+    return all("button", footer).find(e => visible(e) && text(e) === label);
+  };
+  const enabled = e => e && !e.disabled && e.getAttribute("aria-disabled") !== "true";
+  const open = () => {
+    const control = controls();
+    if (!control.open) control.trigger.click();
+  };
+
+  open();
+  await sleep(200);
+  if (selected()) return true;
+  const item = 'li,[role=menuitem],[role=option]';
+  const key = axisKey(axis);
+  const exact = all(item, controls().menu).find(e =>
+    visible(e) && !e.querySelector(item) && enabled(e) &&
+    [text(e), ...all("span", e).map(text)].some(label => axisKey(label) === key));
+  if (exact) {
+    exact.click();
+    const deadline = Date.now() + 800;
+    while (!selected() && Date.now() < deadline) await sleep(200);
+    if (selected()) return true;
+    open();
   }
+  const customize = await wait(() => {
+    if (selected()) return true;
+    const candidate = button(controls().menu, "新增");
+    return enabled(candidate) && candidate;
+  }, "add variant name");
+  if (customize === true) return true;
+  customize.click();
+  const customForm = () => {
+    const { menu } = controls();
+    const portal = menu.contains(customize) && popup(customize);
+    const add = button(portal || menu, "添加");
+    const input = add?.parentElement.querySelector("input:not([readonly]):not([disabled])");
+    return visible(input) && { add, input };
+  };
+  const form = await wait(() => selected() || customForm(), "custom name");
+  if (form === true) return true;
+  form.input.focus();
+  form.input.select();
+  document.execCommand("insertText", false, axis);
+  const add = await wait(() => {
+    if (selected()) return true;
+    const form = customForm();
+    return form && form.input.value === axis && enabled(form.add) && form.add;
+  }, "custom name enabled");
+  if (add === true) return true;
+  add.click();
+  await wait(selected, "selected variant name");
+  return true;
+}
+
+export async function sellerVariants(ui, plan) {
+  const { all, field, text, norm, wait, sleep, names, options, optionLabels, axisMatches, brandValue } = ui;
+  ui.verifyEditor();
+  const slots = names();
+  if (norm(brandValue()) !== norm(plan.brand) || slots.length !== 1 || !axisMatches(slots[0], plan.axis))
+    throw Error("Brand or variant axis changed before writing SKU options");
   for (const sku of plan.skus) {
     const matches = () =>
       options().find((e) =>
@@ -519,7 +559,7 @@ export async function sellerNumbers(ui, readState, mode, plan) {
     throw new Error("Unrecognized weight or dimension units");
   if (
     plan.brand &&
-    (brandValue() !== plan.brand ||
+    (norm(brandValue()) !== norm(plan.brand) ||
       names().length !== 1 ||
       !axisMatches(names()[0], plan.axis))
   )
