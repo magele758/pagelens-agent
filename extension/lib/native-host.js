@@ -19,8 +19,8 @@ export function describeNativeError(err, extensionId) {
   return msg || "Native Host 调用失败。";
 }
 
-export async function nativeSend(message, { timeoutMs = 12000 } = {}) {
-  const denied = await requireOptionalFeature("nativeMessaging");
+export async function nativeSend(message, { timeoutMs = 12000, interactive = true, userGesture = false } = {}) {
+  const denied = await requireOptionalFeature("nativeMessaging", { interactive, userGesture });
   if (denied) return { ok: false, error: denied };
   if (typeof chrome === "undefined" || typeof chrome.runtime?.sendNativeMessage !== "function") {
     return { ok: false, error: "当前环境没有 Native Messaging。" };
@@ -46,9 +46,9 @@ export async function nativeSend(message, { timeoutMs = 12000 } = {}) {
   }
 }
 
-export async function pingNativeHost() {
+export async function pingNativeHost(options) {
   const started = Date.now();
-  const res = await nativeSend({ op: "ping" });
+  const res = await nativeSend({ op: "ping" }, options);
   return { ...res, ms: Date.now() - started };
 }
 

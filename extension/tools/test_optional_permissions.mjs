@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
-import { chromeCall, runJsInTab } from "../lib/chrome.js";
+import { captureTab, chromeCall, inject, runJsInTab } from "../lib/chrome.js";
 import { runJs } from "../lib/agent/page-fns.js";
 import { acquireCookiesApi } from "../lib/agent/cookie-tools.js";
 import {
@@ -88,15 +88,15 @@ for (const pattern of PREVIOUS_HOSTS) {
 }
 assert.deepEqual([...manifest.permissions].sort(), [...INSTALL_API].sort());
 assert.deepEqual([...(manifest.optional_permissions || [])].sort(), [...OPTIONAL_API].sort());
-for (const name of ["tts", "tabCapture"]) {
-  assert.equal(manifest.permissions.includes(name), false, `${name} is not an install permission`);
-  assert.equal((manifest.optional_permissions || []).includes(name), false, `${name} is not requested`);
-}
 assert.deepEqual([...(manifest.host_permissions || [])].sort(), []);
 assert.deepEqual([...(manifest.optional_host_permissions || [])].sort(), [...PREVIOUS_HOSTS].sort());
 assert.equal(manifest.permissions.includes("cookies"), false, "cookies is requested on first use");
 assert.equal(manifest.permissions.includes("debugger"), true, "Chrome cannot make debugger optional");
 assert.equal((manifest.optional_permissions || []).includes("debugger"), false);
+for (const name of ["tts", "tabCapture"]) {
+  assert.equal(manifest.permissions.includes(name), false, `${name} is not an install permission`);
+  assert.equal((manifest.optional_permissions || []).includes(name), false, `${name} is not requested`);
+}
 
 assert.equal(originPatternFromUrl("https://example.com/a?q=1"), "https://example.com/*");
 assert.equal(originPatternFromUrl("https://example.com:8443/a"), "https://example.com:8443/*");
@@ -152,6 +152,130 @@ function fakeApi(contains) {
   assert.equal(requestedBeforeConfirm, 0, "request waits for the user to confirm");
   assert.equal(result.granted, true);
   assert.deepEqual(api.requests, [{ permissions: ["history"] }]);
+}
+
+{
+  const api = fakeApi(() => false);
+  const grant = ensureOptionalAccess({ permission: "nativeMessaging", permissionsApi: api, userGesture: true });
+  assert.deepEqual(api.requests, [{ permissions: ["nativeMessaging"] }], "direct click starts the Chrome request immediately");
+  assert.equal((await grant).granted, true);
+}
+
+{
+  const granted = new Set();
+  const requests = [];
+  const listeners = [];
+  const api = {
+    contains: async ({ origins }) => granted.has(origins?.[0]),
+    request: async ({ origins }) => {
+      requests.push(origins[0]);
+      granted.add(origins[0]);
+      return true;
+    },
+    onRemoved: { addListener: (listener) => listeners.push(listener) },
+  };
+  globalThis.chrome = { permissions: api };
+  try {
+    const root = "https://seller.shopee.cn";
+    const first = ensureOptionalAccess({ url: root, userGesture: true, tabId: 12 });
+    const concurrent = ensureOptionalAccess({ url: root, tabId: 13 });
+    assert.equal(await first, await concurrent, "both callers wait for the one active Chrome request");
+    assert.deepEqual(requests, [root + "/*"]);
+    resetPermissionPrompter();
+    const reused = await ensureOptionalAccess({ url: root + "/goods", tabId: 13, interactive: false });
+    assert.equal(reused.granted, true, "Chrome keeps the site grant after extension state is reset");
+    assert.equal(reused.already, true);
+    granted.clear();
+    listeners.forEach((fn) => fn({ origins: [root + "/*"] }));
+    assert.equal((await ensureOptionalAccess({ url: root, interactive: false })).granted, false);
+    assert.deepEqual(requests, [root + "/*"], "passive checks do not request revoked permissions");
+  } finally {
+    delete globalThis.chrome;
+    resetPermissionPrompter();
+  }
+}
+
+{
+  const checks = [];
+  const api = fakeApi((query) => {
+    checks.push(query);
+    return Boolean(query.origins?.includes("https://seller.shopee.cn/*"));
+  });
+  globalThis.chrome = {
+    permissions: api,
+    tabs: { get: async () => ({ url: "https://seller.shopee.cn/listing" }) },
+    scripting: { executeScript: async () => [{ result: "page read" }] },
+  };
+  try {
+    assert.equal(await inject(12, () => "page read", [], { interactive: false }), "page read");
+    assert.deepEqual(checks, [{ origins: ["https://seller.shopee.cn/*"] }]);
+    assert.deepEqual(api.requests, [], "authorized tabs do not need a second global tabs permission");
+  } finally {
+    delete globalThis.chrome;
+    resetPermissionPrompter();
+  }
+}
+
+{
+  let granted = false;
+  const api = fakeApi(() => granted);
+  const requests = [];
+  api.addHostAccessRequest = async (request) => requests.push(request);
+  const options = { url: "https://seller.shopee.cn/listing", tabId: 12, permissionsApi: api };
+  const passive = await ensureOptionalAccess({ ...options, interactive: false });
+  assert.equal(passive.granted, false);
+  assert.equal(requests.length, 0, "prefetch must not initiate authorization");
+  const first = await ensureOptionalAccess(options);
+  assert.equal(first.requestPending, true);
+  assert.deepEqual(requests, [{ tabId: 12, pattern: "https://seller.shopee.cn/*" }]);
+  granted = true;
+  assert.equal((await ensureOptionalAccess({ ...options, tabId: 13 })).granted, true);
+  assert.equal(requests.length, 1, "Chrome's site grant is reused by another tab");
+  assert.equal(api.requests.length, 0);
+}
+
+{
+  const api = fakeApi(() => false);
+  const requests = [];
+  api.addHostAccessRequest = async (request) => requests.push(request);
+  globalThis.chrome = {
+    permissions: api,
+    tabs: {
+      get: async (id) => ({ id }),
+    },
+  };
+  try {
+    await assert.rejects(inject(12, () => {}, [], { interactive: false }), /无法读取当前标签地址/);
+    assert.deepEqual(requests, [], "passive tab preview does not show a grant request");
+    await assert.rejects(inject(12, () => {}), /Chrome 工具栏/);
+    assert.deepEqual(requests, [{ tabId: 12 }], "Chrome targets the selected tab without reading global tab history");
+    assert.deepEqual(api.requests, []);
+  } finally {
+    delete globalThis.chrome;
+    resetPermissionPrompter();
+  }
+}
+
+{
+  const original = { id: 12, windowId: 3, active: true, url: "https://seller.shopee.cn/listing" };
+  let active = { ...original, id: 13 };
+  globalThis.chrome = {
+    permissions: fakeApi(() => true),
+    tabs: {
+      get: async () => original,
+      query: async () => [active],
+      captureVisibleTab: async () => assert.fail("another page is active"),
+    },
+  };
+  try {
+    await assert.rejects(captureTab(original.id, 5), /窗口/);
+    await assert.rejects(captureTab(original.id, original.windowId), /当前标签页已变化/);
+    active = { ...original, url: "https://seller.shopee.cn/orders" };
+    await assert.rejects(captureTab(original.id, original.windowId), /当前标签页已变化/);
+  } finally {
+    delete globalThis.chrome;
+    resetPermissionPrompter();
+  }
 }
 
 {
@@ -287,7 +411,7 @@ function fakeApi(contains) {
   };
   const first = ensureOptionalAccess({ permission: "downloads", permissionsApi: api, prompt });
   const second = ensureOptionalAccess({ permission: "downloads", permissionsApi: api, prompt });
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls, 1, "one feature shares one prompt");
   release();
   const [a, b] = await Promise.all([first, second]);
@@ -317,6 +441,10 @@ function fakeApi(contains) {
   assert.equal(isAllowedPermissionQuery({ permissions: ["cookies"] }), true);
   assert.equal(isAllowedPermissionQuery({ permissions: ["management"] }), false);
   assert.equal(isAllowedPermissionQuery({ permissions: ["debugger"] }), false);
+  const api = fakeApi(() => false);
+  const broad = await ensureOptionalAccess({ originPattern: "<all_urls>", permissionsApi: api, userGesture: true });
+  assert.equal(broad.granted, false);
+  assert.deepEqual(api.requests, []);
 }
 
 {
@@ -354,6 +482,43 @@ function fakeApi(contains) {
 
 {
   const dom = new JSDOM("<!doctype html><body></body>");
+  let granted = false;
+  let requestCount = 0;
+  const api = { contains: async () => granted };
+  const query = { origins: ["https://seller.shopee.cn/*"] };
+  const open = () => mountPermissionPrompt(dom.window.document, {
+    query,
+    permissionsApi: api,
+    request: async () => {
+      requestCount += 1;
+      granted = true;
+      return true;
+    },
+  });
+  const first = open();
+  const second = open();
+  await new Promise((resolve) => setImmediate(resolve));
+  dom.window.document.querySelector("[data-pl-permission-grant]").click();
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  assert.equal(requestCount, 1, "queued duplicates recheck Chrome's grant before drawing");
+  assert.equal(dom.window.document.querySelector(".pl-permission"), null);
+}
+
+{
+  const dom = new JSDOM("<!doctype html><body></body>");
+  const options = {
+    query: { permissions: ["history"] },
+    request: () => assert.fail("declining did not issue a Chrome request"),
+  };
+  const first = mountPermissionPrompt(dom.window.document, options);
+  const duplicate = mountPermissionPrompt(dom.window.document, options);
+  dom.window.document.querySelector("[data-pl-permission-deny]").click();
+  assert.deepEqual(await Promise.all([first, duplicate]), [false, false]);
+  assert.equal(dom.window.document.querySelector(".pl-permission"), null, "one denial closes all duplicate prompts");
+}
+
+{
+  const dom = new JSDOM("<!doctype html><body></body>", { pretendToBeVisual: true });
   const requests = [];
   const chromeRef = {
     runtime: {
