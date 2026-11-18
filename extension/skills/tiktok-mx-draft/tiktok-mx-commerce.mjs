@@ -150,8 +150,11 @@ export function commercialPlan(copy, source) {
   };
 }
 
-// Serialized by PageLens and executed in the seller editor. Keep browser helpers inside this function.
-function commerceDom() {
+// Seller Center may render the standard Color axis as 颜色 in an MX draft.
+const localizedColor = /^颜色$/;
+
+// Serialized by PageLens and executed in the seller editor.
+function commerceDom(localizedColor) {
   const all = (selector, root = document) =>
     Array.from(root.querySelectorAll(selector));
   const field = (name) =>
@@ -211,7 +214,8 @@ function commerceDom() {
     const labels = all("span", value).filter(s => !s.children.length).map(text).filter(Boolean);
     return labels.length ? labels : [text(value)];
   };
-  const axisMatches = (e, axis) => axisLabels(e).some(label => norm(label) === norm(axis));
+  const axisKey = label => norm(label).replace(localizedColor, "color");
+  const axisMatches = (e, axis) => axisLabels(e).some(label => axisKey(label) === axisKey(axis));
   const brandValue = () =>
     text(field("brand")?.querySelector(".core-select-view-value"));
   const rows = () =>
@@ -270,6 +274,7 @@ function commerceDom() {
     optionLabels,
     axisLabels,
     axisMatches,
+    axisKey,
     brandValue,
     rows,
     units,
@@ -293,6 +298,7 @@ export async function sellerVariants(ui, plan) {
     options,
     optionLabels,
     axisMatches,
+    axisKey,
     brandValue,
   } = ui;
   ui.verifyEditor();
@@ -337,10 +343,11 @@ export async function sellerVariants(ui, plan) {
       control.getAttribute("aria-controls") || control.getAttribute("aria-owns"),
     );
     const menu = () => popup(box) || name;
-    const exact = all('li,[role=menuitem],[role=option]', menu()).find(
-      e => visible(e) && e.getAttribute("aria-disabled") !== "true" &&
-        [text(e), ...all("span", e).map(text)].some(label => norm(label) === norm(plan.axis)),
-    );
+    const item = 'li,[role=menuitem],[role=option]';
+    const axis = axisKey(plan.axis);
+    const exact = all(item, menu()).find(e =>
+      visible(e) && !e.querySelector(item) && e.getAttribute("aria-disabled") !== "true" &&
+      [text(e), ...all("span", e).map(text)].some(label => axisKey(label) === axis));
     if (exact) exact.click();
     else {
       const button = (label, root) => all("button", root).find(e => visible(e) && text(e) === label);
@@ -559,12 +566,13 @@ export async function sellerNumbers(ui, readState, mode, plan) {
 // Each submission stays within PageLens's run_js source limit. Send only the
 // current batch of SKUs; provenance belongs in the local receipt.
 export function commerceScript(fn, ...args) {
+  const domSource = commerceDom.toString().replace(/^ *\/\/.*\n/gm, "");
   let code =
     "return await (" +
     fn.toString() +
     ")((" +
-    commerceDom.toString() +
-    ")()," +
+    domSource +
+    ")(" + localizedColor + ")," +
     (fn === sellerNumbers ? "(" + sellerRead.toString() + ")," : "") +
     "..." +
     JSON.stringify(args) +
@@ -587,7 +595,10 @@ export function commercialDifferences(state, plan) {
       .toLowerCase();
   const errors = [];
   if (norm(state.brand) !== norm(plan.brand)) errors.push("brand");
-  if (state.axes.length !== 1 || !(state.axisLabels?.[0] || state.axes).some(label => norm(label) === norm(plan.axis)))
+  const axisKey = label => norm(label).replace(localizedColor, "color");
+  const axis = axisKey(plan.axis);
+  const labels = state.axisLabels?.[0] || state.axes;
+  if (state.axes.length !== 1 || !labels.some(label => axisKey(label) === axis))
     errors.push("variant name");
   if (
     state.options.length !== plan.skus.length ||

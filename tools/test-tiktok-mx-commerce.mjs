@@ -497,6 +497,41 @@ const editor = mxEditor(async (tool, args) => {
 const typedVariants = await editor.commercialState(1, plan, true);
 assert.deepEqual(entered, ["A", "B"]);
 assert.deepEqual(commercialDifferences(typedVariants.state, plan), []);
+
+// The built-in Color axis is saved under its localized label in Seller Center.
+doc.querySelector("tbody").replaceChildren();
+for (const slot of doc.querySelectorAll('[data-id^="product.publish.sale_property.value.name."]')) slot.remove();
+appendOption();
+axisBox.lastChild.textContent = "";
+let exactClicks = 0;
+let parentClicks = 0;
+axisBox.firstChild.onclick = () => {
+  const menu = doc.createElement("div");
+  menu.id = "axes";
+  menu.innerHTML = '<ul><li><span>Common axes</span><ul><li role="option"><span>颜色</span></li></ul></li></ul>';
+  menu.querySelector("li").onclick = () => parentClicks++;
+  menu.querySelector('[role="option"]').onclick = event => {
+    event.stopPropagation();
+    exactClicks++;
+    axisBox.lastChild.innerHTML = '<span>颜色</span><span class="pl-8"></span>';
+    menu.remove();
+  };
+  doc.body.append(menu);
+};
+const colorPlan = { ...plan, axis: "Color" };
+const coloredVariants = await editor.commercialState(1, colorPlan, true);
+assert.equal(exactClicks, 1);
+assert.equal(parentClicks, 0);
+assert.deepEqual(commercialDifferences(coloredVariants.state, colorPlan), []);
+for (const input of doc.querySelectorAll("input")) input.defaultValue = input.value;
+const reloaded = new JSDOM(dom.serialize(), { url: doc.URL, runScripts: "outside-only" });
+const refreshedEditor = mxEditor(async () => assert.fail("Refreshing readback must not write"),
+  async (_tab, code) => reloaded.window.eval("(async()=>{" + code + "})()"), []);
+const { state: freshColor } = await refreshedEditor.commercialState(1, colorPlan, false);
+assert.deepEqual([...freshColor.axes], ["颜色"]);
+assert.deepEqual(commercialDifferences({ ...freshColor, axisLabels: undefined }, colorPlan), []);
+assert.deepEqual(commercialDifferences(freshColor, { ...colorPlan, axis: "Color secundario" }), ["variant name"]);
+reloaded.window.close();
 dom.window.close();
 console.log(
   "MX commerce: source identity, provenance, per-SKU writes, units, zero and incomplete readback passed",
