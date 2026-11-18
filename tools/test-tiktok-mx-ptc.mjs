@@ -286,6 +286,55 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "pagelens-mx-draft-"));
   process.env.PAGELENS_HOME = home;
   const draft = await import("./tiktok-mx-draft.mjs?draft-test");
+  {
+    const create = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
+    const saved = "https://seller.tiktokshopglobalselling.com/product/edit-draft/1738623714154153548?shop_region=MX";
+    const tabs = new Map();
+    const opens = [];
+    const navigations = [];
+    const group = new DraftTabs("1736073370556597841", async (tool, args) => {
+      if (tool === "list_tabs") return [...tabs.values()];
+      if (tool === "navigate_tab") {
+        navigations.push(args.url);
+        tabs.get(args.tabId).url = args.url;
+        return;
+      }
+      if (tool !== "open_tab") assert.fail(tool);
+      const id = opens.push(args);
+      tabs.set(id, { id, groupId: 5, url: args.url });
+      return { tabId: id, groupId: 5 };
+    });
+    const productUrl = "https://shop.tiktok.com/jp/pdp/1736073370556597841";
+    const edit = await group.open(productUrl);
+    assert.equal(opens[0].active, false);
+    assert.equal(await group.navigate(edit, create), edit);
+    assert.equal(group.tabs.has(productUrl), false);
+    assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+    assert.equal(group.tabs.get(saved), edit);
+    assert.equal(group.tabs.has(create), false);
+    await group.navigate(edit, create);
+    tabs.get(edit).url = saved;
+    const explicitNavigations = navigations.length;
+    assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+    assert.equal(navigations.length, explicitNavigations, "Seller Center already navigated to the saved draft");
+    assert.equal(group.tabs.get(saved), edit);
+    assert.equal(group.tabs.has(create), false);
+    for (const search of ["tab=draft&shop_region=MX", "shop_region=MX"]) {
+      tabs.get(edit).url = "https://seller.tiktokshopglobalselling.com/product/manage?" + search;
+      assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+      assert.equal(tabs.get(edit).url, saved);
+    }
+    assert.equal(opens.length, 1, "save and refresh stay in the visible editor tab");
+    tabs.delete(edit);
+    assert.equal(await group.reopenSavedDraft(edit, saved), 2);
+    assert.equal(opens[1].active, false, "if Chrome closed the editor, recovery opens in background");
+    assert.equal(opens[1].groupWithTab, undefined);
+    const unrelated = "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX&tab=active";
+    tabs.get(2).url = unrelated;
+    assert.equal(await group.reopenSavedDraft(2, saved), 3);
+    assert.equal(tabs.get(2).url, unrelated, "leave a tab navigated outside the draft flow untouched");
+    assert.equal(opens[2].active, false);
+  }
   const navigationUrl = "https://shop.tiktok.com/jp/pdp/1722345678901234567";
   let navigationReads = 0;
   await draft.waitForSourceTab(55, navigationUrl, async () => (
@@ -411,13 +460,26 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
     state.salesAndShipping.skus[0].stock = 2;
     await assert.rejects(inspect(), /M stock/);
     let calls = 0;
-    const execute = createDraftTransport(product, async () => { calls++; return { ok: true, result: { tabId: 51 } }; }, async () => url);
+    let currentUrl = url;
+    const execute = createDraftTransport(product, async () => { calls++; return { ok: true, result: { tabId: 51 } }; }, async () => currentUrl);
     const bridge = (tool, args) => execute({ action: "bridge_call", request: { tool, args } });
     await assert.rejects(bridge("run_js", { tabId: 51 }), /outside draft task/);
     await assert.rejects(bridge("open_tab", { url: "https://example.com" }), /destination/);
     await bridge("open_tab", { url });
     await assert.rejects(bridge("run_shell", { tabId: 51 }), /Unexpected draft tool/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 50, url }), /outside draft task/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url: "https://example.com" }), /destination/);
     assert.equal(calls, 1);
+    await bridge("navigate_tab", { tabId: 51, url });
+    assert.equal(calls, 2);
+    currentUrl = "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX";
+    await assert.rejects(bridge("run_js", { tabId: 51 }), /outside draft workflow/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url: "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX" }), /outside draft workflow/);
+    await bridge("navigate_tab", { tabId: 51, url });
+    assert.equal(calls, 3);
+    currentUrl += "&tab=active";
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url }), /outside draft workflow/);
+    assert.equal(calls, 3);
   }
   await fs.writeFile(path.join(dir, "source.json"), JSON.stringify(sourceFile));
   await fs.writeFile(path.join(dir, "listing.json"), JSON.stringify(listing));

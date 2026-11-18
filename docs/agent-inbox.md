@@ -30,7 +30,9 @@ Then reload PageLens on `chrome://extensions`.
 
 | Path | Role |
 |------|------|
-| `~/.pagelens/agent-inbox/*.json` | Pending jobs |
+| `~/.pagelens/agent-inbox/*.json` | Shared pending jobs |
+| `~/.pagelens/agent-inbox/<extension-id>/*.json` | Directed pending jobs |
+| `processing/` in each inbox | Claimed requests awaiting a receipt |
 | `~/.pagelens/agent-inbox/processed/` | Completed job copies |
 | `~/.pagelens/agent-outbox/<id>.json` | Results |
 | `~/.pagelens/agent-payloads/` | Large HTML bodies (CLI auto-splits) |
