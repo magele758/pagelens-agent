@@ -291,9 +291,14 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
     const saved = "https://seller.tiktokshopglobalselling.com/product/edit-draft/1738623714154153548?shop_region=MX";
     const tabs = new Map();
     const opens = [];
+    const navigations = [];
     const group = new DraftTabs("1736073370556597841", async (tool, args) => {
       if (tool === "list_tabs") return [...tabs.values()];
-      if (tool === "navigate_tab") return (tabs.get(args.tabId).url = args.url);
+      if (tool === "navigate_tab") {
+        navigations.push(args.url);
+        tabs.get(args.tabId).url = args.url;
+        return;
+      }
       if (tool !== "open_tab") assert.fail(tool);
       const id = opens.push(args);
       tabs.set(id, { id, groupId: 5, url: args.url });
@@ -305,6 +310,13 @@ await Promise.all(workers.map(worker => agent({task: JSON.stringify(worker), all
     assert.equal(await group.navigate(edit, create), edit);
     assert.equal(group.tabs.has(productUrl), false);
     assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+    assert.equal(group.tabs.get(saved), edit);
+    assert.equal(group.tabs.has(create), false);
+    await group.navigate(edit, create);
+    tabs.get(edit).url = saved;
+    const explicitNavigations = navigations.length;
+    assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+    assert.equal(navigations.length, explicitNavigations, "Seller Center already navigated to the saved draft");
     assert.equal(group.tabs.get(saved), edit);
     assert.equal(group.tabs.has(create), false);
     for (const search of ["tab=draft&shop_region=MX", "shop_region=MX"]) {

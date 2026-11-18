@@ -54,12 +54,16 @@ export class DraftTabs {
     throw Error("Task tab did not finish navigating");
   }
 
+  recordNavigation(tabId, url) {
+    for (const [address, id] of this.tabs) if (id === tabId) this.tabs.delete(address);
+    this.tabs.set(url, tabId);
+  }
+
   async navigate(tabId, url) {
     const page = this.validate(url);
     if (!this.owned.has(tabId)) throw Error("Cannot navigate a tab outside the draft task");
     await this.bridge("navigate_tab", { tabId, url: page.href });
-    for (const [address, id] of this.tabs) if (id === tabId) this.tabs.delete(address);
-    this.tabs.set(page.href, tabId);
+    this.recordNavigation(tabId, page.href);
     return this.waitForUrl(tabId, page.href);
   }
 
@@ -69,7 +73,10 @@ export class DraftTabs {
     const current = this.owned.has(tabId) && (await this.bridge("list_tabs", {})).find(tab => tab.id === tabId);
     // Seller Center may return to the draft list or close the editor on save.
     if (current && current.groupId === this.groupId) {
-      if (current.url === page.href) return tabId;
+      if (current.url === page.href) {
+        this.recordNavigation(tabId, page.href);
+        return tabId;
+      }
       if (this.tabs.get(current.url) === tabId || isMxSellerManageReturn(current.url))
         return this.navigate(tabId, page.href);
     }
