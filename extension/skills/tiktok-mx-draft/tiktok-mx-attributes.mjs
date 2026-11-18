@@ -19,20 +19,46 @@ export async function sellerAttributes(expectedUrl, plan = null) {
   const boxes = () => [...document.querySelectorAll('[role="combobox"][aria-haspopup="listbox"]')]
     .filter(box => box.getClientRects().length && !box.closest('[data-id],table,[role="row"]'));
   const label = box => box.parentElement?.parentElement?.parentElement?.parentElement?.innerText.split("\n")[0].trim();
+  const visible = element => Boolean(element?.isConnected && element.getClientRects().length &&
+    (element.checkVisibility?.({ opacityProperty: true, visibilityProperty: true }) ?? true));
   const labels = boxes().map(label).filter(Boolean);
   if (new Set(labels).size !== labels.length) throw Error("Ambiguous category attribute controls");
   if (plan && Object.keys(plan).some(name => !labels.includes(name))) throw Error("Planned attribute control is missing");
   const result = [];
   for (const name of labels) {
     guard();
-    const box = boxes().find(e => label(e) === name);
-    const toggle = () => box.querySelector(".core-select-view").click();
-    const options = () => [...(document.getElementById(box.getAttribute("aria-controls"))?.querySelectorAll('[role="option"]') || [])]
-      .filter(e => e.getClientRects().length && e.getAttribute("aria-disabled") !== "true");
+    const box = () => boxes().find(e => label(e) === name);
+    const expanded = () => box()?.getAttribute("aria-expanded") === "true";
+    const toggle = () => {
+      guard();
+      const view = box()?.querySelector(".core-select-view");
+      if (!view) throw Error("Category attribute control changed: " + name);
+      view.click();
+    };
+    const ownedPortals = new Set();
+    const portal = () => {
+      const id = box()?.getAttribute("aria-controls");
+      const menu = id ? document.getElementById(id) : null;
+      if (menu) ownedPortals.add(menu);
+      return menu;
+    };
+    const options = () => [...(portal()?.querySelectorAll('[role="option"]') || [])]
+      .filter(e => visible(e) && e.getAttribute("aria-disabled") !== "true");
+    const wait = async (ready, error) => {
+      for (let i = 0; i < 20 && !ready(); i++) await pause(100);
+      if (!ready()) throw Error(error + name);
+    };
+    const waitForClosed = () => wait(() => {
+      // A re-render can replace the control while the previous portal is still animating.
+      portal();
+      return !expanded() && ![...ownedPortals].some(visible);
+    }, "Attribute menu did not close: ");
     const open = async () => {
-      if (box.getAttribute("aria-expanded") !== "true") toggle();
-      for (let i = 0; i < 20 && !options().length; i++) await pause(100);
-      if (!options().length) throw Error("Attribute options unavailable: " + name);
+      if (!expanded()) {
+        await waitForClosed();
+        toggle();
+      }
+      await wait(() => expanded() && options().length, "Attribute options unavailable: ");
     };
     try {
       await open();
@@ -48,10 +74,13 @@ export async function sellerAttributes(expectedUrl, plan = null) {
         }
       }
       await open();
-      result.push({ name, multiple: box.classList.contains("core-select-multiple"), options: options().map(e => e.innerText.trim()),
-        selected: options().filter(e => e.getAttribute("aria-selected") === "true").map(e => e.innerText.trim()) });
+      const choices = options();
+      result.push({ name, multiple: box().classList.contains("core-select-multiple"), options: choices.map(e => e.innerText.trim()),
+        selected: choices.filter(e => e.getAttribute("aria-selected") === "true").map(e => e.innerText.trim()) });
     } finally {
-      if (box?.getAttribute("aria-expanded") === "true") toggle();
+      portal();
+      if (expanded()) toggle();
+      await waitForClosed();
     }
   }
   return result;
