@@ -1,13 +1,18 @@
 import { shortcutsForPage } from "../flows/workflow-context.js";
+import { requireOptionalFeature } from "../lib/optional-permissions.js";
 import { $ } from "./dom.js";
 import { launchWorkflowFeature } from "./workflow-catalog.js";
+
+const IDENTIFY_TAB = "identify-tab";
 
 export function renderWorkflowShortcuts(tab) {
   const root = $("workflow-shortcuts");
   if (!root) return;
   const { platform, page, features } = shortcutsForPage(tab?.url);
-  const visible = features.length > 0;
-  const key = visible ? `${tab.id}:${page.platform}:${page.productId || page.surface}` : "";
+  const canIdentify = Number.isInteger(tab?.id) && !tab.url &&
+    chrome.runtime.getManifest?.().optional_permissions?.includes("tabs");
+  const visible = features.length > 0 || canIdentify;
+  const key = canIdentify ? `${tab.id}:${IDENTIFY_TAB}` : visible ? `${tab.id}:${page.platform}:${page.productId || page.surface}` : "";
   if (root.dataset.target === key) return;
   root.dataset.target = key;
   root.hidden = !visible;
@@ -16,9 +21,11 @@ export function renderWorkflowShortcuts(tab) {
   items.replaceChildren();
   if (!visible) return;
   const name = $("workflow-shortcut-site");
-  name.textContent = platform.name;
-  name.title = page.surface === "seller" ? `${platform.name} 商家后台` : `${platform.name} 商品详情`;
-  for (const feature of features) {
+  name.hidden = canIdentify;
+  name.textContent = platform?.name || "";
+  name.title = platform ? `${platform.name} ${page.surface === "seller" ? "商家后台" : "商品详情"}` : "";
+  const shortcuts = canIdentify ? [{ id: IDENTIFY_TAB, name: "开启当前网页识别" }] : features;
+  for (const feature of shortcuts) {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.workflow = feature.id;
@@ -27,7 +34,7 @@ export function renderWorkflowShortcuts(tab) {
   }
 }
 
-export function bindWorkflowShortcuts({ getTargetTab, handlers }) {
+export function bindWorkflowShortcuts({ getTargetTab, handlers, onTabAccess }) {
   const root = $("workflow-shortcuts");
   const status = $("workflow-shortcut-status");
   let busy = false;
@@ -38,6 +45,12 @@ export function bindWorkflowShortcuts({ getTargetTab, handlers }) {
     status.textContent = "";
     const target = root.dataset.target;
     try {
+      if (button.dataset.workflow === IDENTIFY_TAB) {
+        const denied = await requireOptionalFeature("tabs", { userGesture: true });
+        if (denied) throw new Error(denied);
+        await onTabAccess();
+        return;
+      }
       const tab = await getTargetTab();
       renderWorkflowShortcuts(tab);
       const { platform, features } = shortcutsForPage(tab?.url);

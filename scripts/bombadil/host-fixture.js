@@ -8,8 +8,14 @@ tabs.push(
   { id: 19, windowId: 1, title: 'Fixture Shopee seller', url: 'https://seller.shopee.cn/portal/marketing?cnsc_shop_id=42' },
   { id: 20, windowId: 1, title: 'Fixture Amazon product', url: 'https://www.amazon.com/dp/B07MW4YRY9' },
   { id: 21, windowId: 1, title: 'Fixture Temu seller', url: 'https://agentseller.temu.com/' },
+  { id: 22, windowId: 1, title: 'Fixture Temu product', url: 'https://www.temu.com/ca/example-g-607461633310534.html' },
 );
 let tab = tabs[0];
+let tabAddressGranted = false;
+function tabMetadata() {
+  if (tab.id !== 22 || tabAddressGranted) return tab;
+  return { id: tab.id, windowId: tab.windowId };
+}
 const activations = new Set();
 document.addEventListener('fixture-activate-tab', event => {
   const next = tabs.find(t => t.id === event.detail);
@@ -60,15 +66,23 @@ Object.assign(globalThis.chrome ??= {}, {
   storage: { local: storageArea('local', local), session: storageArea('session', {}),
     onChanged: { addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); } } },
   windows: { getCurrent: async () => ({ id: 1 }), getAll: async () => [{ id: 1 }], onCreated: event, onRemoved: event },
-  tabs: { get: async id => tabs.find(t => t.id === id), query: async () => [tab],
+  tabs: { get: async id => tabs.find(t => t.id === id), query: async () => [tabMetadata()],
     onActivated: { addListener(fn) { activations.add(fn); } }, onUpdated: event },
-  permissions: { contains: async () => true },
+  permissions: {
+    contains: async query => !query?.permissions?.includes('tabs') || tabAddressGranted,
+    request: async query => {
+      if (JSON.stringify(query) !== '{"permissions":["tabs"]}') return false;
+      tabAddressGranted = true;
+      return true;
+    },
+  },
   scripting: { executeScript: async ({ target }) => {
     const source = tabs.find(t => t.id === target.tabId);
     return [{ result: { ...source, video: source === tabs[0] ? { duration: 120, currentTime: 0 } : null,
       videoIsPrimary: source === tabs[0] } }];
   } },
   runtime: { id: 'fixture', onMessage: event, getURL: path => 'https://extension.invalid/' + path,
+    getManifest: () => ({ optional_permissions: ['tabs'] }),
     sendMessage: async () => ({ ok: false, error: 'Service unavailable in fixture' }) },
 });
 globalThis.fetch = async () => { throw new Error('Offline UI fixture'); };

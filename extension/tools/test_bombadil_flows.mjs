@@ -165,6 +165,11 @@ for (const width of [400, 900]) {
     assert.deepEqual([...shortcuts.querySelectorAll('[data-workflow]')].map(button => button.dataset.workflow), ['product-capture']);
     activate(21);
     await until(() => shortcuts.hidden, 'hide unsupported Temu seller shortcuts');
+    activate(22);
+    await until(() => shortcuts.querySelector('[data-workflow="identify-tab"]'), 'show address permission action');
+    shortcuts.querySelector('[data-workflow="identify-tab"]').click();
+    await until(() => shortcuts.querySelector('[data-workflow="product-capture"]'), 'Temu shortcut after granting tab address access');
+    assert.equal(document.getElementById('workflow-shortcut-site').textContent, 'Temu');
     check('marketplace shortcut transitions');
     await until(() => requiredVisits.panel.every(v => visits.has(v)), 'missing panel coverage: ' + [...visits]);
     console.log('Passed sidebar navigation, history, media and branch isolation at width ' + width);

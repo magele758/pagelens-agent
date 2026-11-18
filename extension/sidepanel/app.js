@@ -206,7 +206,7 @@ function wire() {
   const captureActions = bindProductCapturePanel({ getTargetTab: pickTargetTab, downloadText });
   const workflowHandlers = { openProductListing, openMarketing, openTiktokDraft, ...captureActions };
   openCatalog = bindWorkflowCatalog(workflowHandlers);
-  bindWorkflowShortcuts({ getTargetTab: pickTargetTab, handlers: workflowHandlers });
+  bindWorkflowShortcuts({ getTargetTab: pickTargetTab, handlers: workflowHandlers, onTabAccess: refreshTab });
   try {
   on("btn-settings", "click", () => {
     if (state.view === "settings") {
