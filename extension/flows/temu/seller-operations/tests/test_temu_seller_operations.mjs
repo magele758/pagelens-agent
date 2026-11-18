@@ -239,6 +239,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
   let redirect = false;
   let loadingUrl;
   let waited = false;
+  let firstEmpty = true;
   globalThis.chrome = {
     tabs: {
       create: async ({ url, active: select, windowId }) => {
@@ -265,9 +266,12 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
       assert.equal(active.status, "complete");
       assert.equal(active.url, args[0].expectedUrl);
       reads.push(args[0].expectedUrl);
+      const empty = firstEmpty && active.url === goods;
+      firstEmpty = false;
       return [{ frameId: 0, documentId: "doc-" + active.id, result: {
-        ok: true, title: "报表测试", records: [{ table: "报表", fields: { 商品: "夹克" } }],
-        warnings: [], next: false, pageKey: "first", page: 1, total: 1, filters: [], stats: {}, overview: [],
+        ok: true, title: "报表测试", records: empty ? [] : [{ table: "报表", fields: { 商品: "夹克" } }],
+        warnings: [], next: false, pageKey: empty ? "loading-empty" : "first", page: 1,
+        total: empty ? 0 : 1, filters: [], stats: {}, overview: [],
       } }];
     } },
   };
@@ -292,7 +296,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
   assert.equal(panel.querySelector("a"), null);
   await eventually(() => !panel.querySelector(".temu-operations-preview").hidden);
   assert.deepEqual(navigations, [goods]);
-  assert.deepEqual(reads, [goods]);
+  assert.deepEqual(reads, [goods, goods]);
   assert.match(panel.querySelector(".temu-operations-preview").textContent, /1 条记录/u);
   [...panel.querySelectorAll("footer button")].find(button => button.textContent === "下载 JSON").click();
   assert.equal(downloads[0][0], "temu-products.json");
@@ -303,13 +307,13 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
   assert.equal(panel.open, false);
   active = { ...active, url: campaigns + "/log?status=1" };
   assert.equal(await open({ mode: "temu-campaign-data" }), true);
-  await eventually(() => reads.length === 2 && !panel.querySelector(".temu-operations-preview").hidden);
+  await eventually(() => reads.length === 3 && !panel.querySelector(".temu-operations-preview").hidden);
   assert.deepEqual(navigations, [goods]);
   assert.equal(reads.at(-1), campaigns + "/log?status=1");
   const sources = panel.querySelector("nav");
   assert.equal(sources.querySelector("[aria-pressed='true']").textContent, "报名记录");
   sources.querySelectorAll("button")[1].click();
-  await eventually(() => reads.length === 3 && !panel.querySelector(".temu-operations-preview").hidden);
+  await eventually(() => reads.length === 4 && !panel.querySelector(".temu-operations-preview").hidden);
   assert.equal(navigations.at(-1), campaigns + "/result");
   assert.equal(reads.at(-1), campaigns + "/result");
   assert.equal(sources.querySelector("[aria-pressed='true']").textContent, "报名结果");
@@ -320,7 +324,7 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
   assert.equal(await open({ mode: "temu-order-data" }), true);
   await eventually(() => panel.querySelector("[data-error]"));
   assert.equal(navigations.at(-1), orders);
-  assert.equal(reads.length, 3, "The workflow must not read the unrelated login page");
+  assert.equal(reads.length, 4, "The workflow must not read the unrelated login page");
   assert.match(panel.querySelector("[data-error]").textContent, /登录状态/u);
   await assert.rejects(openTemuWorkflowTab({ tab: active, href: "https://example.invalid", accepts: url => canReadTemuSellerData(url, "orders") }), /地址无效/u);
   dom.window.close();

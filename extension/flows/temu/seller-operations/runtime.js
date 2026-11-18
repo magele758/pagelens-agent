@@ -63,11 +63,15 @@ async function waitForPage(target, kind, oldKey) {
   let snapshot;
   do {
     snapshot = await inject(target, operateTemuSellerData, { kind }, { pagination: Boolean(oldKey) });
-    if (snapshot.ok && (!oldKey || snapshot.records.length && snapshot.pageKey !== oldKey)) return snapshot;
     if (!snapshot.ok && snapshot.code !== "loading") throw new Error(snapshot.error);
+    if (snapshot.ok && (oldKey
+      ? snapshot.records.length && snapshot.pageKey !== oldKey
+      : snapshot.records.length || Object.keys(snapshot.stats).length)) return snapshot;
+    // The seller can show an empty table before its initial fetch returns rows.
     await waitForTemu(target.signal, 250);
   } while (Date.now() < deadline);
   if (oldKey) return null;
+  if (snapshot?.ok) return snapshot;
   throw new Error(snapshot?.error || "Temu 页面数据加载超时。");
 }
 
