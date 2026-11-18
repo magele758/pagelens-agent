@@ -709,10 +709,14 @@ button { cursor: pointer; }
   color: var(--warning-ink, #d97706);
 }
 .msg.bot .msg-actions {
-  display: inline-flex;
+  display: flex;
+  flex: 0 0 100%;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  margin-left: auto;
+}
+.msg.bot :is(.msg-stats, .msg-actions):empty {
+  display: none;
 }
 .msg.bot .btn-download-trace {
   display: inline-flex;

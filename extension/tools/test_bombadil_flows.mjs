@@ -97,7 +97,8 @@ for (const width of [400, 900]) {
     assert.equal(document.getElementById('shopee-marketing-read').disabled, true, 'fixture is outside Shopee');
     click('shopee-marketing-back');
     assert.ok(workflow.open);
-    field(document, 'workflow-platform', 'tiktok-shop');
+    workflow.querySelector('#workflow-platform button[data-platform="tiktok-shop"]').click();
+    assert.equal(workflow.querySelector('#workflow-platform [aria-pressed="true"]').dataset.platform, 'tiktok-shop');
     workflowAction('tiktok-mx-draft');
     await until(() => document.getElementById('workflow-catalog-status').textContent.includes('启用 Skill'), 'Skill disabled hint');
     click('workflow-catalog-close');
@@ -111,6 +112,7 @@ for (const width of [400, 900]) {
     field(document, 'input', 'https://shop.example/item');
     const messagesBefore = document.getElementById('msgs').textContent;
     click('btn-ptc-flow');
+    assert.equal(workflow.querySelector('#workflow-platform [aria-pressed="true"]').dataset.platform, 'tiktok-shop');
     workflowAction('tiktok-mx-draft');
     await until(() => document.getElementById('input').value.startsWith('使用「TikTok 墨西哥商品草稿」'), 'prefill TikTok Skill');
     assert.equal(document.getElementById('input').value, '使用「TikTok 墨西哥商品草稿」 https://shop.example/item');

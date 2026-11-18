@@ -1,6 +1,8 @@
 import { workflowPlatforms } from "../flows/catalog.js";
 import { $ } from "./dom.js";
 
+const PLATFORM_PREFERENCE = "pagelens.workflowPlatformId";
+
 export function bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft }) {
   const entry = $("btn-ptc-flow");
   const dialog = $("workflow-catalog-dialog");
@@ -9,12 +11,15 @@ export function bindWorkflowCatalog({ openProductListing, openMarketing, openTik
   const empty = $("workflow-feature-empty");
   const close = $("workflow-catalog-close");
   const status = $("workflow-catalog-status");
+  const buttons = new Map();
+  let current = workflowPlatforms[0];
   let opening = false;
 
   function open() {
     if (dialog.open) return;
-    status.textContent = "";
+    restorePlatform();
     dialog.showModal();
+    buttons.get(current.id).focus({ preventScroll: true });
   }
 
   async function choose(feature) {
@@ -39,8 +44,7 @@ export function bindWorkflowCatalog({ openProductListing, openMarketing, openTik
   }
 
   function renderFeatures() {
-    const current = workflowPlatforms.find(item => item.id === platform.value);
-    const features = current?.features || [];
+    const { features } = current;
     list.replaceChildren(...features.map(feature => {
       const row = document.createElement("li");
       const button = document.createElement("button");
@@ -61,18 +65,46 @@ export function bindWorkflowCatalog({ openProductListing, openMarketing, openTik
       return row;
     }));
     empty.hidden = Boolean(features.length);
-    empty.textContent = current ? `${current.name} 暂无可执行的工作流。` : "";
+    empty.textContent = features.length ? "" : `${current.name} 暂无可执行的工作流。`;
     status.textContent = "";
   }
 
-  for (const item of workflowPlatforms) {
-    const option = document.createElement("option");
-    option.value = item.id;
-    option.textContent = item.features.length ? item.name : `${item.name}（待接入）`;
-    platform.append(option);
+  function selectPlatform(item) {
+    current = item;
+    for (const [id, button] of buttons) {
+      button.setAttribute("aria-pressed", String(id === current.id));
+    }
+    renderFeatures();
   }
-  renderFeatures();
-  platform.addEventListener("change", renderFeatures);
+
+  function restorePlatform() {
+    try {
+      const saved = document.defaultView.localStorage.getItem(PLATFORM_PREFERENCE);
+      current = workflowPlatforms.find(item => item.id === saved) ?? workflowPlatforms[0];
+    } catch { /* 页面存储不可用时沿用当前侧栏的选择。 */ }
+    selectPlatform(current);
+  }
+
+  for (const item of workflowPlatforms) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "workflow-platform-chip";
+    button.dataset.platform = item.id;
+    const icon = document.createElement("img");
+    icon.src = `../flows/icons/${item.icon}`;
+    icon.alt = "";
+    icon.width = icon.height = 16;
+    button.append(icon, item.name);
+    button.addEventListener("click", () => {
+      selectPlatform(item);
+      try {
+        document.defaultView.localStorage.setItem(PLATFORM_PREFERENCE, item.id);
+      } catch { /* 页面存储不可用时仍可切换平台。 */ }
+    });
+    buttons.set(item.id, button);
+    platform.append(button);
+  }
+  restorePlatform();
   entry.addEventListener("click", open);
   close.addEventListener("click", () => dialog.close());
   return open;

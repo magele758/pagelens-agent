@@ -903,10 +903,10 @@
       <h2 id="workflow-catalog-title">工作流</h2>
       <button type="button" id="workflow-catalog-close" class="icon-btn" aria-label="关闭工作流列表">×</button>
     </header>
-    <label class="workflow-platform-picker" for="workflow-platform">
-      平台
-      <select id="workflow-platform" autofocus></select>
-    </label>
+    <fieldset class="workflow-platform-picker">
+      <legend>平台</legend>
+      <div id="workflow-platform" class="workflow-platform-chips"></div>
+    </fieldset>
     <ul class="workflow-feature-list" id="workflow-feature-list" aria-label="可执行功能"></ul>
     <p id="workflow-feature-empty" role="status" hidden></p>
     <p id="workflow-catalog-status" role="status"></p>
