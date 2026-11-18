@@ -17,6 +17,9 @@ function paintLibraryStatus(info, extra = "") {
   }
   if (!el) return;
   const reauth = $("btn-library-reauth");
+  const pick = $("btn-library-pick");
+  if (pick) pick.textContent = info?.configured ? "更换目录" : "选择目录";
+  $("btn-library-clear")?.classList.toggle("hidden", !info?.configured);
   const input = $("library-path");
   if (info?.mode === "path" && info.path && input && document.activeElement !== input) {
     input.value = info.path;

@@ -544,7 +544,7 @@ function wire() {
   });
   on("mm-same", "change", (e) => {
     state.settings.multimodalSameAsText = e.target.checked;
-    $("mm-fields")?.classList.toggle("hidden", e.target.checked);
+    $("mm-fields").hidden = e.target.checked;
   });
   on("answer-lang", "change", (e) => {
     state.settings.answerLanguage = e.target.value;

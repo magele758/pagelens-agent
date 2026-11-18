@@ -23,8 +23,10 @@ export function createSettingsPage({ root, getSettings, onModelChange }) {
   const find = (id) => root.querySelector(`#${id}`);
   const tabs = [...root.querySelectorAll("[data-settings-tab]")];
   const scroll = find("settings-scroll");
+  const providerManager = find("settings-provider-manager");
   const positions = { basic: 0, advanced: 0 };
   let active = "basic";
+  let modelPreviouslyAvailable;
   const setText = (id, text) => { find(id).textContent = text; };
 
   function showTab(name, focus = false) {
@@ -76,13 +78,13 @@ export function createSettingsPage({ root, getSettings, onModelChange }) {
     }
     select.disabled = !options.length;
     if (settings.textRef) select.value = `${settings.textRef.providerId}::${settings.textRef.modelId}`;
-    if (!options.length) find("settings-provider-manager").open = true;
+    if (!options.length && modelPreviouslyAvailable !== false) providerManager.open = true;
+    modelPreviouslyAvailable = options.length > 0;
 
-    // Update model-top provider preview info
     const activeProvider = (settings.textRef && settings.textProviders?.find((p) => p.id === settings.textRef.providerId))
       || settings.textProviders?.[0];
     if (find("settings-provider-name")) {
-      find("settings-provider-name").textContent = activeProvider?.name || "我的模型服务";
+      find("settings-provider-name").textContent = activeProvider?.name || "尚未添加服务商";
     }
     if (find("settings-provider-type")) {
       find("settings-provider-type").textContent = isModelReady(settings.text)
@@ -116,21 +118,6 @@ export function createSettingsPage({ root, getSettings, onModelChange }) {
     button.addEventListener("click", () => reveal(button.dataset.settingsLink));
   });
   find("settings-text-model").addEventListener("change", (event) => onModelChange(event.target.value));
-
-  const toggleBtn = find("btn-toggle-provider-manager");
-  const mgr = find("settings-provider-manager");
-  if (toggleBtn && mgr) {
-    toggleBtn.addEventListener("click", (e) => {
-      e.preventDefault();
-      mgr.open = !mgr.open;
-      toggleBtn.setAttribute("aria-expanded", String(mgr.open));
-      toggleBtn.textContent = mgr.open ? "收起" : "管理";
-    });
-    mgr.addEventListener("toggle", () => {
-      toggleBtn.setAttribute("aria-expanded", String(mgr.open));
-      toggleBtn.textContent = mgr.open ? "收起" : "管理";
-    });
-  }
 
   function writeJev() {
     const settings = getSettings();
