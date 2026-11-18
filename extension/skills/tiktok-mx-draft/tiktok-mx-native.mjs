@@ -1,5 +1,5 @@
 import { NATIVE_HOST_NAME } from "../../lib/native-host.js";
-import { runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
+import { isMxSellerManageReturn, runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
 
 const tools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab", "activate_tab",
   "wait_for", "upload_file", "trusted_type", "press_keys", "navigate_tab"]);
@@ -27,8 +27,12 @@ export function createDraftTransport(sourceId, call, tabUrl) {
       if (![args.url, ...(args.backgroundUrls || [])].every(u => allowedDraftUrl(u, sourceId)) ||
           (args.groupWithTab != null && !owned.has(args.groupWithTab))) throw Error("Unexpected draft destination");
     } else if (tool !== "list_tabs" && !owned.has(args.tabId)) throw Error("Tab outside draft task");
-    else if (tool !== "list_tabs" && tool !== "close_tab" && !allowedDraftUrl(await tabUrl(args.tabId), sourceId))
-      throw Error("Task tab navigated outside draft workflow");
+    else if (tool !== "list_tabs" && tool !== "close_tab") {
+      const currentUrl = await tabUrl(args.tabId);
+      const reopening = tool === "navigate_tab" && isMxSellerManageReturn(currentUrl) &&
+        /^\/product\/edit-draft\/\d+$/.test(new URL(args.url).pathname);
+      if (!reopening && !allowedDraftUrl(currentUrl, sourceId)) throw Error("Task tab navigated outside draft workflow");
+    }
     if (tool === "navigate_tab" && !allowedDraftUrl(args.url, sourceId))
       throw Error("Unexpected draft destination");
     const reply = await call(tool, args);

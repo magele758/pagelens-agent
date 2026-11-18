@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { isMxSellerManageReturn } from "./tiktok-mx-editor.mjs";
 
 // Each owned tab is a working page. Chrome removes the group with its last tab.
 export class DraftTabs {
@@ -69,8 +70,7 @@ export class DraftTabs {
     // Seller Center may return to the draft list or close the editor on save.
     if (current && current.groupId === this.groupId) {
       if (current.url === page.href) return tabId;
-      if (this.tabs.get(current.url) === tabId ||
-          current.url === "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX&tab=draft")
+      if (this.tabs.get(current.url) === tabId || isMxSellerManageReturn(current.url))
         return this.navigate(tabId, page.href);
     }
     this.owned.delete(tabId);

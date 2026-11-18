@@ -221,7 +221,6 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
   process.env.PAGELENS_HOME = home;
   const draft = await import("./tiktok-mx-draft.mjs?draft-test");
   {
-    const { DraftTabs } = await import("./tiktok-mx-tabs.mjs");
     const create = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
     const saved = "https://seller.tiktokshopglobalselling.com/product/edit-draft/1738623714154153548?shop_region=MX";
     const tabs = new Map();
@@ -242,11 +241,21 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
     assert.equal(await group.reopenSavedDraft(edit, saved), edit);
     assert.equal(group.tabs.get(saved), edit);
     assert.equal(group.tabs.has(create), false);
+    for (const search of ["tab=draft&shop_region=MX", "shop_region=MX"]) {
+      tabs.get(edit).url = "https://seller.tiktokshopglobalselling.com/product/manage?" + search;
+      assert.equal(await group.reopenSavedDraft(edit, saved), edit);
+      assert.equal(tabs.get(edit).url, saved);
+    }
     assert.equal(opens.length, 1, "save and refresh stay in the visible editor tab");
     tabs.delete(edit);
     assert.equal(await group.reopenSavedDraft(edit, saved), 2);
     assert.equal(opens[1].active, false, "if Chrome closed the editor, recovery opens in background");
     assert.equal(opens[1].groupWithTab, undefined);
+    const unrelated = "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX&tab=active";
+    tabs.get(2).url = unrelated;
+    assert.equal(await group.reopenSavedDraft(2, saved), 3);
+    assert.equal(tabs.get(2).url, unrelated, "leave a tab navigated outside the draft flow untouched");
+    assert.equal(opens[2].active, false);
   }
   const navigationUrl = "https://shop.tiktok.com/jp/pdp/1722345678901234567";
   let navigationReads = 0;
@@ -373,7 +382,8 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
     state.salesAndShipping.skus[0].stock = 2;
     await assert.rejects(inspect(), /M stock/);
     let calls = 0;
-    const execute = createDraftTransport(product, async () => { calls++; return { ok: true, result: { tabId: 51 } }; }, async () => url);
+    let currentUrl = url;
+    const execute = createDraftTransport(product, async () => { calls++; return { ok: true, result: { tabId: 51 } }; }, async () => currentUrl);
     const bridge = (tool, args) => execute({ action: "bridge_call", request: { tool, args } });
     await assert.rejects(bridge("run_js", { tabId: 51 }), /outside draft task/);
     await assert.rejects(bridge("open_tab", { url: "https://example.com" }), /destination/);
@@ -384,6 +394,14 @@ assert.equal(sourceVariants({...withAccessory,title:"クリーニングクロス
     assert.equal(calls, 1);
     await bridge("navigate_tab", { tabId: 51, url });
     assert.equal(calls, 2);
+    currentUrl = "https://seller.tiktokshopglobalselling.com/product/manage?shop_region=MX";
+    await assert.rejects(bridge("run_js", { tabId: 51 }), /outside draft workflow/);
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url: "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX" }), /outside draft workflow/);
+    await bridge("navigate_tab", { tabId: 51, url });
+    assert.equal(calls, 3);
+    currentUrl += "&tab=active";
+    await assert.rejects(bridge("navigate_tab", { tabId: 51, url }), /outside draft workflow/);
+    assert.equal(calls, 3);
   }
   await fs.writeFile(path.join(dir, "source.json"), JSON.stringify(sourceFile));
   await fs.writeFile(path.join(dir, "listing.json"), JSON.stringify(listing));
