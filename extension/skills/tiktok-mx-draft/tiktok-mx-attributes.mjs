@@ -42,8 +42,9 @@ export async function sellerAttributes(expectedUrl, plan = null) {
       if (menu) ownedPortals.add(menu);
       return menu;
     };
+    // In background tabs, an open menu can expose options before its fade-in progresses.
     const options = () => [...(portal()?.querySelectorAll('[role="option"]') || [])]
-      .filter(e => visible(e) && e.getAttribute("aria-disabled") !== "true");
+      .filter(e => e.getClientRects().length && e.getAttribute("aria-disabled") !== "true");
     const wait = async (ready, error) => {
       for (let i = 0; i < 20 && !ready(); i++) await pause(100);
       if (!ready()) throw Error(error + name);
@@ -79,7 +80,18 @@ export async function sellerAttributes(expectedUrl, plan = null) {
         selected: choices.filter(e => e.getAttribute("aria-selected") === "true").map(e => e.innerText.trim()) });
     } finally {
       portal();
-      if (expanded()) toggle();
+      if (expanded()) {
+        guard();
+        const input = box()?.querySelector('input:not([type="hidden"]):not(:disabled)');
+        if (input) {
+          // The trigger can leave a searchable multi-select open. Escape is handled by its input.
+          input.dispatchEvent(new KeyboardEvent("keydown", {
+            key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true,
+          }));
+          if (expanded()) await pause(100);
+        }
+        if (expanded()) toggle();
+      }
       await waitForClosed();
     }
   }

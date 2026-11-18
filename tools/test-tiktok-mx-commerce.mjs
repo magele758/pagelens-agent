@@ -552,8 +552,13 @@ console.log(
   const win = fixture.window, doc = win.document;
   Object.defineProperty(win.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
   win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
+  assert.equal(doc.hidden, true);
+  win.HTMLElement.prototype.checkVisibility = function () {
+    // A background tab can keep an open option transparent while it has layout.
+    return !this.closest("[hidden]") && !this.matches('[role="option"]');
+  };
   const portals = [];
-  const opens = [];
+  const opens = [], escaped = [];
   const control = (name, choices, multiple) => {
     const section = doc.createElement("section");
     section.innerHTML = name + "\n<div><div><div></div></div></div>";
@@ -586,12 +591,24 @@ console.log(
         };
         portal.append(item);
       }
+      if (multiple) box.insertAdjacentHTML("beforeend", '<input type="hidden"><input type="search">');
+      const input = box.querySelector('input[type="search"]');
+      if (input) input.onkeydown = event => {
+        if (event.key === "Escape" && event.code === "Escape" && event.keyCode === 27 &&
+            event.target === input && doc.activeElement === input && event.bubbles) {
+          escaped.push(name);
+          close();
+          input.blur();
+        }
+      };
       box.firstChild.onclick = () => {
-        if (box.getAttribute("aria-expanded") === "true") close();
-        else {
+        if (box.getAttribute("aria-expanded") === "true") {
+          if (!multiple) close();
+        } else {
           opens.push({ name, overlapping: portals.some(menu => !menu.hidden) });
           box.setAttribute("aria-expanded", "true");
           portal.hidden = false;
+          input?.focus();
         }
       };
     };
@@ -606,6 +623,7 @@ console.log(
     { name: "Function", overlapping: false },
     { name: "Material", overlapping: false },
   ]);
+  assert.deepEqual(escaped, ["Material"], "a multi-select that ignores trigger clicks closes by scoped Escape");
   assert.ok(portals.every(menu => menu.hidden), "the final delayed close must finish before returning");
   assert.equal(doc.querySelector("#foreign").hidden, false);
   assert.deepEqual(JSON.parse(JSON.stringify(catalog.map(({ name, selected }) => [name, selected]))), Object.entries(plan));
