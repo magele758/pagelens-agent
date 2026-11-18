@@ -7,6 +7,8 @@ import {
   commercialDifferences,
   commerceScript,
   locateSkuInput,
+  sellerBrand,
+  sellerVariantAxis,
   sellerVariants,
   sellerNumbers,
 } from "./tiktok-mx-commerce.mjs";
@@ -158,6 +160,8 @@ async function execute(mode) {
   const run = (fn, ...args) =>
     w.eval("(async()=>{" + commerceScript(fn, ...args) + "})()");
   if (mode === "read") return run(sellerNumbers, mode);
+  await run(sellerBrand, plan.brand);
+  await run(sellerVariantAxis, plan.axis);
   await run(sellerVariants, {
     axis: plan.axis,
     brand: plan.brand,
@@ -523,6 +527,75 @@ const coloredVariants = await editor.commercialState(1, colorPlan, true);
 assert.equal(exactClicks, 1);
 assert.equal(parentClicks, 0);
 assert.deepEqual(commercialDifferences(coloredVariants.state, colorPlan), []);
+
+// A no-op built-in selection can remount the same empty field and its owned menu.
+const axisField = axisBox.parentElement;
+const axisFieldId = axisField.dataset.id;
+const placeholder = "请选择或输入销售属性";
+const runAxis = () => w.eval("(async()=>{" + commerceScript(sellerVariantAxis, colorPlan.axis) + "})()");
+function resetColorSkus() {
+  doc.querySelector("tbody").replaceChildren();
+  for (const slot of doc.querySelectorAll('[data-id^="product.publish.sale_property.value.name."]')) slot.remove();
+  appendOption();
+}
+function mockNoopColor(afterStandard) {
+  const clicks = { standard: 0, create: 0, add: 0 };
+  function mount(id, open, label = placeholder) {
+    doc.querySelector('[id^="color-axis-menu-"]')?.remove();
+    axisField.innerHTML = `<div role="combobox" aria-controls="${id}" aria-expanded="${open}">
+      <input class="core-cascader-view-input" placeholder="${placeholder}">
+      <span class="core-cascader-view-value"><span>${label}</span><span class="pl-8"></span></span>
+    </div>`;
+    const box = axisField.firstElementChild;
+    const show = () => {
+      box.setAttribute("aria-expanded", "true");
+      const menu = doc.createElement("div");
+      menu.id = id;
+      menu.innerHTML = '<div role="option">颜色</div><div class="core-cascader-list-footer"><button>新增</button></div>';
+      menu.firstElementChild.onclick = () => {
+        clicks.standard++;
+        mount("color-axis-menu-next", true);
+        afterStandard?.();
+      };
+      const footer = menu.lastElementChild;
+      footer.firstElementChild.onclick = () => {
+        clicks.create++;
+        footer.innerHTML = '<div><input class="core-input" maxlength="30"><button disabled>添加</button></div>';
+        footer.querySelector("input").oninput = event => {
+          const typed = event.target.value;
+          footer.innerHTML = '<div><input class="core-input" maxlength="30"><button>添加</button></div>';
+          footer.querySelector("input").value = typed;
+          footer.querySelector("button").onclick = () => {
+            clicks.add++;
+            assert.equal(typed, "Color");
+            axisField.dataset.id = "product.publish.sale_property.name.881";
+            mount("color-axis-menu-chosen", false, "颜色");
+          };
+        };
+      };
+      doc.body.append(menu);
+    };
+    box.querySelector("input").onclick = show;
+    if (open) show();
+  }
+  axisField.dataset.id = axisFieldId;
+  mount("color-axis-menu-first", false);
+  return clicks;
+}
+resetColorSkus();
+await assert.rejects(w.eval("(async()=>{" + commerceScript(sellerVariantAxis, "Modelo") + "})()"), /Existing variant name differs: 颜色/);
+const replaced = mockNoopColor(() => { axisField.dataset.id = "product.publish.sale_property.name.999"; });
+await assert.rejects(runAxis(), /Variant name slot changed/);
+assert.deepEqual(replaced, { standard: 1, create: 0, add: 0 });
+const withRows = mockNoopColor(() => doc.querySelector("tbody").insertAdjacentHTML("afterbegin", row(99, "Existing")));
+await assert.rejects(runAxis(), /Existing variant name differs/);
+assert.deepEqual(withRows, { standard: 1, create: 0, add: 0 });
+resetColorSkus();
+brandBox.firstChild.firstChild.textContent = "  MARCA  ";
+const fallback = mockNoopColor();
+const recoveredColor = await editor.commercialState(1, colorPlan, true);
+assert.deepEqual(fallback, { standard: 1, create: 1, add: 1 });
+assert.deepEqual(commercialDifferences(recoveredColor.state, colorPlan), []);
 for (const input of doc.querySelectorAll("input")) input.defaultValue = input.value;
 const reloaded = new JSDOM(dom.serialize(), { url: doc.URL, runScripts: "outside-only" });
 const refreshedEditor = mxEditor(async () => assert.fail("Refreshing readback must not write"),

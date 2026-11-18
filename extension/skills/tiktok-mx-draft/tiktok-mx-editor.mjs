@@ -3,7 +3,9 @@ export { checkAttributes, matchAttributeValue };
 export { checkDraftAttributes } from "./tiktok-mx-attributes.mjs";
 import { draftListCode, sellerVerification } from "./tiktok-mx-list.mjs";
 export * from "./tiktok-mx-list.mjs";
-import { commercialDifferences, commerceScript, locateSkuInput, sellerRead, sellerVariants, sellerNumbers } from "./tiktok-mx-commerce.mjs";
+import {
+  commercialDifferences, commerceScript, locateSkuInput, sellerBrand, sellerNumbers, sellerRead, sellerVariantAxis, sellerVariants,
+} from "./tiktok-mx-commerce.mjs";
 
 export const titleSelector = '[data-id="product.publish.product_name"]';
 const localDesc = '[data-id="product.publish.description.local_lang"]';
@@ -584,6 +586,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
         (d) => d === "brand" || d === "SKU count" || d.startsWith("variant "),
       );
       if (structureChanged) {
+        if (differences.includes("brand")) await runCode(tab, commerceScript(sellerBrand, plan.brand));
+        await runCode(tab, commerceScript(sellerVariantAxis, plan.axis));
         for (const { option } of plan.skus) {
           await runCode(tab, commerceScript(sellerVariants, {
             axis: plan.axis, brand: plan.brand, skus: [{ option }],
