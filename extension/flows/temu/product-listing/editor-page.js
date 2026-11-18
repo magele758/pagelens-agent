@@ -4,7 +4,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     location.pathname === "/goods/edit" && location.href === href;
   const fail = (code, message) => ({ ok: false, code, message });
   const clean = (text, limit = 200) => String(text ?? "").replace(/\s+/gu, " ").trim().slice(0, limit);
-  const translated = (text) => clean(text).normalize("NFKC").replace(/^[*＊]\s*|[：:]$/gu, "");
+  const translated = (text) => clean(text).normalize("NFKC").replace(/^[*＊]\s*|[：:]$/gu, "").trim();
   const visible = (element) => Boolean(element?.isConnected && element.getClientRects().length &&
     !element.closest('[hidden],[inert],[aria-hidden="true"]') && getComputedStyle(element).visibility !== "hidden");
   const control = 'input,textarea,select,[contenteditable="true"],[contenteditable="plaintext-only"]';
@@ -16,6 +16,10 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
   const ready = () => scope() && root && visible(root) && !blocked();
   const isStable = (id) => /^[A-Za-z_][A-Za-z0-9_[\].:-]{1,230}$/u.test(id);
   const itemLabel = (el) => el.matches(labels) ? el : el.querySelector(labels);
+  const titleLabels = {
+    productName: ["商品名称", "中文名称", "中文商品名称", "商品中文名称"],
+    productEnName: ["英文名称", "英文商品名称", "商品英文名称"],
+  };
   const names = {
     productName: "中文商品名称", productEnName: "英文商品名称", productDesc: "商品描述",
     productDescription: "商品描述", productEnDesc: "英文商品描述",
@@ -30,9 +34,9 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
 
   if (!scope()) return fail("PAGE_CHANGED", "Temu 商品页已切换。");
   if (blocked()) return fail("MODAL_BLOCKED", "Temu 表单上有弹窗，请核对后继续。");
-  if (!ready() || !root.querySelector('[id="productName"],[id="productEnName"],[id^="productProperties["]')) {
-    return fail("EDITOR_LOADING", "商品信息表单还在加载。");
-  }
+  if (!ready()) return fail("EDITOR_LOADING", "商品信息表单还在加载。");
+  const titleFields = kind === "inspect" ? resolveTitles() : null;
+  if (titleFields?.size === 0) return fail("EDITOR_LOADING", "商品名称输入框尚未加载或无法唯一定位。");
   if (categoryPath?.length) {
     const normalized = text => translated(text).replace(/\s*[>＞›→]\s*/gu, ">");
     const wanted = normalized(categoryPath.join(">"));
@@ -44,12 +48,54 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     if (!seen) return fail("EDITOR_LOADING", "暂时无法核对第二步的已选商品类目。");
   }
 
+  const skuId = id => /^(?:productSkuMap|productSkuVolumeWeightMap)\.([\w-]*)\.(.+)$/u.exec(id);
+
+  function resolveTitles() {
+    const aliases = new Map(Object.entries(titleLabels).flatMap(([id, labels]) => labels.map(label => [label, id])));
+    const eligible = input => visible(input) && !input.matches(':disabled,[readonly]') &&
+      !input.closest(csselect + ',[aria-disabled="true"],[aria-readonly="true"]');
+    const candidates = new Map(Object.keys(titleLabels).map(id => [id, new Set()]));
+    for (const label of root.querySelectorAll('label,[data-field-label],span,div')) {
+      const text = label.textContent;
+      if (text.length > 45) continue;
+      const id = aliases.get(translated(text));
+      if (!id || !visible(label) || label.querySelector(control)) continue;
+      const linked = label.control ? [label.control] : label.id ? [...root.querySelectorAll('textarea[aria-labelledby]')]
+        .filter(input => input.getAttribute("aria-labelledby").split(/\s+/u).includes(label.id)) : [];
+      const direct = linked.filter(input => input.matches("textarea") && root.contains(input) && eligible(input));
+      if (direct.length) {
+        for (const input of direct) candidates.get(id).add(input);
+        continue;
+      }
+      for (let area = label.parentElement, depth = 0; area && area !== root && depth < 6; area = area.parentElement, depth++) {
+        const inputs = [...area.querySelectorAll("textarea")].filter(eligible);
+        if (inputs.length === 1) candidates.get(id).add(inputs[0]);
+        if (inputs.length || area.matches('[data-testid="beast-core-form-item"],[class*="Form_item_"]')) break;
+      }
+    }
+    const uniqueTitles = new Map();
+    for (const [key, inferred] of candidates) {
+      const holder = document.getElementById(key);
+      const selector = 'textarea,input[type="text"],input:not([type])';
+      const pinned = holder && root.contains(holder) ? (holder.matches(selector) ? [holder] :
+        [...holder.querySelectorAll(selector)]).filter(eligible) : [];
+      if (pinned.length === 1) uniqueTitles.set(key, pinned[0]);
+      else if (inferred.size === 1) uniqueTitles.set(key, [...inferred][0]);
+    }
+    const titles = [...uniqueTitles];
+    return new Map(titles.filter(([, input]) => titles.filter(([, other]) => other === input).length === 1));
+  }
+
   function holderFor(input) {
+    let closest = null;
     for (let node = input, depth = 0; node && node !== root && depth < 12; node = node.parentElement, depth++) {
       if (isStable(node.id) && document.getElementById(node.id) === node &&
-          (node === input || [...node.querySelectorAll(control)].filter(el => el.type !== "hidden").length === 1)) return node;
+          (node === input || [...node.querySelectorAll(control)].filter(el => el.type !== "hidden").length === 1)) {
+        if (Object.hasOwn(names, node.id) || skuId(node.id)) return node;
+        closest ||= node;
+      }
     }
-    return null;
+    return closest;
   }
 
   function nearby(input) {
@@ -83,12 +129,13 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
       .filter(text => text && !/^[-–—]+$/u.test(text)).slice(0, 12);
   }
 
-  function fromField(input) {
+  function fromField(input, titleKey) {
     const holder = holderFor(input);
-    if (!holder || input.matches(':disabled,[readonly]') || input.closest('[aria-disabled="true"],[aria-readonly="true"]')) return null;
-    const id = holder.id;
+    const id = titleKey || holder?.id;
+    if (!id || !titleKey && Object.hasOwn(titleLabels, id) || input.matches(':disabled,[readonly]') ||
+        input.closest('[aria-disabled="true"],[aria-readonly="true"]')) return null;
     const section = input.closest('[data-testid="beast-core-form-item"],[class*="Form_item_"]');
-    const sku = /^(?:productSkuMap|productSkuVolumeWeightMap)\.([\w-]*)\.(.+)$/u.exec(id);
+    const sku = skuId(id);
     const label = names[id] || shipping[sku?.[2]] || skuNames[sku?.[2]] ||
       (sku?.[2]?.startsWith("siteSupplierPriceMap.") ? "申报价格（CNY）" : "") ||
       (/^productSkcList\[\d+\]\.extCode$/u.test(id) ? "颜色货号" : "") || nearby(input);
@@ -97,7 +144,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     else if (input.type === "checkbox" || input.type === "radio") fieldKind = input.type;
     else if (input.isContentEditable || input.matches('textarea,input[type="text"],input[type="number"],input[type="url"],input:not([type])')) fieldKind = "text";
     if (!fieldKind || input.closest(csselect) || !label || /密码|验证码|password|captcha|otp/iu.test(label)) return null;
-    const required = Boolean(input.required || input.getAttribute("aria-required") === "true" ||
+    const required = Boolean(titleKey || input.required || input.getAttribute("aria-required") === "true" ||
       shipping[sku?.[2]] || sku?.[2]?.startsWith("siteSupplierPriceMap.") ||
       /^[*＊]/u.test(label) || section?.querySelector('[class*="Form_required"],[class*="itemLabelRequired"],[data-required="true"]'));
     const options = fieldKind === "select" ? [...input.options].filter(option => option.value && !option.disabled &&
@@ -115,14 +162,21 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     };
   }
 
-  const fields = () => [...root.querySelectorAll(control)].filter(el => visible(el) ||
-    (["checkbox", "radio"].includes(el.type) && [...(el.labels || [])].some(visible))).map(fromField).filter(Boolean);
+  const visibleField = input => visible(input) ||
+    (["checkbox", "radio"].includes(input.type) && [...(input.labels || [])].some(visible));
+  const fields = () => {
+    const titleByInput = new Map([...titleFields].map(([id, input]) => [input, id]));
+    return [...root.querySelectorAll(control)].filter(visibleField).map(input => fromField(input, titleByInput.get(input))).filter(Boolean);
+  };
   const getField = (id) => {
+    if (Object.hasOwn(titleLabels, id)) {
+      const title = resolveTitles().get(id);
+      return title && fromField(title, id);
+    }
     const holder = document.getElementById(id);
     if (!holder || !root.contains(holder)) return null;
     const inputs = holder.matches(control) ? [holder] : [...holder.querySelectorAll(control)];
-    const matches = inputs.map(fromField).filter(item => item?.field.key === id && (visible(item.input) ||
-      (["checkbox", "radio"].includes(item.input.type) && [...(item.input.labels || [])].some(visible))));
+    const matches = inputs.filter(visibleField).map(input => fromField(input)).filter(item => item?.field.key === id);
     return matches.length === 1 ? matches[0] : null;
   };
   function issues() {

@@ -9,13 +9,29 @@ export async function temuApparelPage({ href, kind, key, value }) {
   const fail = (code, message) => ({ ok: false, code, message });
   const root = document.getElementById("page_container_id");
   const colorSelector = '[id^="productSkcList["][id$=".mainSpec[0]"]';
+  const emptyColor = "选择或自定义颜色";
+  const colorField = holder => {
+    const inputs = [...holder?.querySelectorAll('input') || []].filter(node => visible(node) && /^(?:text|search)$/u.test(node.type));
+    const exact = inputs.filter(node => node.placeholder === emptyColor);
+    return exact.length === 1 ? exact[0] : !exact.length && inputs.length === 1 ? inputs[0] : null;
+  };
+  const colorWrapper = input => input?.closest('[class*="ST_outerWrapper_"]');
   const holders = () => [...root?.querySelectorAll(colorSelector) || []].filter(holder => visible(holder) &&
     /^productSkcList\[\d{1,3}\]\.mainSpec\[0\]$/u.test(holder.id) &&
-    holder.querySelector('input[placeholder="选择或自定义颜色"]'));
+    (colorField(holder)?.placeholder === emptyColor || selectedColor(holder)));
+  const selectedColor = holder => {
+    const input = colorField(holder);
+    const selected = [...holder.querySelectorAll('[class*="ST_selectValueSingle_"]')].find(visible);
+    if (selected) return clean(selected.textContent);
+    if (!colorWrapper(input)) return clean(input?.value);
+    // Temu changes this prompt to the saved color when a custom value is accepted.
+    const prompt = clean(input.placeholder);
+    return prompt && ![emptyColor, "请选择", "请选择颜色", "请输入"].includes(prompt) &&
+      (!input.value || clean(input.value) === prompt) ? prompt : "";
+  };
   const rows = () => holders().map(holder => ({
     key: holder.id,
-    value: clean(holder.querySelector('[class*="ST_selectValueSingle_"]')?.textContent ||
-      holder.querySelector('input[placeholder="选择或自定义颜色"]')?.value),
+    value: selectedColor(holder),
   }));
 
   if (!onPage() || blocked()) return fail("PAGE_CHANGED", "Temu 服装规格页已切换或有弹窗。");
@@ -23,33 +39,7 @@ export async function temuApparelPage({ href, kind, key, value }) {
   if (kind === "set-sizes") return setSizes();
   if (kind === "select-size-chart") return selectChart();
   if (kind === "inspect") return { ok: true, rows: rows() };
-  if (kind === "set-color") {
-    if (typeof value !== "string" || !clean(value) || value.length > 80) return fail("VALUE_INVALID", "颜色值为空或超过长度限制。");
-    const holder = holders().find(row => row.id === key);
-    const input = holder?.querySelector('input[placeholder="选择或自定义颜色"]');
-    if (!input || !visible(input) || input.disabled || input.readOnly) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
-    const prior = rows().find(row => row.key === key)?.value;
-    if (prior === clean(value)) return { ok: true, status: "unchanged" };
-    if (prior) return fail("SPEC_VALUES_OCCUPIED", "目标服装颜色行已有内容。");
-    if (input.maxLength > 0 && value.length > input.maxLength) return fail("VALUE_INVALID", "颜色值超过 Temu 字数限制。");
-    input.focus();
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-    if (input.isConnected && onPage()) input.dispatchEvent(new Event("change", { bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true }));
-    input.blur();
-    const deadline = Date.now() + 1900;
-    do {
-      await new Promise(resolve => setTimeout(resolve, 120));
-      if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
-      const current = holders().find(row => row.id === key)?.querySelector('input[placeholder="选择或自定义颜色"]');
-      if (rows().find(row => row.key === key)?.value === clean(value) &&
-          current && current.getAttribute("aria-invalid") !== "true" && current.validity?.valid !== false) {
-        return { ok: true, status: "filled" };
-      }
-    } while (Date.now() < deadline);
-    return fail("READBACK_MISMATCH", "Temu 未保留输入的服装颜色。");
-  }
+  if (kind === "set-color") return setColor();
   if (kind !== "add-color") return fail("ACTION_UNSUPPORTED", "此操作不属于服装规格试填。");
   const before = holders();
   if (!before.length || before.length >= 20) return fail("SPEC_VALUES_NOT_RENDERED", "当前服装颜色表缺失或已达到试填上限。");
@@ -74,6 +64,109 @@ export async function temuApparelPage({ href, kind, key, value }) {
     }
   }
   return fail("SPEC_VALUES_NOT_RENDERED", "添加后没有出现新的服装颜色行。");
+
+  async function setColor() {
+    if (typeof value !== "string" || !clean(value) || value.length > 80) return fail("VALUE_INVALID", "颜色值为空或超过长度限制。");
+    const target = () => holders().find(row => row.id === key);
+    const holder = target();
+    const input = colorField(holder);
+    if (!holder) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
+    const wanted = clean(value);
+    const prior = selectedColor(holder);
+    if (prior === wanted) return { ok: true, status: "unchanged" };
+    if (prior) return fail("SPEC_VALUES_OCCUPIED", "目标服装颜色行已有内容。");
+    if (!input || input.disabled) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
+    if (input.maxLength > 0 && value.length > input.maxLength) return fail("VALUE_INVALID", "颜色值超过 Temu 字数限制。");
+
+    const setText = () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      if (input.isConnected && onPage()) input.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const wrapper = colorWrapper(input);
+    if (wrapper) {
+      const picked = await pickColor();
+      if (!picked.ok) return picked;
+    } else {
+      if (input.readOnly) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
+      input.focus();
+      setText();
+      input.blur();
+    }
+    const deadline = Date.now() + 1900;
+    do {
+      if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
+      const current = target();
+      const field = colorField(current);
+      if (current && selectedColor(current) === wanted &&
+          field?.getAttribute("aria-invalid") !== "true" && field?.validity?.valid !== false) {
+        return { ok: true, status: "filled" };
+      }
+      await new Promise(resolve => setTimeout(resolve, 80));
+    } while (Date.now() < deadline);
+    return fail("READBACK_MISMATCH", "Temu 未保留输入的服装颜色。");
+
+    async function pickColor() {
+      const menus = () => [...document.querySelectorAll('[role="listbox"]')].filter(menu =>
+        visible(menu) && (getComputedStyle(menu).opacity || "1") !== "0" &&
+        (holder.contains(menu) || menu.closest('[data-testid="beast-core-portal"],[class*="ST_dropdown_"]')));
+      const head = input.closest('[class*="ST_head_"]');
+      const related = () => {
+        const visibleMenus = menus();
+        const ids = [input, head, wrapper].flatMap(node =>
+          clean(node?.getAttribute("aria-controls") || node?.getAttribute("aria-owns")).split(/\s+/u)).filter(Boolean);
+        const known = visibleMenus.filter(menu => holder.contains(menu) || ids.some(id =>
+          menu.id === id || document.getElementById(id)?.contains(menu)));
+        return known.length === 1 ? known[0] :
+          !known.length && visibleMenus.length === 1 && holder.contains(document.activeElement) ? visibleMenus[0] : null;
+      };
+      if (menus().length) return fail("MENU_STILL_OPEN", "页面已有下拉选项打开。");
+      input.focus({ preventScroll: true });
+      if (!related() && input.isConnected && onPage() && !blocked()) input.click();
+      if (!input.readOnly && input.isConnected && onPage() && !blocked()) setText();
+
+      let unavailable = false;
+      const until = Date.now() + 1700;
+      do {
+        if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
+        const menu = related();
+        const matches = [...menu?.querySelectorAll('[role="option"],[data-testid="beast-core-select-option"]') || []]
+          .filter(node => visible(node) && clean(node.textContent) === wanted);
+        if (matches.length === 1) {
+          const [option] = matches;
+          if (!option.matches('[aria-disabled="true"],[data-disabled="true"],[disabled],a[href]') && !option.querySelector('a[href]')) {
+            option.click();
+            return { ok: true };
+          }
+        }
+        if (matches.length) {
+          unavailable = true;
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 60));
+      } while (Date.now() < until);
+
+      const menu = related();
+      const current = colorField(target());
+      if (!unavailable && current && !current.readOnly && !current.disabled && current.placeholder === emptyColor &&
+          clean(current.value) === wanted && onPage() && !blocked()) {
+        current.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true }));
+        current.blur();
+        // Complete the click-away on the page without invoking another form control.
+        if (visible(menu) && onPage() && !blocked()) {
+          for (const type of ["mousedown", "mouseup", "click"]) {
+            if (!visible(menu)) break;
+            document.body.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+          }
+        }
+        return { ok: true };
+      }
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      input.blur();
+      if (visible(menu)) return fail("MENU_STILL_OPEN", "服装颜色下拉尚未关闭，请核对当前页。");
+      return fail("SPEC_OPTION_MISSING", `Temu 没有唯一匹配的「${wanted}」颜色。`);
+    }
+  }
 
   async function selectChart() {
     const exact = (scope, selector, name) => {
@@ -130,14 +223,31 @@ export async function temuApparelPage({ href, kind, key, value }) {
   async function setSizes() {
     const items = [];
     const finish = (code, message) => ({ ...fail(code, message), items });
-    const sizeKey = candidate => clean(candidate).replace(/\s*HOT$/iu, "").trim().toUpperCase();
-    const desired = Array.isArray(value?.sizes) ? value.sizes.map(sizeKey) : [];
-    if (!desired.length || desired.length > 20 || new Set(desired).size !== desired.length || desired.some(size => !size)) {
+    const sizeLabel = candidate => clean(candidate).replace(/\s*HOT$/iu, "").trim().toUpperCase();
+    const aliases = {
+      EXTRASMALL: "XS", XSMALL: "XS", SMALL: "S", MEDIUM: "M", LARGE: "L",
+      EXTRALARGE: "XL", XLARGE: "XL", XXLARGE: "2XL", "2XLARGE": "2XL", XXL: "2XL",
+      XXXLARGE: "3XL", "3XLARGE": "3XL", XXXL: "3XL", XXXXLARGE: "4XL", "4XLARGE": "4XL", XXXXL: "4XL",
+    };
+    const sizeKey = label => {
+      const compact = label.replace(/[\s-]+/gu, "");
+      return Object.hasOwn(aliases, compact) ? aliases[compact] : label;
+    };
+    const desired = Array.isArray(value?.sizes) ? value.sizes.map(sizeLabel) : [];
+    if (!desired.length || desired.length > 20 || new Set(desired.map(sizeKey)).size !== desired.length || desired.some(size => !size)) {
       return finish("VALUE_INVALID", "需要提供不重复的实际尺码。");
     }
+    const inputSelector = 'input[data-testid="beast-core-select-htmlInput"],input[readonly]';
+    const systemInput = area => {
+      const inputs = [...area?.querySelectorAll(inputSelector) || []].filter(visible);
+      return inputs.length === 1 ? inputs[0] : null;
+    };
     const region = () => {
       const candidates = [...root?.querySelectorAll('[data-testid="beast-core-form-item"]') || []]
-        .filter(item => visible(item) && /^[*＊]?\s*尺码\s*建议/u.test(clean(item.innerText || item.textContent)) &&
+        .filter(item => visible(item) && (/^[*＊]?\s*尺码\s*建议/u.test(clean(item.innerText || item.textContent)) ||
+          [...item.querySelectorAll("label,span")].some(label => visible(label) && !label.childElementCount &&
+            /^[*＊]?\s*尺码$/u.test(clean(label.textContent)))) &&
+          systemInput(item) &&
           item.closest('[class^="product-skc_specItem__"]'));
       return candidates.length === 1 ? candidates[0] : null;
     };
@@ -148,12 +258,12 @@ export async function temuApparelPage({ href, kind, key, value }) {
         const hit = visible(label) ? label : visible(node) ? node : null;
         if (!hit || node.disabled || node.getAttribute("aria-disabled") === "true") return [];
         if (node.matches('[role="checkbox"]') && hit.querySelector('input[type="checkbox"]') && node !== hit.querySelector('input[type="checkbox"]')) return [];
-        const size = sizeKey(node.getAttribute("aria-label") || hit.textContent || node.value);
+        const size = sizeLabel(node.getAttribute("aria-label") || hit.textContent || node.value);
         return size ? [{ size, hit, checked: node.checked ?? node.getAttribute("aria-checked") === "true" }] : [];
       });
     };
-    async function waitFor(check) {
-      const deadline = Date.now() + 2200;
+    async function waitFor(check, timeout = 2200) {
+      const deadline = Date.now() + timeout;
       do {
         if (!onPage() || blocked()) return null;
         const result = check();
@@ -163,37 +273,64 @@ export async function temuApparelPage({ href, kind, key, value }) {
       return null;
     }
     const area = region();
-    const input = area?.querySelector('input[data-testid="beast-core-select-htmlInput"]');
-    const system = clean(value?.system || input?.value);
-    if (!input || !["欧美尺码", "亚洲尺码"].includes(system)) return finish("SPEC_CONTROL_MISSING", "请提供当前类目使用的 欧美尺码 或 亚洲尺码。");
-    if (clean(input.value) !== system && !controls().length) {
-      const options = () => [...document.querySelectorAll('[role="option"],[data-testid="beast-core-select-option"]')].filter(visible);
+    const input = systemInput(area);
+    const systems = ["欧美尺码", "亚洲尺码"];
+    const chosenSystem = () => {
+      const currentArea = region();
+      const field = systemInput(currentArea);
+      const selected = [...currentArea?.querySelectorAll('[class*="ST_selectValueSingle_"]') || []].find(visible);
+      return [clean(field?.value), clean(selected?.textContent), clean(field?.placeholder)].find(name => systems.includes(name));
+    };
+    const system = clean(value?.system || chosenSystem());
+    if (!input || !systems.includes(system)) return finish("SPEC_CONTROL_MISSING", "请提供当前类目使用的 欧美尺码 或 亚洲尺码。");
+    const prior = chosenSystem();
+    if (prior && prior !== system) return finish("SPEC_VALUES_OCCUPIED", "页面已选用了不同的尺码体系。");
+    if (prior !== system) {
+      const options = () => [...document.querySelectorAll('[role="option"],[data-testid="beast-core-select-option"]')]
+        .filter(node => visible(node) && (getComputedStyle(node).opacity || "1") !== "0");
       if (options().length) return finish("MENU_STILL_OPEN", "页面已有下拉选项打开。");
-      const suffix = area.querySelectorAll('[data-testid="beast-core-input-suffix"]');
-      if (suffix.length !== 1 || !visible(suffix[0])) return finish("SPEC_CONTROL_MISSING", "没有找到服装尺码体系下拉入口。");
-      suffix[0].click();
+      const suffix = [...area.querySelectorAll('[data-testid="beast-core-input-suffix"]')].filter(visible);
+      const head = input.closest('[class*="ST_head_"],[data-testid="beast-core-select-header"],[role="combobox"]');
+      const trigger = suffix.length === 1 ? suffix[0] : area.contains(head) && visible(head) ? head : input;
+      input.focus({ preventScroll: true });
+      if (!await waitFor(() => options().length, 180) && onPage() && !blocked() && visible(trigger)) trigger.click();
       const option = await waitFor(() => {
-        const matches = options().filter(node => clean(node.textContent) === system &&
-          !node.matches('[aria-disabled="true"],[data-disabled="true"],[disabled],a[href]'));
-        return matches.length === 1 ? matches[0] : null;
+        const matches = options().filter(node => clean(node.textContent) === system);
+        return matches.length === 1 && !matches[0].matches('[aria-disabled="true"],[data-disabled="true"],[disabled],a[href]')
+          ? matches[0] : null;
       });
       if (!option) return finish("SPEC_OPTION_MISSING", "没有唯一匹配的可用尺码体系。");
       option.click();
-    } else if (clean(input.value) && clean(input.value) !== system) {
-      return finish("SPEC_VALUES_OCCUPIED", "页面已选用了不同的尺码体系。");
     }
-    if (!await waitFor(() => controls().length > 0)) return finish("SPEC_VALUES_NOT_RENDERED", "尺码体系下没有显示可用尺码。");
+    if (!await waitFor(() => chosenSystem() === system && controls().length > 0)) {
+      return finish("SPEC_VALUES_NOT_RENDERED", "尚未核对尺码体系和它对应的可用尺码。");
+    }
     items.push({ label: system, status: "verified" });
+    const unmatched = [];
     for (const size of desired) {
-      const matches = controls().filter(entry => entry.size === size);
-      if (matches.length !== 1) return finish("SPEC_OPTION_MISSING", `Temu 没有唯一匹配的「${size}」尺码。`);
-      if (matches[0].checked) { items.push({ label: size, status: "unchanged" }); continue; }
-      matches[0].hit.click();
-      if (!await waitFor(() => controls().some(entry => entry.size === size && entry.checked))) {
-        return finish("READBACK_MISMATCH", `Temu 未确认选择「${size}」尺码。`);
+      if (!onPage() || blocked()) return finish("PAGE_CHANGED", "填写服装尺码时页面已切换或有弹窗。");
+      const current = controls();
+      const exact = current.filter(entry => entry.size === size);
+      const matches = exact.length ? exact : current.filter(entry => sizeKey(entry.size) === sizeKey(size));
+      if (matches.length !== 1) {
+        unmatched.push(size);
+        continue;
       }
-      items.push({ label: size, status: "filled" });
+      const [match] = matches;
+      if (match.checked) {
+        items.push({ label: match.size, status: "unchanged" });
+        continue;
+      }
+      match.hit.click();
+      if (!await waitFor(() => {
+        const readback = controls().filter(entry => entry.size === match.size);
+        return readback.length === 1 && readback[0].checked;
+      })) {
+        return finish("READBACK_MISMATCH", `Temu 未确认选择「${match.size}」尺码。`);
+      }
+      items.push({ label: match.size, status: "filled" });
     }
+    if (unmatched.length) return finish("SPEC_OPTION_MISSING", `Temu 没有唯一匹配的尺码：${unmatched.join("、")}。`);
     return { ok: true, status: "verified", items };
   }
 

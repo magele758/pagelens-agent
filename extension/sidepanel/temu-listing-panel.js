@@ -94,7 +94,7 @@ export function bindTemuListingPanel({
     </div>
     <footer class="temu-listing-footer">
       <span class="temu-hint">试填到草稿，发布前可核对。</span>
-      <button class="temu-listing-action primary" type="button" data-action="run">开始试填</button>
+      <button class="temu-listing-action primary" type="button" data-action="run" disabled>开始试填</button>
       <button class="temu-listing-action" type="button" data-action="stop" hidden>停止</button>
     </footer>`;
   document.body.append(dialog);
@@ -225,8 +225,13 @@ export function bindTemuListingPanel({
     },
   });
 
+  function syncRunButton() {
+    action("run").disabled = Boolean(run || directoryRequest || !chosenCategory);
+  }
+
   function updateCategory(value) {
     chosenCategory = value;
+    syncRunButton();
     const path = value?.path.join(" › ");
     category.setValue(path, value?.id || "");
   }
@@ -384,7 +389,7 @@ export function bindTemuListingPanel({
     } finally {
       directoryRequest = undefined;
       action("choose").disabled = false;
-      action("run").disabled = Boolean(run);
+      syncRunButton();
       action("choose").querySelector("span").textContent = products.length ? "更换商品目录" : "选择商品目录";
     }
   });
@@ -434,6 +439,7 @@ export function bindTemuListingPanel({
       const tab = await openTab({ tab: active, href: startUrl, accepts: isTemuCategoryPage, signal });
       signal.throwIfAborted();
       const approved = upload.checked;
+      input.uploadImages = approved;
       const useModel = find("listing-ai").checked;
       const imagePaths = new Set([...(input.mainImages || []), ...(input.detailImages || []), ...(input.variantImages || []), input.sizeChartImagePath]);
       const call = createTemuListingToolCaller({
@@ -447,13 +453,16 @@ export function bindTemuListingPanel({
         onStep: ({ label, completed }) => tell(`${label} · 已核对 ${completed.length} 项`),
       });
       const completed = result.items.filter(item => /^(?:filled|verified|unchanged)$/u.test(item.status)).length;
-      tell(`试填${result.missing.length || result.issues.length ? "待核对" : "已完成"}，已核对 ${completed} 项，必填待补 ${result.missing.length} 项。`, result.status === "needs-review");
+      const verified = result.verificationComplete === false ? "最终回读未完成。" : `必填待补 ${result.missing.length} 项。`;
+      tell(result.status === "cancelled" ? "试填已停止。" :
+        `试填${result.status === "needs-review" ? "待核对" : "已完成"}，已核对 ${completed} 项，${verified}`, result.status === "needs-review");
       renderIssues([...result.issues.map(({ label, message }) => `${label}：${message}`), ...result.missing.map(({ label }) => `待填：${label}`)]);
     } catch (error) {
       tell(signal.aborted ? "试填已停止。" : error.message || "Temu 试填失败。", !signal.aborted);
     } finally {
       run = undefined;
-      source.disabled = action("run").disabled = false;
+      source.disabled = false;
+      syncRunButton();
       action("stop").hidden = true;
     }
   });

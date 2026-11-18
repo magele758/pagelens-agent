@@ -1,12 +1,11 @@
 
 const ORIGIN = "https://agentseller.temu.com";
 const CATEGORY_PATH = "/goods/create/category";
-const EDIT_PATH = "/goods/edit";
 
 export function isTemuCategoryPage(value) {
   try {
     const url = new URL(value);
-    return url.origin === ORIGIN && url.pathname === CATEGORY_PATH;
+    return !url.username && !url.password && url.origin === ORIGIN && url.pathname === CATEGORY_PATH;
   } catch {
     return false;
   }
@@ -19,7 +18,8 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
   const onPage = () => location.origin === "https://agentseller.temu.com" && location.pathname === path && location.href === expectedHref;
   const clean = (value) => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const shown = (element) => Boolean(element?.isConnected && element.getClientRects().length &&
-    !element.closest('[hidden],[aria-hidden="true"],[inert]') && getComputedStyle(element).visibility !== "hidden");
+    !element.closest('[hidden],[aria-hidden="true"],[inert]') && getComputedStyle(element).visibility !== "hidden" &&
+    (getComputedStyle(element).opacity || "1") !== "0");
   const modal = () => [...document.querySelectorAll('dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]')].some(shown);
   const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const unique = (items) => items.length === 1 ? items[0] : null;
@@ -39,43 +39,75 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
     return null;
   }
 
-  function field(label, placeholder) {
-    const tag = [...document.querySelectorAll('label,[data-field-label],[class*="Form_itemLabelContent_"],span,div')].find((element) =>
-      shown(element) && element.childElementCount <= 1 && clean(element.textContent).replace(/^\*\s*/u, "") === label);
-    for (let group = tag?.parentElement, depth = 0; group && depth < 7; group = group.parentElement, depth++) {
-      const input = unique([...group.querySelectorAll('input')].filter((element) => shown(element) && (!placeholder || element.placeholder === placeholder)));
-      if (input && !input.disabled) return { input, head: input.closest(groupSelector) || input };
+  function fieldFromInput(input) {
+    if (!input || input.disabled || input.closest('[aria-disabled="true"],[data-disabled="true"]')) return null;
+    const head = input.closest(groupSelector) || input;
+    return { input, head, wrapper: head.closest('[class*="ST_outerWrapper_"],[role="combobox"]') || head };
+  }
+
+  function field(label, placeholder, holder) {
+    const within = group => unique([...group.querySelectorAll('input')].filter((element) =>
+      shown(element) && (!placeholder || element.placeholder === placeholder)));
+    const pinned = holder && fieldFromInput(within(holder));
+    if (pinned) return pinned;
+    const tags = [...document.querySelectorAll('label,[data-field-label],[class*="Form_itemLabelContent_"],span,div')].filter((element) =>
+      shown(element) && element.childElementCount <= 1 && clean(element.textContent).replace(/^[*＊]\s*/u, "").replace(/[:：]$/u, "") === label);
+    const results = new Map();
+    for (const tag of tags) {
+      for (let group = tag.parentElement, depth = 0; group && group !== document.body && depth < 7; group = group.parentElement, depth++) {
+        const target = fieldFromInput(within(group));
+        if (target) { results.set(target.input, target); break; }
+      }
     }
-    return null;
+    return unique([...results.values()]);
   }
 
-  function portalOptions() {
-    const lists = [...document.querySelectorAll('[role="listbox"],[class*="ST_dropdown_"]')].filter(shown);
-    return [...new Set(lists.flatMap((list) => [...list.querySelectorAll(optionSelector)].filter(shown)))];
+  function portalMenus() {
+    const visibleLists = [...document.querySelectorAll('[role="listbox"]')].filter(shown);
+    return [...visibleLists, ...[...document.querySelectorAll('[class*="ST_dropdown_"]')].filter(node =>
+      shown(node) && node.querySelector(optionSelector) && !visibleLists.some(list => node.contains(list)))];
   }
 
+  const choices = menu => [...menu.querySelectorAll(optionSelector)].filter(shown);
+  const unavailable = entry => entry.matches('[aria-disabled="true"],[data-disabled="true"],[disabled],a[href]') ||
+    Boolean(entry.querySelector("a[href]"));
   function selected(field) {
-    return clean(field.input.value || field.head.querySelector('[class*="ST_selectValue"]')?.textContent);
+    return clean(field.head.querySelector('[class*="ST_selectValueSingle_"],[class*="ST_selectValue_"]')?.textContent || field.input.value);
+  }
+
+  function relatedMenu(field) {
+    const menus = portalMenus();
+    const referenced = [field.input, field.head, field.wrapper].flatMap(node =>
+      clean(node.getAttribute("aria-controls") || node.getAttribute("aria-owns")).split(/\s+/u).filter(Boolean));
+    const associated = menus.filter(menu => field.wrapper.contains(menu) ||
+      referenced.some(id => document.getElementById(id)?.contains(menu)));
+    return unique(associated) || (!associated.length && !referenced.length &&
+      field.wrapper.contains(document.activeElement) ? unique(menus) : null);
   }
 
   async function open(field) {
-    let choices = portalOptions();
-    if (choices.length) return choices;
-    field.input.focus({ preventScroll: true });
-    choices = portalOptions();
-    if (!choices.length) {
-      field.head.click();
-      choices = await until(() => portalOptions().length && portalOptions(), 1100);
+    if (portalMenus().length) {
+      const existing = relatedMenu(field);
+      return existing ? { menu: existing, options: choices(existing) } : null;
     }
-    return choices || [];
+    field.input.focus({ preventScroll: true });
+    await pause(0);
+    if (!onPage() || modal()) return null;
+    if (!portalMenus().length) field.head.click();
+    const menu = await until(() => {
+      const current = relatedMenu(field);
+      return current && choices(current).length ? current : null;
+    }, 2200);
+    return menu && { menu, options: choices(menu) };
   }
 
-  async function close(field) {
-    if (!portalOptions().length) return;
+  async function close(field, menu) {
+    if (!shown(menu)) return true;
     field.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
     field.input.blur();
-    if (portalOptions().length) field.head.click();
-    if (portalOptions().length) await until(() => !portalOptions().length, 400);
+    if (await until(() => !shown(menu), 350)) return true;
+    if (onPage() && !modal() && portalMenus().length === 1 && portalMenus()[0] === menu && shown(field.head)) field.head.click();
+    return Boolean(await until(() => !shown(menu), 700));
   }
 
   const categoryColumns = () => [...document.querySelectorAll(categorySearch)].filter(shown);
@@ -111,35 +143,52 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
   if (!onPage() || modal()) return fail("Temu 页面已切换或有弹窗挡住，请返回目标页面后重试。");
 
   if (originMode) {
-    const matches = (entry, label) => clean(entry.textContent) === clean(label);
+    const mainland = origin[0]?.some(label => /^(?:CN|China|中国|中国大陆|中国\(大陆\))$/iu.test(clean(label)));
+    const regionName = label => mainland
+      ? clean(label).replace(/(?:壮族自治区|维吾尔自治区|回族自治区|自治区|省|市)$/u, "")
+      : clean(label);
     for (const [index, labels] of origin.entries()) {
-      const currentField = () => index === 0 ? field("商品产地", "请选择") : (() => {
-        const input = unique([...document.querySelectorAll('input[placeholder="请选择省份"]')].filter(shown));
-        return input && { input, head: input.closest(groupSelector) || input };
-      })();
-      const target = await until(currentField, 4000);
+      const matches = value => labels.some(label => index === 0 ? clean(value) === clean(label) : regionName(value) === regionName(label));
+      const currentField = () => {
+        const holder = document.getElementById("productOriginCode");
+        if (index === 0) return field("商品产地", "请选择", holder);
+        for (const area of [holder, document]) {
+          const input = area && unique([...area.querySelectorAll('input[placeholder="请选择省份"]')].filter(shown));
+          if (input) return fieldFromInput(input);
+        }
+        return null;
+      };
+      const target = await until(currentField, 5000);
       if (!target) return fail("找不到当前类目的商品产地控件，请在 Temu 核对。");
-      if (labels.some((label) => selected(target) === clean(label))) continue;
-      const option = unique((await open(target)).filter((entry) => labels.some((label) => matches(entry, label))));
-      if (!option) return fail(`Temu 当前找不到产地选项「${labels[0]}」。`);
+      if (matches(selected(target))) continue;
+      const opened = await open(target);
+      if (!opened) return fail("无法确认产地下拉属于当前字段，请关闭其他下拉后重试。");
+      const option = await until(() => unique(choices(opened.menu).filter(entry => !unavailable(entry) && matches(entry.textContent))));
+      if (!option) {
+        await close(target, opened.menu);
+        return fail(`Temu 当前找不到唯一可选的产地「${labels[0]}」。`);
+      }
       option.click();
       if (!await until(() => {
         const fresh = currentField();
-        return fresh && labels.some((label) => selected(fresh) === clean(label));
+        return fresh && matches(selected(fresh));
       })) return fail(`Temu 尚未确认产地「${labels[0]}」。`);
+      if (!await close(target, opened.menu)) return fail(`产地「${labels[0]}」已选择，下拉尚未关闭。`);
     }
     return { ok: true };
   }
 
-  const site = field("经营站点", "请选择");
+  const site = await until(() => field("经营站点", "请选择"), kind === "next" ? 2000 : 10000);
   if (!site) return fail("未找到经营站点，请等 Temu 第一步加载后重试。");
   if (kind === "sites") {
-    const names = (await open(site)).map((entry) => ({ label: clean(entry.textContent),
+    const opened = await open(site);
+    if (!opened) return fail("未能定位经营站点下拉，请关闭其他下拉后重试。");
+    const names = opened.options.map(entry => ({ label: clean(entry.textContent),
       selected: ["true", "checked"].includes(entry.getAttribute("aria-selected") || entry.getAttribute("data-checked")) || selected(site) === clean(entry.textContent),
-      disabled: entry.matches('[aria-disabled="true"],[data-disabled="true"],[disabled]') }));
-    await close(site);
-    const sites = names.filter((entry) => entry.label && names.filter((other) => other.label === entry.label).length === 1)
-      .map((entry) => ({ id: entry.label, ...entry }));
+      disabled: unavailable(entry) }));
+    if (!await close(site, opened.menu)) return fail("经营站点下拉尚未关闭。");
+    const sites = names.filter(entry => entry.label && names.filter(other => other.label === entry.label).length === 1)
+      .map(entry => ({ id: entry.label, ...entry }));
     return sites.length ? { ok: true, sites } : fail("经营站点列表未加载或没有可识别的选项。");
   }
   if (kind === "next") {
@@ -151,14 +200,19 @@ export async function temuStagePage({ kind, expectedHref, siteId, category = [],
   if (kind !== "select" || !category.length) return fail("请选择一个完整的商品类目。");
 
   if (selected(site) !== clean(siteId)) {
-    const option = unique((await open(site)).filter((entry) => clean(entry.textContent) === clean(siteId) &&
-      !entry.matches('[aria-disabled="true"],[data-disabled="true"],[disabled]')));
-    if (!option) return fail(`该店铺当前没有可选的「${siteId}」。`);
+    const opened = await open(site);
+    if (!opened) return fail("未能定位经营站点下拉，请关闭其他下拉后重试。");
+    const option = await until(() => unique(choices(opened.menu).filter(entry => !unavailable(entry) && clean(entry.textContent) === clean(siteId))));
+    if (!option) {
+      await close(site, opened.menu);
+      return fail(`该店铺当前没有可选的「${siteId}」。`);
+    }
     option.click();
     if (!await until(() => {
       const fresh = field("经营站点", "请选择");
       return fresh && selected(fresh) === clean(siteId);
     })) return fail(`Temu 尚未确认经营站点「${siteId}」。`);
+    if (!await close(site, opened.menu)) return fail("经营站点已选择，下拉尚未关闭。");
   }
   if (!pickedCategory(category)) {
     for (const [index, label] of category.entries()) {
