@@ -57,18 +57,19 @@ export async function sellerAttributes(expectedUrl, plan = null) {
   return result;
 }
 
-export function checkAttributes(plan, catalog) {
+export function checkAttributes(plan, catalog, { exact = false } = {}) {
   if (!plan) return;
   if (catalog?.some(field => !Object.hasOwn(plan, field.name))) throw Error("Draft category attribute list changed");
   for (const [name, values] of Object.entries(plan)) {
     const field = catalog?.find(f => f.name === name);
-    if (!field || !values.every(value => field.selected.includes(matchAttributeValue(field.options, value))))
+    if (!field || !values.every(value => field.selected.includes(matchAttributeValue(field.options, value))) ||
+        (exact && values.length > 0 && field.selected.length !== values.length))
       throw Error("Draft attribute differs: " + name);
   }
 }
 
-export function checkDraftAttributes(copy, state) {
+export function checkDraftAttributes(copy, state, options) {
   if (state.hasCategoryAttributes && !copy.attributePlan)
     throw Error("Missing saved attribute plan for this draft; reconcile its prior receipt or resave it");
-  checkAttributes(copy.attributePlan?.values, state.attributeCatalog);
+  checkAttributes(copy.attributePlan?.values, state.attributeCatalog, options);
 }

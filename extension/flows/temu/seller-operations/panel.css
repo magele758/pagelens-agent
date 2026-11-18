@@ -1,0 +1,76 @@
+.temu-operations-dialog {
+  box-sizing: border-box;
+  width: min(510px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.temu-operations-dialog::backdrop { background: #1c191766; }
+.temu-operations-dialog p { margin: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
+.temu-operations-dialog [hidden] { display: none; }
+.temu-operations-status:empty { display: none; }
+.temu-operations-status[data-error] { color: var(--danger); }
+.temu-operations-target { color: var(--muted); }
+
+.temu-operations-actions,
+.temu-operations-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.temu-operations-links a {
+  display: inline-block;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.temu-operations-links a:hover { border-color: var(--accent); }
+.temu-operations-links a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.temu-operations-pagination,
+.temu-operations-item-name {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.temu-operations-pagination { margin-block: 8px; }
+.temu-operations-dialog input[type="checkbox"] { inline-size: 14px; block-size: 14px; flex: none; margin: 2px 0 0; }
+.temu-operations-preview { padding: 10px 0; font-size: 12px; }
+.temu-operations-preview summary { cursor: pointer; margin-top: 6px; }
+.temu-operations-preview pre { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.temu-operations-fields {
+  display: grid;
+  gap: 6px;
+  max-height: 45vh;
+  overflow: auto;
+}
+
+.temu-operations-fields fieldset {
+  display: grid;
+  min-inline-size: 0;
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.temu-operations-item-name { overflow-wrap: anywhere; }
+.temu-operations-item-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.temu-operations-item-values label { font-size: 12px; color: var(--muted); }
+.temu-operations-item-values input { box-sizing: border-box; width: 100%; margin-top: 3px; }

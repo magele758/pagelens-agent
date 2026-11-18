@@ -1,0 +1,39 @@
+.temu-listing-dialog {
+  box-sizing: border-box;
+  width: min(460px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.temu-listing-dialog::backdrop { background: #1c191766; }
+.temu-listing-dialog h2 { margin: 0; font-size: 16px; }
+.temu-listing-dialog header,
+.temu-listing-dialog footer,
+.temu-listing-row { display: flex; align-items: center; gap: 8px; }
+.temu-listing-dialog header { justify-content: space-between; }
+.temu-listing-dialog footer { justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+.temu-listing-dialog p { margin: 8px 0; color: var(--muted); font-size: 12px; }
+.temu-listing-source { display: grid; gap: 6px; margin-top: 12px; }
+.temu-listing-source input:not([type="checkbox"]),
+.temu-listing-source select,
+.temu-listing-source textarea { box-sizing: border-box; width: 100%; min-width: 0; }
+.temu-listing-source textarea { margin-top: 6px; }
+.temu-listing-row button { flex: none; }
+.temu-listing-check { display: flex; align-items: start; gap: 6px; font-size: 12px; }
+.temu-listing-check input { flex: none; width: auto; margin: 2px 0 0; }
+#temu-listing-message[data-error] { color: var(--danger); }
+#temu-listing-issues:empty { display: none; }
+#temu-listing-issues {
+  max-height: 150px;
+  margin: 6px 0 0;
+  padding-left: 20px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}

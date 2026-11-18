@@ -18,14 +18,16 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { japaneseSourceId } from "../extension/skills/tiktok-mx-draft/tiktok-mx-native.mjs";
 
-const HOME = os.homedir();
-const INBOX = path.join(HOME, ".pagelens", "agent-inbox");
-const OUTBOX = path.join(HOME, ".pagelens", "agent-outbox");
-const PROCESSED = path.join(INBOX, "processed");
-const PAYLOADS = path.join(HOME, ".pagelens", "agent-payloads");
+const home = process.env.PAGELENS_HOME || path.join(os.homedir(), ".pagelens");
+const sharedInbox = path.join(home, "agent-inbox");
+const OUTBOX = path.join(home, "agent-outbox");
+const PAYLOADS = path.join(home, "agent-payloads");
+let INBOX = sharedInbox;
+let PROCESSED = path.join(INBOX, "processed");
+let extensionId;
 
 function ensureDirs() {
-  for (const d of [INBOX, OUTBOX, PROCESSED, PAYLOADS]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [INBOX, OUTBOX, PROCESSED, PAYLOADS]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
 }
 
 function parseArgs(argv) {
@@ -50,11 +52,18 @@ function readMaybeFile(p) {
   return fs.readFileSync(path.resolve(String(p)), "utf8");
 }
 
+function jobId(value) {
+  if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new Error("Invalid inbox job ID");
+  return value;
+}
+
 function enqueue(opts) {
   ensureDirs();
-  const id = String(opts.id || crypto.randomUUID());
+  const id = jobId(opts.id || crypto.randomUUID());
   const action = String(opts.action || "").trim();
   if (!action) throw new Error("--action required");
+  if (extensionId && ["agent_prompt", "agent_cancel"].includes(action))
+    throw new Error("Agent prompts and cancellations use the shared inbox");
 
   const job = {
     id,
@@ -140,15 +149,22 @@ function enqueue(opts) {
   }
 
   const jobPath = path.join(INBOX, `${id}.json`);
-  fs.writeFileSync(jobPath, JSON.stringify(job, null, 2), { encoding: "utf8", mode: 0o600 });
+  const pending = `${jobPath}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(pending, JSON.stringify(job, null, 2), { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(pending, jobPath);
   console.log(JSON.stringify({ ok: true, id, jobPath, outboxPath: path.join(OUTBOX, `${id}.json`) }, null, 2));
   return id;
 }
 
 function readOutbox(id) {
-  const p = path.join(OUTBOX, `${id}.json`);
+  const p = path.join(OUTBOX, `${jobId(id)}.json`);
   if (!fs.existsSync(p)) return null;
-  return JSON.parse(fs.readFileSync(p, "utf8"));
+  let reply;
+  try { reply = JSON.parse(fs.readFileSync(p, "utf8")); }
+  catch (error) { if (error instanceof SyntaxError || error.code === "ENOENT") return null; throw error; }
+  if (extensionId && reply.consumerExtensionId !== extensionId)
+    throw new Error(`Job ${id} was handled by a different extension`);
+  return reply;
 }
 
 async function waitId(id, { timeoutMs = 60000, intervalMs = 1000 } = {}) {
@@ -189,7 +205,7 @@ function status() {
 }
 
 function dropPending(id, reason) {
-  const jobPath = path.join(INBOX, `${id}.json`);
+  const jobPath = path.join(INBOX, `${jobId(id)}.json`);
   if (!fs.existsSync(jobPath)) return false;
   fs.renameSync(jobPath, path.join(PROCESSED, `${id}.json`));
   fs.writeFileSync(
@@ -242,6 +258,13 @@ function cancel(args) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._[0] || "status";
+  extensionId = args["extension-id"] || process.env.PAGELENS_EXTENSION_ID;
+  if (extensionId) {
+    if (!/^[a-p]{32}$/.test(extensionId)) throw new Error("Expected a Chrome extension ID for --extension-id");
+    if (cmd === "cancel") throw new Error("Agent cancellations use the shared inbox");
+    INBOX = path.join(sharedInbox, extensionId);
+    PROCESSED = path.join(INBOX, "processed");
+  }
   if (cmd === "enqueue") {
     enqueue(args);
     return;

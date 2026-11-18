@@ -1,3 +1,12 @@
+export function isMxSellerManageReturn(value) {
+  if (typeof value !== "string" || !value) return false;
+  const page = new URL(value);
+  const tab = page.searchParams.get("tab");
+  return page.origin === "https://seller.tiktokshopglobalselling.com" && !page.username && !page.password &&
+    page.pathname === "/product/manage" && page.searchParams.get("shop_region") === "MX" &&
+    (tab === null || tab === "draft");
+}
+
 export function normDraftTitle(value) {
   return String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ");
 }

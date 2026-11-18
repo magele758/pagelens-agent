@@ -9,7 +9,7 @@ export async function inspectDraftJob(job, bridge) {
   let step = 0, tabId, read;
   const dispatch = (tool, args) => bridge.call({ id: job.id + "." + ++step, tool, args });
   async function browserRead() {
-    const opened = await dispatch("open_tab", { url, active: true, groupTitle: "PageLens · MX " + sourceId.slice(-6) });
+    const opened = await dispatch("open_tab", { url, active: false, groupTitle: "PageLens · MX " + sourceId.slice(-6) });
     if (!opened.ok) throw Error(opened.error?.message || "Draft did not open");
     tabId = opened.result.tabId;
     return runMxDraftRead({ action: "read_mx_draft", url, tabId }, dispatch, async id => {

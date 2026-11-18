@@ -65,6 +65,45 @@ function chartImage(dir, input) {
   return candidates.length ? image(dir, candidates[0], MAX_SIZE_CHART_IMAGE) : null;
 }
 
+function resolveAdditionalImages(dir, input) {
+  const checked = new Map();
+  const missing = [];
+  function resolve(relative) {
+    if (typeof relative !== "string" || !relative) return undefined;
+    if (checked.has(relative)) return checked.get(relative);
+    let result;
+    try {
+      result = image(dir, relative);
+    } catch {
+      missing.push(relative);
+    }
+    checked.set(relative, result);
+    return result;
+  }
+  function replacePath(item, key) {
+    if (!item || typeof item !== "object" || !Object.hasOwn(item, key)) return;
+    const result = resolve(item[key]);
+    if (result) item[key] = result;
+    else delete item[key];
+  }
+  for (const file of Array.isArray(input.imageFiles) ? input.imageFiles : []) replacePath(file, "path");
+  for (const group of Array.isArray(input.variantGroups) ? input.variantGroups : []) {
+    for (const option of Array.isArray(group?.options) ? group.options : []) replacePath(option, "imagePath");
+  }
+  for (const sku of Array.isArray(input.skus) ? input.skus : []) replacePath(sku, "imagePath");
+  for (const key of ["mainImages", "detailImages"]) {
+    if (Array.isArray(input[key])) {
+      // Product capture keeps the source URLs as provenance even if the local file is missing.
+      input[key] = input[key].flatMap(value => {
+        if (typeof value === "string" && /^https:\/\//u.test(value)) return [value];
+        const result = resolve(value);
+        return result ? [result] : [];
+      });
+    }
+  }
+  return missing;
+}
+
 export function loadProductDirectory(root) {
   const canonical = fs.realpathSync(root);
   if (canonical === path.parse(canonical).root || !fs.statSync(canonical).isDirectory()) throw new Error("请选择商品根目录。");
@@ -93,7 +132,8 @@ export function loadProductDirectory(root) {
       } else if (input.variant?.imagePath != null) {
         input.variant.imagePath = image(dir, input.variant.imagePath);
       }
-      products.push({ folder, title: input.title, input });
+      const missingImages = resolveAdditionalImages(dir, input);
+      products.push({ folder, title: input.title, input, ...(missingImages.length && { missingImages }) });
     } catch (error) {
       const message = error?.code === "ENOENT" ? "缺少 product.json 或它引用的图片文件。" : error.message;
       issues.push({ folder, error: message });
