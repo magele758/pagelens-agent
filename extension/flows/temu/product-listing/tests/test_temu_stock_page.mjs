@@ -40,18 +40,18 @@ document.querySelector("#sku_stock_10004_16066 svg").addEventListener("click", (
   const dialog = document.createElement("div");
   dialog.className = "MDL_inner_mock";
   dialog.dataset.testid = "beast-core-modal-inner";
-  const currentSku = missingCurrentSku ? "" : "<span>当前sku</span>";
-  const extraWarehouse = warehouseConflict
-    ? `<tr><td>456</td><td>${input("extra")}</td><td>美国站</td></tr>` : "";
+  const currentSku = missingCurrentSku ? "" : "<em>当前SKU</em>";
+  const otherRow = warehouseConflict
+    ? `<tr><td>456</td><td>${input("other","19")}</td><td>美国站</td></tr>`
+    : `<tr><td>橙色</td><td>123</td><td>${input("other", "19")}</td><td>美国站</td></tr>`;
   dialog.innerHTML = `
     ${title}
     <section>${input("bulk")}<button>批量填写</button></section>
     <table class="performance-table_performanceTable__mock"><thead><tr><th>颜色</th><th>尺码</th><th>发货仓</th>
-      <th><span>当前库存</span><span>（选填）</span></th><th>覆盖站点</th></tr></thead><tbody>
-      <tr><td>橙色</td><td>M</td><td>123</td><td>${input("other", "19")}</td><td>美国站</td></tr>
-      <tr><td rowspan="${warehouseConflict ? 2 : 1}">花色</td><td rowspan="${warehouseConflict ? 2 : 1}">S ${currentSku}</td>
+      <th>当前库存<span>（选填）</span></th><th>覆盖站点</th></tr></thead><tbody>
+      <tr><td rowspan="${warehouseConflict ? 2 : 1}">花色</td><td rowspan="2">S ${currentSku}</td>
         <td>123</td><td>${input("current")}</td><td>美国站</td></tr>
-      ${extraWarehouse}</tbody></table>
+      ${otherRow}</tbody></table>
     <button id="confirm">确认</button><button id="cancel">取消</button>`;
   dialog.querySelector("#confirm").addEventListener("click", () => {
     confirmed++;

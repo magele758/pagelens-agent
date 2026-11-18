@@ -22,6 +22,15 @@ const fit = new JSDOM(`
       <td><div id="productSkuVolumeWeightMap.s1.inputWeight"><input id="generated-2" type="number" min="1"></div></td>
       <td><div id="productSkuMap.s1.siteSupplierPriceMap.100"><input id="generated-3" type="number" min="0.01"></div></td>
     </tr></tbody></table>
+    <div id="productSkcList[0].mainSpec[0]">
+      <div class="colour-spec-select_colorSpecSelect__test">
+        <input data-testid="beast-core-input-htmlInput" placeholder="花色">
+      </div>
+    </div>
+    <div id="productSkcList[0].carouselImgsI18n.common">
+      <div class="upload-trigger_wrap__test">素材中心</div>
+      <img src="https://images.example/hero.jpg?thumbnail=300">
+    </div>
     <button>创建</button>
   </main>`, { url: editor, runScripts: "outside-only" });
 const { document } = fit.window;
@@ -40,6 +49,8 @@ assert.deepEqual(Array.from(found.fields, field => [field.key, field.label, fiel
   ["productSkuMap.s1.siteSupplierPriceMap.100", "申报价格(CNY)", true],
 ]);
 assert.deepEqual(Array.from(found.fields.find(field => field.skuMember === "inputWeight").rowLabels), ["黑白条纹", "S"]);
+assert.equal(found.uploads[0].variant, "花色");
+assert.deepEqual(Array.from(found.uploads[0].images), ["https://images.example/hero.jpg"]);
 assert.equal((await call({ kind: "write", key: "productName", value: "女士条纹 T 恤" })).status, "filled");
 assert.equal((await call({ kind: "write", key: "productEnName", value: "Women's Stripe Tee" })).status, "filled");
 assert.equal((await call({ kind: "write", key: "productSkuVolumeWeightMap.s1.inputWeight", value: "230" })).status, "filled");

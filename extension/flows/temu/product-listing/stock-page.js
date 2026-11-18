@@ -12,8 +12,13 @@ export async function temuStockPage({ href, kind, key, value, warehouse }) {
   const modals = () => [...document.querySelectorAll(
     '[class*="MDL_inner_"],dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]',
   )].filter(visible);
-  const exact = (node, text) => [...node.querySelectorAll("h1,h2,h3,div,span")].some(el =>
-    visible(el) && !el.children.length && clean(el.textContent) === text);
+  const labelKey = text => clean(text).toLowerCase();
+  const exact = (node, text) => [node, ...node.querySelectorAll("*")].some(el => {
+    if (!visible(el)) return false;
+    const direct = [...el.childNodes].filter(child => child.nodeType === Node.TEXT_NODE)
+      .map(child => child.textContent).join("");
+    return labelKey(el.textContent) === labelKey(text) || labelKey(direct) === labelKey(text);
+  });
   const activeStock = () => {
     return unique(modals().filter(node => node.matches('[data-testid="beast-core-modal-inner"]') &&
       [...node.children].some(child => child.matches('[class*="MDL_header_"]') && clean(child.textContent) === "填写库存")));
@@ -28,30 +33,33 @@ export async function temuStockPage({ href, kind, key, value, warehouse }) {
     const lastHeader = table.tHead?.rows[table.tHead.rows.length - 1];
     if (!lastHeader) return [];
     return [...lastHeader.cells].filter(cell => cell.colSpan === 1 && visible(cell) && names.some(name =>
-      clean(cell.textContent) === name || exact(cell, name)));
+      exact(cell, name)));
   }
 
-  function rowCell(row, header) {
-    const before = [...header.parentElement.cells].slice(0, header.cellIndex);
-    const column = before.reduce((total, cell) => total + cell.colSpan, 0);
-    // The warehouse grid can span a SKU's color and size over its warehouses.
-    let position = 0;
-    const occupied = new Set();
-    for (const previous of row.parentElement.rows) {
-      position = 0;
-      const offset = previous.sectionRowIndex;
-      for (const cell of previous.cells) {
-        while (occupied.has(offset + ":" + position)) position++;
-        if (previous === row && position === column && cell.colSpan === 1) return cell;
-        const until = cell.rowSpan ? offset + cell.rowSpan : row.parentElement.rows.length;
-        for (let r = offset + 1; r < Math.min(until, row.sectionRowIndex + 1); r++) {
-          for (let c = position; c < position + cell.colSpan; c++) occupied.add(r + ":" + c);
+  function columnIndex(header) {
+    return [...header.parentElement.cells].slice(0, header.cellIndex).reduce((total, cell) => total + cell.colSpan, 0);
+  }
+
+  function tableRows(table) {
+    return [...table.tBodies].flatMap(body => {
+      const carried = new Map();
+      return [...body.rows].map((row, index) => {
+        const cells = [];
+        for (const [column, { cell, end }] of carried) {
+          if (index < end) cells[column] = cell;
         }
-        position += cell.colSpan;
-      }
-      if (previous === row) return null;
-    }
-    return null;
+        let column = 0;
+        for (const cell of row.cells) {
+          while (cells[column]) column++;
+          const end = cell.rowSpan === 0 ? body.rows.length : index + cell.rowSpan;
+          for (let covered = 0; covered < cell.colSpan; covered++, column++) {
+            cells[column] = cell;
+            carried.set(column, { cell, end });
+          }
+        }
+        return { row, cells };
+      });
+    });
   }
 
   function listingCell() {
@@ -74,12 +82,20 @@ export async function temuStockPage({ href, kind, key, value, warehouse }) {
     const [warehouseColumn] = columns(table, ["发货仓"]);
     const marker = unique([...table.querySelectorAll("tbody td")].filter(cell => visible(cell) && exact(cell, "当前sku")));
     if (!marker) return null;
-    const row = marker.parentElement;
-    // Refuse any SKU with more than one warehouse row. The listing summary does not verify a warehouse-level value.
-    if (marker.rowSpan !== 1) return null;
-    const depot = clean(rowCell(row, warehouseColumn)?.textContent);
+    const warehouseIndex = columnIndex(warehouseColumn);
+    const stockIndex = columnIndex(stock);
+    const rows = tableRows(table).filter(({ row }) => visible(row));
+    const current = rows.find(({ row }) => row === marker.parentElement);
+    if (!current) return null;
+    // Temu can share a size cell across two different colors. Compare the complete variation
+    // before refusing multi-warehouse rows for the same SKU.
+    const variation = cells => JSON.stringify(cells.slice(0, warehouseIndex).map(cell =>
+      labelKey(cell?.textContent).replace(/\s*当前sku$/u, "")));
+    const sku = variation(current.cells);
+    if (rows.filter(({ cells }) => variation(cells) === sku).length !== 1) return null;
+    const depot = clean(current.cells[warehouseIndex]?.textContent);
     if (!depot || (warehouse != null && depot !== clean(warehouse))) return null;
-    const cell = rowCell(row, stock);
+    const cell = current.cells[stockIndex];
     return cell && unique([...cell.querySelectorAll(
       'input[data-testid="beast-core-inputNumber-htmlInput"][placeholder="请输入"]',
     )].filter(enabled));

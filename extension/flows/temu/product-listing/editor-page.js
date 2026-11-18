@@ -10,7 +10,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
   const control = 'input,textarea,select,[contenteditable="true"],[contenteditable="plaintext-only"]';
   const labels = 'label,[data-field-label],[class*="Form_itemLabelContent_"],[class*="STF_label_"]';
   const modals = 'dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]';
-  const csselect = '[class*="ST_outerWrapper_"],[role="combobox"],[aria-haspopup="listbox"]';
+  const csselect = '[class*="ST_outerWrapper_"],[role="combobox"],[aria-haspopup="listbox"],[class*="colour-spec-select_colorSpecSelect__"]';
   const root = document.getElementById("page_container_id");
   const blocked = () => [...document.querySelectorAll(modals)].some(visible);
   const ready = () => scope() && root && visible(root) && !blocked();
@@ -207,8 +207,12 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
         list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, rowLabels: rowLabelSet(area) });
       } else {
         const color = document.getElementById(`productSkcList[${skc[1]}].mainSpec[0]`);
-        const variant = clean(color?.querySelector('[class*="ST_selectValueSingle_"]')?.textContent ||
-          color?.querySelector('input[placeholder="选择或自定义颜色"]')?.value);
+        const input = color?.querySelector('input[data-testid="beast-core-input-htmlInput"]');
+        // The custom color selector renders committed colors as its input placeholder.
+        const prompt = clean(input?.placeholder);
+        const saved = prompt && !/^(?:选择或自定义颜色|请选择颜色|请选择|请输入)$/u.test(prompt) &&
+          (!input.value || clean(input.value) === prompt) ? prompt : "";
+        const variant = clean(color?.querySelector('[class*="ST_selectValueSingle_"]')?.textContent || saved);
         if (variant) list.push({ key: area.id, role: "variant", mode: "material", multiple: true, markers, images, variant, minimum: 3 });
       }
     }
