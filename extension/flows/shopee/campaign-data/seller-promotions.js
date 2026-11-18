@@ -16,7 +16,7 @@ export function readShopeeSellerPromotions(expectedUrl, action = "read") {
       columns: ["市场", "活动名称", "商品", "状态", "活动期间", "操作"],
     },
   };
-  const route = routes[location.pathname];
+  const route = routes[location.pathname.replace(/\/$/, "")];
   const shopIds = new URL(location.href).searchParams.getAll("cnsc_shop_id");
   if (location.href !== expectedUrl || location.origin !== "https://seller.shopee.cn" ||
       !route || shopIds.length !== 1 || !/^\d+$/.test(shopIds[0])) {

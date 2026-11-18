@@ -100,8 +100,8 @@ test("reads the global discount empty result and rejects ambiguous tables or nex
   ambiguous.window.close();
 });
 
-test("explains the flash sale guide without fabricating records and requires a unique shop ID", () => {
-  const url = urlFor("shop-flash-sale/list");
+test("recognizes the flash sale guide with a trailing slash and requires the exact URL and unique shop ID", () => {
+  const url = urlFor("shop-flash-sale/list/");
   const guide = `<section><h2>店铺限时抢购</h2><p>创建你的第一个店铺限时抢购</p></section>
     <section><h3>营销活动表现</h3>
       <p><span>点击率</span><strong>8.50%</strong></p>
@@ -109,11 +109,14 @@ test("explains the flash sale guide without fabricating records and requires a u
     </section>`;
   const { window, run } = page(url, guide);
   const result = run(url);
+  assert.equal(result.ok, true);
+  assert.equal(result.meta.url, url);
   assert.equal(result.rows.length, 0);
   assert.equal(result.meta.stats.点击率, "8.50%");
   assert.equal(result.meta.stats.转化率, "2.10%");
   assert.equal(result.meta.emptyMessage, "创建你的第一个店铺限时抢购");
   assert.match(result.warnings.join(" "), /店铺限时抢购/);
+  assert.equal(run(urlFor("shop-flash-sale/list")).code, "page-changed");
   window.close();
   const duplicateUrl = url + "&cnsc_shop_id=456";
   const duplicate = page(duplicateUrl, guide);
