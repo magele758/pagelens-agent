@@ -81,7 +81,11 @@ async function inbox(tool, job, timeoutMs = 75000) {
     try { return await nativeDispatch(job); }
     finally { bridgeCalls.push({ tool, start, end: Date.now() }); }
   }
-  const queue = path.join(home, "agent-inbox");
+  const extensionId = process.env.PAGELENS_EXTENSION_ID || (await fs.readFile(path.join(home, "agent-inbox-extension-id"), "utf8")
+    .catch(error => { if (error.code !== "ENOENT") throw error; return ""; })).trim();
+  if (extensionId && !/^[a-p]{32}$/.test(extensionId)) throw Error("Invalid PageLens inbox extension ID");
+  const queue = path.join(home, "agent-inbox", extensionId || "");
+  if (extensionId) await fs.mkdir(queue, { recursive: true, mode: 0o700 });
   const start = Date.now();
   calls++;
   await write(path.join(queue, id + ".json"), {
@@ -93,6 +97,8 @@ async function inbox(tool, job, timeoutMs = 75000) {
   while (Date.now() - start < timeoutMs) {
     try {
       const reply = await read(path.join(home, "agent-outbox", id + ".json"));
+      if (extensionId && reply.consumerExtensionId !== extensionId)
+        throw Error("PageLens inbox receipt came from a different extension");
       bridgeCalls.push({ tool, start, end: Date.now(), executionMs: reply.meta?.ms });
       if (!reply.ok) throw new Error(tool + ": " + JSON.stringify(reply.error));
       return reply.result;
