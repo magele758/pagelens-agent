@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SOCKET_PROTOCOL, connectGateway, createBroker, defaultSocketPath } from "./gateway.mjs";
 import { shellPolicyBlock } from "../extension/lib/agent/shell-policy.js";
+import { loadProductDirectory, readProductSizeChartChunk } from "./product-directory.mjs";
 import {
   expandUserPath,
   fileExt,
@@ -294,6 +295,15 @@ export function handleFs(req) {
   const action = String(req?.action || "").trim();
   const agentScope = req?.scope === "agent";
   try {
+    if (action === "loadProductDirectory") {
+      if (agentScope) return { ok: false, op: "fs", action, error: "请在 PageLens 中手动选择商品目录。" };
+      return loadProductDirectory(resolveAbs(req.path));
+    }
+    if (action === "readProductSizeChartChunk") {
+      if (agentScope) return { ok: false, op: "fs", action, error: "请通过 PageLens 商品目录读取图片。" };
+      const { folder, expectedPath, offset, revision, asset } = req;
+      return readProductSizeChartChunk({ root: resolveAbs(req.root), folder, expectedPath, offset, revision, asset });
+    }
     if (agentScope && (action === "writeText" || action === "deleteFile" || action === "ensureDir")) {
       return { ok: false, op: "fs", action, error: "已拦截：agent 不能通过此接口写文件。" };
     }

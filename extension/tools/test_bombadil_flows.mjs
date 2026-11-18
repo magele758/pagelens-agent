@@ -79,6 +79,14 @@ for (const width of [400, 900]) {
     const workflow = document.getElementById('workflow-catalog-dialog');
     const workflowAction = name => workflow.querySelector(`[data-workflow="${name}"]`).click();
     click('btn-ptc-flow');
+    workflowAction('product-listing');
+    const product = document.getElementById('ptc-flow-dialog');
+    await until(() => product.open, 'open Shopee product listing');
+    assert.equal(document.getElementById('ptc-start').disabled, true, 'fixture is outside Shopee listing');
+    click('ptc-mode-directory');
+    assert.equal(document.getElementById('ptc-batch-pane').hidden, false);
+    click('ptc-back');
+    assert.ok(workflow.open);
     workflowAction('campaign-data');
     const marketing = document.getElementById('shopee-marketing-dialog');
     await until(() => marketing.open, 'open Shopee campaign data');

@@ -1,5 +1,6 @@
 export const workflowPlatforms = [
   { id: "shopee", name: "Shopee", features: [
+    { id: "product-listing", name: "商品上架", description: "单个或目录批量试填，支持主图、SKU 图和尺码表。" },
     { id: "campaign-data", name: "活动数据", description: "读取官方活动、商品提报和店铺促销，支持中文翻译和导出。" },
     { id: "campaign-draft", name: "活动表单试填", description: "试填折扣名称，查看活动时段和商品要求。" },
     { id: "voucher-data", name: "优惠券数据", description: "整理领取期限、折扣、使用量和状态，支持导出。" },
