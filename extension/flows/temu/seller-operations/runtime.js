@@ -58,15 +58,15 @@ async function inject(target, func, args, options = {}) {
   return outcome.result;
 }
 
-async function waitForPage(target, kind, oldKey) {
-  const deadline = Date.now() + 5200;
+async function waitForPage(target, kind, { oldKey, opened = false } = {}) {
+  const deadline = Date.now() + (opened ? 12000 : 5200);
   let snapshot;
   do {
     snapshot = await inject(target, operateTemuSellerData, { kind }, { pagination: Boolean(oldKey) });
     if (!snapshot.ok && snapshot.code !== "loading") throw new Error(snapshot.error);
     if (snapshot.ok && (oldKey
       ? snapshot.records.length && snapshot.pageKey !== oldKey
-      : snapshot.records.length || Object.keys(snapshot.stats).length)) return snapshot;
+      : snapshot.records.length || (kind === "finance" || kind === "marketing") && Object.keys(snapshot.stats).length)) return snapshot;
     // The seller can show an empty table before its initial fetch returns rows.
     await waitForTemu(target.signal, 250);
   } while (Date.now() < deadline);
@@ -75,11 +75,11 @@ async function waitForPage(target, kind, oldKey) {
   throw new Error(snapshot?.error || "Temu 页面数据加载超时。");
 }
 
-export async function readTemuSellerData({ tab, kind, allPages = false, signal, onProgress } = {}) {
+export async function readTemuSellerData({ tab, kind, allPages = false, opened = false, signal, onProgress } = {}) {
   kind ||= temuSellerDataPage(tab?.url)?.kind;
   const target = await bind(tab, url => canReadTemuSellerData(url, kind), signal);
   const sourceUrl = target.url;
-  const first = await waitForPage(target, kind);
+  const first = await waitForPage(target, kind, { opened });
   const records = [];
   const pageKeys = new Set();
   const warnings = [...first.warnings];
@@ -99,7 +99,7 @@ export async function readTemuSellerData({ tab, kind, allPages = false, signal, 
         kind, action: "next-page", expectedPageKey: page.pageKey,
       });
       if (!advance.ok) throw new Error(advance.error);
-      const result = await waitForPage(target, kind, page.pageKey);
+      const result = await waitForPage(target, kind, { oldKey: page.pageKey });
       if (!result || pageKeys.has(result.pageKey)) throw new Error("翻页后数据没有更新。");
       if (filterKey(result) !== filterKey(first)) throw new Error("翻页时筛选条件发生变化。");
       page = result;

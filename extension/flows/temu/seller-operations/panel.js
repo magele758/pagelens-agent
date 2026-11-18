@@ -235,7 +235,7 @@ export function bindTemuSellerOperationsPanel({ getTargetTab, isAgentBusy, downl
         return;
       }
       report = await readTemuSellerData({
-        tab: active, kind, allPages: panel.allPages.checked, signal,
+        tab: active, kind, allPages: panel.allPages.checked, opened: active.id !== tab?.id, signal,
         onProgress: ({ pages, count }) => status("已读取 " + pages + " 页 · " + count + " 条"),
       });
       showReport(report, panel.preview);
