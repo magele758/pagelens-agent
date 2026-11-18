@@ -442,4 +442,146 @@ store.settings = { agentInboxEnabled: true, agentInboxVersion: 1, cdpInput: fals
   assert.equal((await approvals.list()).length, pendingBefore, "tokenless jobs never use the approval queue");
 }
 
+{
+  const { installBridge } = await import("../lib/bridge/index.js");
+  const { ACTIVITY_KEY } = await import("../lib/agent/inbox-activity.js");
+  const target = "a".repeat(32);
+  const revision = "1".repeat(40);
+  const state = { ...store, [ACTIVITY_KEY]: [], agentInboxDevelopmentRevision: revision };
+  const live = new Set();
+  const ports = [];
+  let peak = 0;
+  let statusChecks = 0;
+  let failingWrite;
+  let attemptedFailingWrite = false;
+  const yieldToWorker = () => new Promise(resolve => setImmediate(resolve));
+  async function waitFor(check, message) {
+    for (let i = 0; i < 20 && !check(); i++) await yieldToWorker();
+    assert.ok(check(), message);
+  }
+  chrome.runtime.id = target;
+  chrome.runtime.onMessage = { addListener() {} };
+  chrome.runtime.getURL = relative => `chrome-extension://${target}/${relative}`;
+  chrome.runtime.reload = () => assert.fail("A reload in the same inbox scan must be refused");
+  chrome.management.getSelf = async () => {
+    statusChecks++;
+    return { installType: "development" };
+  };
+  globalThis.fetch = async () => ({
+    ok: true, json: async () => ({ enabled: true, extensionId: target, revision }),
+  });
+  chrome.storage.local = {
+    get: async key => ({ [key]: structuredClone(state[key]) }),
+    async set(values) {
+      await yieldToWorker();
+      Object.assign(state, values);
+    },
+  };
+  const sendNativeMessage = chrome.runtime.sendNativeMessage;
+  chrome.runtime.sendNativeMessage = async (host, msg) => {
+    if (msg.action === "writeText" && msg.root === inbox.OUTBOX_ROOT && msg.rel === failingWrite) {
+      attemptedFailingWrite = true;
+      return { ok: false, error: "fixture outbox unavailable" };
+    }
+    return sendNativeMessage(host, msg);
+  };
+  chrome.runtime.connectNative = () => {
+    let source, onMessage;
+    return {
+      onMessage: { addListener(listener) { onMessage = listener; } },
+      onDisconnect: { addListener() {} },
+      postMessage(msg) {
+        assert.equal(msg.type, "mx.create");
+        source = msg.sourceId;
+        assert.ok(!live.has(source), "one native port at a time for each source");
+        live.add(source);
+        peak = Math.max(peak, live.size);
+        ports.push({ source, finish: result => onMessage({ type: "mx.done", ...result }) });
+      },
+      disconnect() { live.delete(source); },
+    };
+  };
+  installBridge();
+
+  const ids = Array.from({ length: 5 }, (_, i) => "170000000000000000" + i);
+  const create = (id, sourceId) => ({ id, action: "ptc_create_mx_draft", sourceId, rate: 0.12 });
+  const jobs = [
+    { ...create("01-first"), sourceUrl: `https://shop.tiktok.com/jp/pdp/item/${ids[0]}` },
+    create("02-failure", ids[1]),
+    create("03-third", ids[2]),
+    create("04-fourth", ids[3]),
+    create("05-same-source", ids[0]),
+    { id: "06-clipboard", action: "clipboard_write", text: "sequential barrier" },
+    create("07-last", ids[4]),
+    { id: "08-reload", action: "dev_reload", expectedRevision: revision, createdAt: new Date().toISOString() },
+  ];
+  const setJobs = jobs => {
+    native.calls.length = 0;
+    native.directed[target] = Object.fromEntries(jobs.map(job => [job.id + ".json", JSON.stringify(job)]));
+  };
+  const success = (port, draftId) => ports[port].finish({ ok: true, result: { draftId } });
+  const received = id => native.calls.find(call => call.root === inbox.OUTBOX_ROOT &&
+    call.action === "writeText" && call.rel === id + ".json");
+  setJobs(jobs);
+
+  const batch = inbox.pollAgentInboxOnce();
+  await waitFor(() => ports.length >= 3, "three native creates must reach their private ports");
+  assert.deepEqual(ports.map(port => port.source), ids.slice(0, 3), "three native creates start without a prior receipt");
+  assert.deepEqual(await inbox.pollAgentInboxOnce(), { skipped: true, reason: "busy" });
+  assert.deepEqual(Object.keys(native.directed[target]).filter(name => name.startsWith("processing/")).sort(),
+    ["processing/01-first.json", "processing/02-failure.json", "processing/03-third.json"]);
+  assert.ok(Object.hasOwn(native.directed[target], "04-fourth.json"), "fourth job remains unclaimed at capacity");
+
+  ports[1].finish({ ok: false, error: "fixture create failed" });
+  await waitFor(() => ports.length >= 4, "the fourth create must use the open slot");
+  assert.equal(ports[3]?.source, ids[3], "a free slot starts the fourth while other jobs run");
+  assert.equal(live.size, 3);
+  success(2, "draft-C");
+  await waitFor(() => Object.hasOwn(native.directed[target], "processing/05-same-source.json"),
+    "the same-source request has reached the scanner");
+  assert.equal(ports.length, 4, "source URL and canonical ID share the same parallel slot");
+  success(0, "draft-A");
+  await waitFor(() => ports.length >= 5, "the same-source job starts after its predecessor");
+  assert.equal(ports[4]?.source, ids[0]);
+  assert.ok(!native.calls.some(call => call.op === "clipboard_write"), "serial action waits for earlier creates");
+
+  success(4, "draft-A-follow-up");
+  success(3, "draft-D");
+  await waitFor(() => ports.length >= 6, "the last job starts after the clipboard barrier");
+  assert.equal(ports[5]?.source, ids[4]);
+  assert.ok(native.calls.some(call => call.op === "clipboard_write"), "later create waits for serial action");
+  assert.equal(statusChecks, 0, "reload handler waits for the last create");
+  success(5, "draft-E");
+
+  const { processed, results } = await batch;
+  assert.equal(peak, 3);
+  assert.equal(processed, jobs.length);
+  assert.deepEqual(results.map(out => out.id), jobs.map(job => job.id));
+  assert.deepEqual(results.filter(out => out.result?.draftId).map(out => out.result.draftId),
+    ["draft-A", "draft-C", "draft-D", "draft-A-follow-up", "draft-E"]);
+  assert.equal(results[1].error, "fixture create failed");
+  assert.equal(results.at(-1).errorCode, "DEVELOPMENT_BUSY");
+  assert.equal(statusChecks, 1);
+  assert.deepEqual(native.directed[target], {});
+  assert.equal(live.size, 0);
+  assert.deepEqual(state[ACTIVITY_KEY].map(entry => entry.id).sort(), jobs.map(job => job.id));
+  for (const out of results) {
+    assert.ok(received(out.id), "each sibling has its own outbox receipt");
+    assert.equal(JSON.parse(received(out.id).text).consumerExtensionId, target);
+  }
+
+  setJobs([create("write-failure", ids[0]), create("write-sibling", ids[1])]);
+  failingWrite = "write-failure.json";
+  const writeBatch = inbox.pollAgentInboxOnce();
+  const writeRejected = assert.rejects(writeBatch, /fixture outbox unavailable/);
+  await waitFor(() => ports.length >= 8, "the write-failure jobs start at the same time");
+  success(6, "draft-F");
+  await waitFor(() => attemptedFailingWrite, "the failure arrives while the sibling is running");
+  assert.deepEqual(await inbox.pollAgentInboxOnce(), { skipped: true, reason: "busy" });
+  success(7, "draft-G");
+  await writeRejected;
+  assert.ok(received("write-sibling"), "one outbox write failure does not skip a sibling's receipt");
+  assert.deepEqual(Object.keys(native.directed[target]), ["processing/write-failure.json"]);
+}
+
 console.log("test_agent_inbox: ok");

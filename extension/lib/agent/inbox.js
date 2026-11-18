@@ -11,7 +11,7 @@ import { inject, injectMain, restrictedUrl } from "../chrome.js";
 import { pasteIntoPage } from "./page-fns.js";
 import { cosePublish } from "./companions.js";
 import { loadSettings } from "../storage.js";
-import { runNativeDraft } from "../../skills/tiktok-mx-draft/tiktok-mx-native.mjs";
+import { japaneseSourceId, runNativeDraft } from "../../skills/tiktok-mx-draft/tiktok-mx-native.mjs";
 import { inspectDraftJob } from "../../skills/tiktok-mx-draft/tiktok-mx-inspect.mjs";
 import { runMxDraftJob, runMxDraftRead } from "../../skills/tiktok-mx-draft/tiktok-mx-editor.mjs";
 import { getBridge } from "../bridge/index.js";
@@ -43,6 +43,7 @@ export const ALARM_NAME = "pagelens-agent-inbox";
 
 const cdp = getCdp();
 const gate = createPollGate();
+const MAX_PARALLEL_MX_CREATES = 3;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -820,6 +821,37 @@ async function expireAgentPrompt() {
   if (out) await writeAgentPromptOutput(out);
 }
 
+function parallelDraftSource(job, directed) {
+  if (!directed || String(job?.action || "").trim() !== "ptc_create_mx_draft" || job.token != null ||
+      !Number.isFinite(job.rate) || job.rate <= 0) return null;
+  try {
+    const source = job.sourceUrl ? japaneseSourceId(job.sourceUrl) : job.sourceId;
+    if (typeof source === "string" && /^\d{12,22}$/.test(source) &&
+        (job.sourceId == null || job.sourceId === source)) return source;
+  } catch {
+    // Malformed requests follow the original serial path for an error receipt.
+  }
+  return null;
+}
+
+async function runInboxJob(job, { directed, queued, settings, deps }) {
+  const startedAt = Date.now();
+  markJobStarted();
+  let result;
+  const development = ["dev_status", "dev_reload"].includes(job?.action);
+  try {
+    if (directed && ["agent_prompt", "agent_cancel"].includes(job?.action))
+      throw new Error("Agent prompts and cancellations use the shared inbox");
+    result = development
+      ? { ok: true, result: await developmentInboxJob(job, { directed, queued }) }
+      : await executeJob(job, { ...deps, settings, directed });
+  } catch (err) {
+    result = { ok: false, error: err?.message || String(err) };
+    if (development && err?.code === "DEVELOPMENT_BUSY") result.errorCode = err.code;
+  }
+  return { result, startedAt };
+}
+
 /**
  * 每轮检查共享 inbox。有本扩展的子目录时，也检查定向 inbox。
  * Host 不可用时指数退避（1 分钟起、最长 30 分钟），期间轮询直接跳过、不拉起进程。
@@ -827,6 +859,28 @@ async function expireAgentPrompt() {
 export async function pollAgentInboxOnce(deps = {}) {
   if (polling) return { skipped: true, reason: "busy" };
   polling = true;
+  const active = new Map();
+  const results = [];
+  let receiptError;
+
+  // Only execution overlaps. Outbox and activity writes are applied here, one at a time.
+  async function finishNextDraft() {
+    const { source, root, name, claimedRel, job, index, result, startedAt } = await Promise.race(active.values());
+    active.delete(source);
+    try {
+      await recordJobFinished(job, result, startedAt);
+      results[index] = await finishJob(root, name, job, result, claimedRel);
+    } catch (error) {
+      receiptError ??= error;
+    }
+    if (active.size) markJobStarted();
+  }
+
+  async function drainDrafts() {
+    while (active.size) await finishNextDraft();
+    if (receiptError) throw receiptError;
+  }
+
   try {
     await expireAgentPrompt();
     const settings = await loadSettings();
@@ -848,8 +902,9 @@ export async function pollAgentInboxOnce(deps = {}) {
       };
     }
 
-    const results = [];
     for (const { root, name } of names) {
+      if (active.size === MAX_PARALLEL_MX_CREATES) await finishNextDraft();
+      if (receiptError) throw receiptError;
       const directed = root !== INBOX_ROOT;
       const filenameId = name.replace(/\.json$/i, "");
       if (directed && !/^[a-zA-Z0-9_-]{1,128}$/.test(filenameId)) continue;
@@ -864,12 +919,25 @@ export async function pollAgentInboxOnce(deps = {}) {
         if (directed && job?.id !== filenameId) throw new Error("Directed inbox ID must match its filename");
       } catch (err) {
         if (err.code === "ENOENT") continue;
+        await drainDrafts();
         await finishJob(root, name, { id: filenameId }, {
           ok: false,
           error: `invalid job json: ${err?.message || err}`,
         }, claimedRel).catch(() => {});
         continue;
       }
+      const options = { directed, queued: names.length > 1, settings, deps };
+      const source = parallelDraftSource(job, directed);
+      if (source) {
+        while (active.has(source)) await finishNextDraft();
+        if (receiptError) throw receiptError;
+        const index = results.length;
+        results.push(null);
+        active.set(source, runInboxJob(job, options).then(outcome =>
+          ({ source, root, name, claimedRel, job, index, ...outcome })));
+        continue;
+      }
+      await drainDrafts();
       if (!directed && job?.action === "agent_prompt") {
         const outcome = await dispatchAgentPrompt(name, job);
         if (outcome) results.push(outcome);
@@ -879,20 +947,7 @@ export async function pollAgentInboxOnce(deps = {}) {
         claimedRel = await claimInboxFile(root, name);
         if (!claimedRel) continue;
       }
-      const startedAt = Date.now();
-      markJobStarted();
-      let result;
-      const development = ["dev_status", "dev_reload"].includes(job?.action);
-      try {
-        if (directed && ["agent_prompt", "agent_cancel"].includes(job?.action))
-          throw new Error("Agent prompts and cancellations use the shared inbox");
-        result = development
-          ? { ok: true, result: await developmentInboxJob(job, { directed, queued: names.length > 1 }) }
-          : await executeJob(job, { ...deps, settings, directed });
-      } catch (err) {
-        result = { ok: false, error: err?.message || String(err) };
-        if (development && err?.code === "DEVELOPMENT_BUSY") result.errorCode = err.code;
-      }
+      const { result, startedAt } = await runInboxJob(job, options);
       await recordJobFinished(job, result, startedAt);
       results.push(await finishJob(root, name, job, result, claimedRel));
       if (result.ok && job.action === "dev_reload") {
@@ -903,9 +958,11 @@ export async function pollAgentInboxOnce(deps = {}) {
       if (result.ok && job.followUp === true && ["bridge_call", "fill_mx_draft", "read_mx_draft", "refresh_mx_draft_list"].includes(job.action))
         pollForNextStep();
     }
+    await drainDrafts();
     return { ok: true, processed: results.length, results };
   } finally {
-    polling = false;
+    try { await drainDrafts(); }
+    finally { polling = false; }
   }
 }
 
