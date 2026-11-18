@@ -124,18 +124,24 @@ function sizeFixture(labels) {
 
 {
   const key = "productSkcList[0].mainSpec[0]";
-  const page = fixture(`<div id="${key}"><div class="ST_outerWrapper_test"><div class="ST_head_test">
-      <input placeholder="选择或自定义颜色" aria-controls="alternate-colors">
-    </div></div></div>
-    <div data-testid="beast-core-portal"><div role="listbox" id="alternate-colors" hidden>
-      <span role="option">黑色</span>
-    </div></div>`);
+  const page = fixture(`<div id="${key}">
+    <div class="colour-spec-select_colorSpecSelect__test">
+      <span data-testid="beast-core-popover-trigger-wrapper"><input placeholder="选择或自定义颜色"></span>
+    </div></div>
+    <div data-testid="beast-core-portal">
+      <div class="colour-spec-select_searchContainer__test" id="alternate-colors" hidden>
+        <div class="colour-spec-select_selectItem__test" hidden>黑色</div>
+      </div>
+    </div>`);
   const input = page.doc.querySelector("input");
   const menu = page.doc.getElementById("alternate-colors");
+  const option = menu.firstElementChild;
   input.addEventListener("focus", () => { menu.hidden = false; });
-  menu.querySelector("span").addEventListener("click", () => {
+  input.addEventListener("input", () => { option.hidden = input.value !== "黑色"; });
+  option.addEventListener("click", () => {
     menu.hidden = true;
-    input.parentElement.insertAdjacentHTML("beforeend", '<span class="ST_selectValueSingle_test">黑色</span>');
+    input.value = "";
+    input.placeholder = "黑色";
   });
   const result = await page.run({ kind: "set-color", key, value: "B - Black", alternate: "黑色" });
   assert.equal(result.value, "黑色");

@@ -15,7 +15,10 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
     const exact = inputs.filter(node => node.placeholder === emptyColor);
     return exact.length === 1 ? exact[0] : !exact.length && inputs.length === 1 ? inputs[0] : null;
   };
-  const colorWrapper = input => input?.closest('[class*="ST_outerWrapper_"]');
+  const colorComponent = '[class^="colour-spec-select_colorSpecSelect__"]';
+  const colorPopover = '[class^="colour-spec-select_searchContainer__"]';
+  const colorOption = '[class^="colour-spec-select_selectItem__"]';
+  const colorWrapper = input => input?.closest(`${colorComponent},[class*="ST_outerWrapper_"]`);
   const holders = () => [...root?.querySelectorAll(colorSelector) || []].filter(holder => visible(holder) &&
     /^productSkcList\[\d{1,3}\]\.mainSpec\[0\]$/u.test(holder.id) &&
     (colorField(holder)?.placeholder === emptyColor || selectedColor(holder)));
@@ -79,8 +82,8 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
     if (!input || input.disabled) return fail("SPEC_CONTROL_MISSING", "服装颜色输入已变化。");
     if (input.maxLength > 0 && value.length > input.maxLength) return fail("VALUE_INVALID", "颜色值超过 Temu 字数限制。");
 
-    const setText = () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, value);
+    const setText = (text = value) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, text);
       input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
       if (input.isConnected && onPage()) input.dispatchEvent(new Event("change", { bubbles: true }));
     };
@@ -112,10 +115,12 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
     return fail("READBACK_MISMATCH", "Temu 未保留输入的服装颜色。");
 
     async function pickColor() {
-      const menus = () => [...document.querySelectorAll('[role="listbox"]')].filter(menu =>
+      const nativePopover = wrapper.matches(colorComponent);
+      const menus = () => [...document.querySelectorAll(nativePopover
+        ? `[data-testid="beast-core-portal"] ${colorPopover}` : '[role="listbox"]')].filter(menu =>
         visible(menu) && (getComputedStyle(menu).opacity || "1") !== "0" &&
         (holder.contains(menu) || menu.closest('[data-testid="beast-core-portal"],[class*="ST_dropdown_"]')));
-      const head = input.closest('[class*="ST_head_"]');
+      const head = input.closest('[class*="ST_head_"],[data-testid="beast-core-popover-trigger-wrapper"]');
       const related = () => {
         const visibleMenus = menus();
         const ids = [input, head, wrapper].flatMap(node =>
@@ -131,7 +136,8 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
 
       function exactChoice() {
         const menu = related();
-        const options = [...menu?.querySelectorAll('[role="option"],[data-testid="beast-core-select-option"]') || []].filter(visible);
+        const options = [...menu?.querySelectorAll(nativePopover ? colorOption :
+          '[role="option"],[data-testid="beast-core-select-option"]') || []].filter(visible);
         for (const label of new Set([wanted, ...(alternateLabel ? [alternateLabel] : [])])) {
           const matches = options.filter(node => clean(node.textContent) === label);
           if (!matches.length) continue;
@@ -145,21 +151,22 @@ export async function temuApparelPage({ href, kind, key, value, alternate }) {
         }
         return null;
       }
-      let pick;
-      if (alternateLabel) {
-        await new Promise(resolve => setTimeout(resolve, 180));
-        if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
-        pick = exactChoice();
-        if (pick) return pick;
+      async function search(label, timeout) {
+        if (input.isConnected && !input.readOnly && onPage() && !blocked()) setText(label);
+        const until = Date.now() + timeout;
+        do {
+          if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
+          const found = exactChoice();
+          if (found !== null) return found;
+          await new Promise(resolve => setTimeout(resolve, 60));
+        } while (Date.now() < until);
+        return null;
       }
-      if (pick !== false && !input.readOnly && input.isConnected && onPage() && !blocked()) setText();
-      const until = Date.now() + 1700;
-      while (pick !== false && Date.now() < until) {
-        if (!onPage() || blocked()) return fail("PAGE_CHANGED", "填写服装颜色时页面已切换。");
-        pick = exactChoice();
-        if (pick) return pick;
-        await new Promise(resolve => setTimeout(resolve, 60));
-      }
+
+      let pick = alternateLabel ? await search(alternateLabel, 1000) : null;
+      if (pick) return pick;
+      if (pick !== false) pick = await search(value, 1450);
+      if (pick) return pick;
 
       const menu = related();
       const current = colorField(target());

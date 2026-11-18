@@ -1,5 +1,5 @@
 /** Edit only the independent details decoration dialog on a scoped Temu draft. */
-export async function temuDecorationPage({ href, description = "", kind = "fill" }) {
+export async function temuDecorationPage({ href, description = "", kind = "fill", hasImages }) {
   const clean = value => String(value ?? "").replace(/\s+/gu, " ").trim();
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
@@ -85,6 +85,11 @@ export async function temuDecorationPage({ href, description = "", kind = "fill"
   if (kind !== "prepare" && kind !== "fill") return fail("ACTION_UNSUPPORTED", "此操作不属于详情装修。");
   if (modals().length) return fail("MODAL_BLOCKED", "页面已有弹窗，详情图文尚未开始试填。");
   if (typeof description !== "string" || description.length > 10000) return fail("VALUE_INVALID", "商品详情文本超长。");
+  if (hasImages === false && [...root?.querySelectorAll("p,div,span") || []].some(node =>
+    visible(node) && node.childElementCount <= 1 && /详情装修请同时具备图片展示及文字描述/u.test(clean(node.textContent)) &&
+    clean(node.textContent).length <= 220)) {
+    return fail("DETAIL_IMAGE_REQUIRED", "Temu 要求详情图文包含图片。请选择含详情图的商品目录并勾选上传图片。");
+  }
   const open = root && exact(root, '[class^="decoration_operate__"] button', "开始装修");
   if (!open) return fail("DECORATION_MISSING", "当前类目没有可核对的详情图文装修入口。");
   open.click();
