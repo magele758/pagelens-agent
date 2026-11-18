@@ -108,12 +108,15 @@ function needsLoad(snapshot) {
     (!snapshot.rows?.length && snapshot.warnings?.some(message => /加载/u.test(message)));
 }
 
-async function waitForSnapshot(target, source, previous) {
+async function waitForSnapshot(target, source, previous, { followStartupUrl = false } = {}) {
   const stopAt = Date.now() + 4800;
   let snapshot;
   do {
-    snapshot = await inject(target, source.read, url => readArgs(source, url, false), { canFollowPage: Boolean(previous) });
-    if (!needsLoad(snapshot) && (!previous || (snapshot.rows?.length && pageKey(snapshot) !== pageKey(previous)))) return snapshot;
+    snapshot = await inject(target, source.read, url => readArgs(source, url, false), {
+      canFollowPage: followStartupUrl || Boolean(previous),
+    });
+    const startupRace = followStartupUrl && snapshot.code === "page-changed";
+    if (!startupRace && !needsLoad(snapshot) && (!previous || (snapshot.rows?.length && pageKey(snapshot) !== pageKey(previous)))) return snapshot;
     await abortableDelay(target.signal, 270);
   } while (Date.now() < stopAt);
   if (previous) return null;
@@ -126,8 +129,8 @@ function pageKey(snapshot) {
   return JSON.stringify([snapshot.meta?.page ?? snapshot.meta?.currentPage, snapshot.rows]);
 }
 
-async function collect(target, source, allPages, notify) {
-  const first = await waitForSnapshot(target, source);
+async function collect(target, source, allPages, notify, { followStartupUrl = false } = {}) {
+  const first = await waitForSnapshot(target, source, null, { followStartupUrl });
   if (!first || needsLoad(first) || first.ok === false || first.kind === "unsupported") {
     throw new Error(first?.error || first?.warnings?.[0] || "当前页面没有可读取的营销数据。");
   }
@@ -201,7 +204,10 @@ async function collectBackground(source, tab, target, notify) {
       const state = await chrome.tabs.get(child.id);
       const landed = pageContext(state.url);
       if (state.status === "complete" && landed?.path === source.path && landed.shopId === target.shopId) {
-        return await collect({ ...landed, id: child.id, signal: target.signal, documentId: null }, source, true, notify);
+        // Shopee's list can add its default filters after Chrome reports the tab loaded.
+        return await collect({ ...landed, id: child.id, signal: target.signal, documentId: null }, source, true, notify, {
+          followStartupUrl: true,
+        });
       }
       if (state.status === "complete" && state.url?.startsWith("https:") && !landed) {
         throw new Error("页面需要重新登录或选择店铺。");

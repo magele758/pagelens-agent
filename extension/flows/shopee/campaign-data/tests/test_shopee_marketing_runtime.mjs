@@ -16,7 +16,14 @@ test("aggregates signed-in shop lists using bounded read-only tabs and closes it
   globalThis.chrome = {
     permissions: { contains: async () => true },
     tabs: {
-      get: async id => tabs.get(id),
+      get: async id => {
+        const tab = tabs.get(id);
+        const snapshot = { ...tab };
+        if (tab.url.endsWith(`/list/discount?cnsc_shop_id=${shop}`)) {
+          tab.url += "&discountType=all&status=all&page=1";
+        }
+        return snapshot;
+      },
       create: async ({ url, active, windowId }) => {
         assert.equal(active, false);
         assert.equal(windowId, overview.windowId);
@@ -35,21 +42,27 @@ test("aggregates signed-in shop lists using bounded read-only tabs and closes it
       },
     },
     scripting: { executeScript: async ({ target, func, args }) => {
-      const url = new URL(tabs.get(target.tabId).url);
+      const tab = tabs.get(target.tabId);
+      const url = new URL(tab.url);
+      const documentId = "doc-" + target.tabId;
       assert.equal(args[0], url.href);
       assert.equal(args[1]?.action || args[1], "read");
       const meta = { url: url.href, shopId: shop };
       let result;
-      if (url.pathname.endsWith("/list/campaign")) {
+      if (url.pathname.endsWith("/shop-flash-sale/list") && !url.searchParams.has("type")) {
+        tab.url += "&type=0";
+        result = { ok: false, code: "page-changed", error: "促销活动页面、店铺或标签页已变化。" };
+      } else if (url.pathname.endsWith("/list/campaign")) {
         assert.equal(func.name, "readShopeeCampaigns");
         assert.equal(url.searchParams.get("source"), "3");
         result = { kind: "campaign-catalog", rows: [{ title: "June seller deal" }], meta };
       } else if (url.pathname.endsWith("/vouchers/list")) {
         result = { kind: "vouchers", rows: [{ title: "试填券", code: "PFX10", used: "0" }], meta };
       } else {
+        if (url.pathname.endsWith("/shop-flash-sale/list")) assert.deepEqual(target.documentIds, [documentId]);
         result = { kind: "empty", rows: [], meta: { ...meta, stats: { 销售: "฿0" }, emptyMessage: "暂无数据" } };
       }
-      return [{ frameId: 0, documentId: "doc-" + target.tabId, result }];
+      return [{ frameId: 0, documentId, result }];
     } },
   };
   const report = await readShopeeMarketing({
@@ -58,6 +71,9 @@ test("aggregates signed-in shop lists using bounded read-only tabs and closes it
   });
   assert.equal(report.kind, "marketing-report");
   assert.equal(report.sources.length, 6);
+  assert.equal(report.sources.some(source => source.failed), false);
+  assert.match(report.sources.find(source => source.label === "折扣活动").url, /&discountType=all&status=all&page=1$/u);
+  assert.match(report.sources.find(source => source.label === "店铺限时抢购").url, /&type=0$/u);
   assert.equal(closed.length, 6);
   assert.equal(mostOpen, 2);
   assert.deepEqual([...tabs.keys()], [overview.id]);
@@ -74,6 +90,52 @@ test("aggregates signed-in shop lists using bounded read-only tabs and closes it
   assert.equal(campaigns.sources.length, 5);
   assert.equal(campaigns.sources.some(source => source.label === "优惠券"), false);
   assert.deepEqual(campaigns.records.map(row => row.source), ["官方活动"]);
+  assert.deepEqual([...tabs.keys()], [overview.id]);
+});
+
+test("rejects a different shop or document during owned-tab startup", async t => {
+  const tabs = new Map([[overview.id, overview]]);
+  let nextId = overview.id + 1;
+  const oldChrome = globalThis.chrome;
+  t.after(() => { globalThis.chrome = oldChrome; });
+  const injectedPaths = [];
+  globalThis.chrome = {
+    permissions: { contains: async () => true },
+    tabs: {
+      create: async ({ url }) => {
+        const tab = { id: nextId++, url, status: "complete" };
+        tabs.set(tab.id, tab);
+        return tab;
+      },
+      get: async id => {
+        const tab = tabs.get(id);
+        const snapshot = { ...tab };
+        if (tab.url.endsWith(`/list/discount?cnsc_shop_id=${shop}`)) tab.url = tab.url.replace(/=\d+$/u, "=99");
+        return snapshot;
+      },
+      remove: async id => tabs.delete(id),
+    },
+    scripting: { executeScript: async ({ target }) => {
+      const tab = tabs.get(target.tabId);
+      const url = new URL(tab.url);
+      injectedPaths.push(url.pathname);
+      const documentId = "doc-" + target.tabId;
+      if (url.pathname.endsWith("/shop-flash-sale/list")) {
+        if (!target.documentIds) {
+          tab.url += "&type=0";
+          return [{ frameId: 0, documentId, result: { ok: false, code: "page-changed" } }];
+        }
+        assert.deepEqual(target.documentIds, [documentId]);
+        return [{ frameId: 0, documentId: "replacement-document", result: { rows: [{ title: "wrong document" }] } }];
+      }
+      return [{ frameId: 0, documentId, result: { kind: "empty", rows: [] } }];
+    } },
+  };
+  const report = await readShopeeMarketing({ tab: overview, allPages: true, translate: false });
+  assert.deepEqual(report.records, []);
+  assert.equal(injectedPaths.includes("/portal/marketing/list/discount"), false);
+  assert.match(report.sources.find(source => source.label === "折扣活动").warnings[0], /页面或店铺已变化/u);
+  assert.match(report.sources.find(source => source.label === "店铺限时抢购").warnings[0], /无法确认/u);
   assert.deepEqual([...tabs.keys()], [overview.id]);
 });
 
