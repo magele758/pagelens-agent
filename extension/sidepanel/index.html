@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="themes.css" />
   <link rel="stylesheet" href="sidechat.css" />
   <link rel="stylesheet" href="settings.css" />
+  <link rel="stylesheet" href="workflow-catalog.css" />
+  <link rel="stylesheet" href="../flows/shopee/marketing-panel.css" />
   <link rel="stylesheet" href="../vendor/katex/katex.min.css" />
 </head>
 <body>
@@ -69,6 +71,9 @@
         </button>
         <button type="button" id="btn-obsidian" class="icon-btn" aria-label="写入文稿文件夹" data-tooltip="写入文稿文件夹">
           <svg class="ico"><use href="#i-book"/></svg>
+        </button>
+        <button type="button" id="btn-ptc-flow" class="icon-btn" aria-label="工作流" aria-haspopup="dialog" aria-controls="workflow-catalog-dialog" data-tooltip="工作流">
+          <svg class="ico"><use href="#i-activity"/></svg>
         </button>
         <button type="button" id="btn-settings" class="icon-btn" aria-label="设置" data-tooltip="设置">
           <svg class="ico"><use href="#i-gear"/></svg>
@@ -892,6 +897,103 @@
       </section>
     </div>
   </div>
+  <dialog id="workflow-catalog-dialog" aria-labelledby="workflow-catalog-title">
+    <header class="ptc-heading">
+      <h2 id="workflow-catalog-title">工作流</h2>
+      <button type="button" id="workflow-catalog-close" class="icon-btn" aria-label="关闭工作流列表">×</button>
+    </header>
+    <label class="workflow-platform-picker" for="workflow-platform">
+      平台
+      <select id="workflow-platform" autofocus></select>
+    </label>
+    <ul class="workflow-feature-list" id="workflow-feature-list" aria-label="可执行功能"></ul>
+    <p id="workflow-feature-empty" role="status" hidden></p>
+    <p id="workflow-catalog-status" role="status"></p>
+  </dialog>
+  <dialog id="shopee-marketing-dialog" aria-labelledby="shopee-marketing-title">
+    <header class="ptc-heading">
+      <div>
+        <p class="ptc-site">Shopee</p>
+        <h2 id="shopee-marketing-title">活动与优惠券</h2>
+      </div>
+      <div class="workflow-dialog-actions">
+        <button type="button" id="shopee-marketing-back" class="secondary mini" hidden>返回工作流</button>
+        <button type="button" id="shopee-marketing-close" class="icon-btn" aria-label="关闭营销工作流">×</button>
+      </div>
+    </header>
+    <p class="ptc-target" id="shopee-marketing-target"></p>
+    <nav class="shopee-marketing-navigation" id="shopee-marketing-links" aria-label="Shopee 营销页面" hidden>
+      <div class="shopee-marketing-links">
+        <a data-marketing-path="/portal/marketing" target="_blank" rel="noopener">营销中心</a>
+        <a data-marketing-path="/portal/marketing/cmt-cb/list/campaign?source=3" target="_blank" rel="noopener">官方活动</a>
+        <a data-marketing-path="/portal/marketing/cmt-cb/list" target="_blank" rel="noopener">商品提报</a>
+        <a data-marketing-path="/portal/marketing/vouchers/list" target="_blank" rel="noopener">优惠券列表</a>
+      </div>
+      <details>
+        <summary>促销活动列表</summary>
+        <div class="shopee-marketing-links">
+          <a data-marketing-path="/portal/marketing/list/discount" target="_blank" rel="noopener">折扣活动</a>
+          <a data-marketing-path="/portal/marketing/global-discount/list" target="_blank" rel="noopener">全球商品折扣</a>
+          <a data-marketing-path="/portal/marketing/shop-flash-sale/list" target="_blank" rel="noopener">店铺限时抢购</a>
+        </div>
+      </details>
+      <details>
+        <summary>新增表单试填</summary>
+        <div class="shopee-marketing-links">
+          <a data-marketing-path="/portal/marketing/discount/create" target="_blank" rel="noopener">折扣活动</a>
+          <a data-marketing-path="/portal/marketing/global-discount/create" target="_blank" rel="noopener">全球商品折扣</a>
+          <a data-marketing-path="/portal/marketing/shop-flash-sale/create" target="_blank" rel="noopener">店铺限时抢购</a>
+          <a data-marketing-path="/portal/marketing/vouchers/new?usecase=1" target="_blank" rel="noopener">商店优惠券</a>
+        </div>
+      </details>
+    </nav>
+    <div class="shopee-marketing-actions">
+      <button type="button" class="primary" id="shopee-marketing-read">读取并整理</button>
+      <button type="button" class="secondary" id="shopee-marketing-inspect">探测试填表单</button>
+      <button type="button" class="secondary" id="shopee-marketing-stop" hidden>停止</button>
+    </div>
+    <div class="shopee-marketing-options">
+      <label class="shopee-marketing-checkbox">
+        <input id="shopee-marketing-translate" type="checkbox" checked />
+        翻译非中文活动名称和说明
+      </label>
+      <label class="shopee-marketing-checkbox">
+        <input id="shopee-marketing-all-pages" type="checkbox" checked />
+        读取当前筛选的各页（营销中心会汇总各列表）
+      </label>
+    </div>
+    <p id="shopee-marketing-status" class="ptc-status" role="status" aria-atomic="true"></p>
+    <ul id="shopee-marketing-warnings" class="shopee-marketing-warnings" hidden></ul>
+    <section id="shopee-marketing-report" class="shopee-marketing-section" aria-label="营销数据" hidden>
+      <div class="shopee-marketing-section-heading">
+        <h3 id="shopee-marketing-report-title">营销数据</h3>
+        <div class="shopee-marketing-actions">
+          <button type="button" class="secondary mini" id="shopee-marketing-json">下载 JSON</button>
+          <button type="button" class="secondary mini" id="shopee-marketing-csv">下载 CSV</button>
+        </div>
+      </div>
+      <div id="shopee-marketing-report-summary" class="shopee-marketing-report-summary" hidden></div>
+      <a id="shopee-marketing-source" target="_blank" rel="noopener" hidden>打开来源页</a>
+      <div id="shopee-marketing-rows" class="shopee-marketing-rows"></div>
+    </section>
+    <section id="shopee-marketing-preview" class="shopee-marketing-section" aria-labelledby="shopee-marketing-preview-title" hidden>
+      <div class="shopee-marketing-section-heading">
+        <h3 id="shopee-marketing-preview-title">表单试填</h3>
+        <button type="button" class="secondary mini" id="shopee-marketing-sample" hidden>载入演示数据</button>
+      </div>
+      <p class="shopee-marketing-hint">适用于新增表单，试填后停在当前页面。</p>
+      <form id="shopee-marketing-trial">
+        <div id="shopee-marketing-fields" class="shopee-marketing-fields"></div>
+        <details class="shopee-marketing-json-input">
+          <summary>以 JSON 覆盖本次试填值</summary>
+          <label for="shopee-marketing-trial-json">使用下方列出的字段名</label>
+          <textarea id="shopee-marketing-trial-json" rows="3" spellcheck="false" placeholder="{}"></textarea>
+        </details>
+        <button type="submit" class="primary" id="shopee-marketing-run">开始试填</button>
+      </form>
+      <div id="shopee-marketing-receipt" class="shopee-marketing-receipt" hidden></div>
+    </section>
+  </dialog>
   <script src="tooltip.js"></script>
   <script src="../vendor/marked.min.js"></script>
   <script src="../vendor/purify.min.js"></script>

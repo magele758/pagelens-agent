@@ -16,6 +16,8 @@ async function mount(html, width) {
       w.navigator.sendBeacon = path => { visits.add(path.split('/').pop()); return true; };
       Object.assign(w, { innerWidth: width, TextEncoder, TextDecoder, structuredClone });
       w.HTMLElement.prototype.scrollIntoView = () => {};
+      w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+      w.HTMLDialogElement.prototype.close = function () { this.open = false; };
     },
   });
   return { dom, document: dom.window.document, errors, visits };
@@ -74,6 +76,36 @@ for (const width of [400, 900]) {
     assert.equal(check('settings').view, 'settings');
     click('btn-back');
     await until(() => state().view === 'chat', 'return from settings');
+    const workflow = document.getElementById('workflow-catalog-dialog');
+    const workflowAction = name => workflow.querySelector(`[data-workflow="${name}"]`).click();
+    click('btn-ptc-flow');
+    workflowAction('campaign-data');
+    const marketing = document.getElementById('shopee-marketing-dialog');
+    await until(() => marketing.open, 'open Shopee campaign data');
+    assert.equal(document.getElementById('shopee-marketing-title').textContent, '活动数据');
+    assert.equal(document.getElementById('shopee-marketing-read').disabled, true, 'fixture is outside Shopee');
+    click('shopee-marketing-back');
+    assert.ok(workflow.open);
+    field(document, 'workflow-platform', 'tiktok-shop');
+    workflowAction('tiktok-mx-draft');
+    await until(() => document.getElementById('workflow-catalog-status').textContent.includes('启用 Skill'), 'Skill disabled hint');
+    click('workflow-catalog-close');
+
+    click('btn-settings');
+    const skills = document.getElementById('skills-enabled');
+    skills.checked = true;
+    skills.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    click('btn-back');
+    await until(() => state().view === 'chat', 'return with Skills enabled');
+    field(document, 'input', 'https://shop.example/item');
+    const messagesBefore = document.getElementById('msgs').textContent;
+    click('btn-ptc-flow');
+    workflowAction('tiktok-mx-draft');
+    await until(() => document.getElementById('input').value.startsWith('使用「TikTok 墨西哥商品草稿」'), 'prefill TikTok Skill');
+    assert.equal(document.getElementById('input').value, '使用「TikTok 墨西哥商品草稿」 https://shop.example/item');
+    assert.equal(document.getElementById('msgs').textContent, messagesBefore, 'opening a workflow must not submit');
+    field(document, 'input', '');
+    check('workflow entry and return');
     click('btn-review');
     await until(() => state().view === 'review', 'open review');
     assert.equal(check('review').view, 'review');

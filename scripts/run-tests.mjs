@@ -4,18 +4,20 @@
  * Usage:
  *   node scripts/run-tests.mjs                  # run all tests
  *   node scripts/run-tests.mjs --quick          # same suite; no separate slow list
- *   node scripts/run-tests.mjs test_agent_inbox # filter by name substring
+ *   node scripts/run-tests.mjs test_agent_inbox # filter by name or path
+ *   node scripts/run-tests.mjs shopee/campaign-data # run a feature suite
  */
 import { readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { resolve, basename } from 'node:path';
+import { resolve, basename, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const dir = resolve(__dirname, '../extension/tools');
-const files = readdirSync(dir)
-  .filter(f => f.startsWith('test_') && f.endsWith('.mjs'))
-  .sort();
+const extension = fileURLToPath(new URL('../extension/', import.meta.url));
+const files = ['tools', 'flows'].flatMap(directory =>
+  readdirSync(resolve(extension, directory), { recursive: directory === 'flows', withFileTypes: true })
+    .filter(entry => entry.isFile() && /^test_.*\.mjs$/.test(entry.name))
+    .map(entry => resolve(entry.parentPath, entry.name)),
+).sort((a, b) => basename(a).localeCompare(basename(b)));
 
 const args = process.argv.slice(2);
 const filters = args.filter(a => !a.startsWith('--'));
@@ -28,15 +30,15 @@ const start = Date.now();
 for (const file of files) {
   const name = basename(file, '.mjs');
 
-  // Filter by name substring if arguments given
-  if (filters.length && !filters.some(f => name.includes(f))) {
+  const testPath = relative(extension, file).split(sep).join('/');
+  if (filters.length && !filters.some(f => testPath.includes(f))) {
     continue;
   }
 
   process.stdout.write(`  RUN   ${name} ... `);
   const t0 = Date.now();
   try {
-    execFileSync('node', [resolve(dir, file)], {
+    execFileSync(process.execPath, [file], {
       timeout: 30_000,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
