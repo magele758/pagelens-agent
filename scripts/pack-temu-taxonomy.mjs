@@ -21,7 +21,7 @@ function category(node) {
 const writeRows = (file, rows) => writeFile(new URL(file, directory), `[\n${rows.map(row => `  ${JSON.stringify(row)}`).join(",\n")}\n]\n`);
 const packs = categories.map(category);
 await Promise.all([
-  writeRows("roots.json", packs.map(([id, label]) => [id, label])),
+  writeRows("roots.json", packs.map(([id, label, children]) => children?.length ? [id, label] : [id, label, true])),
   writeRows("origins.json", origins.map(({ chineseName, name, shortName, provinces }) => {
     const country = chineseName || name;
     const aliases = [name, shortName].filter(alias => alias && alias !== country);

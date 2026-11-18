@@ -2,6 +2,8 @@ import {
   canReadTemuSellerData, inspectTemuEnrollment, readTemuSellerData, temuSellerCsv, trialTemuEnrollment,
 } from "./runtime.js";
 import { isTemuEnrollmentPage, TEMU_SELLER_OPERATIONS } from "./routes.js";
+import { requireHostUrl } from "../../../lib/optional-permissions.js";
+import { openTemuWorkflowTab } from "../workflow-tab.js";
 
 function element(tag, value = "", className = "") {
   const node = document.createElement(tag);
@@ -10,9 +12,24 @@ function element(tag, value = "", className = "") {
   return node;
 }
 
-function button(value, className = "compact secondary") {
+function button(value, className = "temu-operations-button") {
   const node = element("button", value, className);
   node.type = "button";
+  return node;
+}
+
+function iconButton(label, icon) {
+  const node = button("", "icon-btn");
+  node.setAttribute("aria-label", label);
+  node.title = label;
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  svg.setAttribute("class", "ico");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(namespace, "use");
+  use.setAttribute("href", `#${icon}`);
+  svg.append(use);
+  node.append(svg);
   return node;
 }
 
@@ -26,22 +43,19 @@ function panelMarkup() {
   dialog.id = "temu-operations-dialog";
   dialog.setAttribute("aria-labelledby", "temu-operations-title");
 
-  const heading = element("header", "", "workflow-dialog-header");
+  const heading = element("header", "", "temu-operations-heading");
   const title = element("h2");
   title.id = "temu-operations-title";
-  const headerActions = element("div", "", "workflow-dialog-actions");
-  const back = button("工作流");
-  const close = button("关闭", "compact ghost");
-  headerActions.append(back, close);
-  heading.append(title, headerActions);
+  const back = iconButton("返回工作流", "i-back");
+  const close = iconButton("关闭", "i-close");
+  heading.append(back, title, close);
 
-  const target = element("p", "", "temu-operations-target");
-  const links = element("nav", "", "temu-operations-links");
-  links.setAttribute("aria-label", "Temu 数据页面");
+  const sources = element("nav", "", "temu-operations-sources");
+  sources.setAttribute("aria-label", "数据来源");
   const allPages = element("input");
   allPages.type = "checkbox";
   const pagination = element("label", "", "temu-operations-pagination");
-  pagination.append(allPages, document.createTextNode("读取当前筛选的多页数据（最多 25 页）"));
+  pagination.append(allPages, document.createTextNode("读取多页（最多 25 页）"));
   const status = element("p", "", "temu-operations-status");
   status.setAttribute("role", "status");
   const preview = element("div", "", "temu-operations-preview");
@@ -53,15 +67,17 @@ function panelMarkup() {
   const note = element("p", "试填商品、申报价和库存，停在报名提交前。");
 
   const actions = element("footer", "", "temu-operations-actions");
-  const load = button("读取当前页", "compact");
+  const load = button("重新读取", "temu-operations-button is-primary");
   const stop = button("停止读取");
   const json = button("下载 JSON");
   const csv = button("下载 CSV");
-  const fill = button("试填已选商品", "compact");
-  actions.append(load, stop, json, csv, fill);
-  dialog.append(heading, target, links, pagination, note, preview, fields, step, status, actions);
+  const fill = button("试填已选商品", "temu-operations-button is-primary");
+  actions.append(stop, json, csv, load, fill);
+  const body = element("div", "", "temu-operations-body");
+  body.append(sources, note, preview, fields, step, status, pagination, actions);
+  dialog.append(heading, body);
   document.body.append(dialog);
-  return { dialog, title, back, close, target, links, allPages, pagination, status, preview, fields, step, next, note, load, stop, json, csv, fill };
+  return { dialog, title, back, close, sources, allPages, pagination, status, preview, fields, step, next, note, load, stop, json, csv, fill };
 }
 
 function showReport(report, target) {
@@ -120,6 +136,7 @@ export function bindTemuSellerOperationsPanel({ getTargetTab, isAgentBusy, downl
   let panel;
   let mode;
   let active;
+  let preferredSource;
   let report;
   let snapshot;
   let editRows = [];
@@ -132,8 +149,8 @@ export function bindTemuSellerOperationsPanel({ getTargetTab, isAgentBusy, downl
 
   function present() {
     const enrollment = mode.kind === "enrollment";
-    panel.load.textContent = enrollment ? "读取报名表" : "读取当前页";
-    panel.load.disabled = Boolean(inProgress);
+    panel.load.textContent = enrollment ? "重新读取报名表" : "重新读取";
+    panel.load.hidden = Boolean(inProgress);
     panel.stop.hidden = !inProgress;
     panel.note.hidden = !enrollment;
     panel.pagination.hidden = enrollment;
@@ -146,9 +163,11 @@ export function bindTemuSellerOperationsPanel({ getTargetTab, isAgentBusy, downl
     panel.fill.disabled = Boolean(inProgress);
     panel.json.hidden = enrollment || !report;
     panel.csv.hidden = enrollment || !report;
-    panel.target.textContent = active?.url && (enrollment ? isTemuEnrollmentPage(active.url) : canReadTemuSellerData(active.url, mode.kind))
-      ? new URL(active.url).hostname + new URL(active.url).pathname
-      : "请打开对应 Temu 页面后读取。";
+    const currentSource = preferredSource || mode.links?.find(item => sameRoute(item.href, active?.url)) || mode.links?.[0];
+    for (const [index, source] of [...panel.sources.children].entries()) {
+      source.disabled = Boolean(inProgress);
+      source.setAttribute("aria-pressed", String(mode.links[index] === currentSource));
+    }
   }
 
   function showEnrollment(current) {
@@ -159,50 +178,80 @@ export function bindTemuSellerOperationsPanel({ getTargetTab, isAgentBusy, downl
     status(current.reason || (editRows.length ? "选择要试填的商品，核对活动价和库存。" : "正在等待报名表。"));
   }
 
-  async function run(action) {
-    if (inProgress) return;
+  async function run(message, action) {
+    if (inProgress && !inProgress.signal.aborted) return;
     if (isAgentBusy?.()) {
       status("当前聊天正在使用网页，请等操作结束后重试。", true);
       return;
     }
     const controller = new AbortController();
     inProgress = controller;
-    status("正在读取 Temu 页面…");
+    status(message);
     present();
     try {
       await action(controller.signal);
     } catch (error) {
-      if (panel.dialog.open) status(controller.signal.aborted ? "已停止。" : error?.message || "Temu 操作失败。", !controller.signal.aborted);
+      if (inProgress === controller && panel.dialog.open) {
+        status(controller.signal.aborted ? "已停止。" : error?.message || "Temu 操作失败。", !controller.signal.aborted);
+      }
     } finally {
-      if (inProgress === controller) inProgress = undefined;
-      present();
+      if (inProgress === controller) {
+        inProgress = undefined;
+        present();
+      }
     }
   }
 
-  function connect() {
-    panel = panelMarkup();
-    const { dialog, back, close, stop, load, fill, json, csv, allPages, next } = panel;
-    close.addEventListener("click", () => dialog.close());
-    back.addEventListener("click", () => { dialog.close(); onBack?.(); });
-    stop.addEventListener("click", () => inProgress?.abort());
-    dialog.addEventListener("close", () => inProgress?.abort());
-    load.addEventListener("click", () => void run(async signal => {
-      active = await getTargetTab();
+  function sameRoute(href, value) {
+    if (!value) return false;
+    const expected = new URL(href);
+    let actual;
+    try { actual = new URL(value); } catch { return false; }
+    return expected.origin === actual.origin && expected.pathname === actual.pathname.replace(/\/$/u, "");
+  }
+
+  function read(source = preferredSource) {
+    return run("正在打开 Temu 页面…", async signal => {
+      const { kind } = mode;
+      const href = source?.href || mode.href;
+      preferredSource = source;
       report = undefined;
       snapshot = undefined;
       editRows = [];
       present();
-      if (mode.kind === "enrollment") {
+      // Chrome requires any new host grant to start while the workflow click is active.
+      if (globalThis.navigator?.userActivation?.isActive) {
+        const denied = await requireHostUrl(href, { userGesture: true, force: true });
+        if (denied) throw new Error(denied);
+      }
+      const tab = await getTargetTab();
+      const accepts = kind === "enrollment" ? isTemuEnrollmentPage : url =>
+        canReadTemuSellerData(url, kind) && (!source || sameRoute(source.href, url));
+      active = await openTemuWorkflowTab({ tab, href, accepts, signal });
+      signal.throwIfAborted();
+      status("正在读取 Temu 页面…");
+      if (kind === "enrollment") {
         showEnrollment(await inspectTemuEnrollment({ tab: active, signal }));
         return;
       }
       report = await readTemuSellerData({
-        tab: active, kind: mode.kind, allPages: allPages.checked, signal,
+        tab: active, kind, allPages: panel.allPages.checked, signal,
         onProgress: ({ pages, count }) => status("已读取 " + pages + " 页 · " + count + " 条"),
       });
       showReport(report, panel.preview);
-      status(report.records.length || report.overview.length || Object.keys(report.stats).length ? "可下载当前结果。" : "已核对当前页。");
-    }));
+      status(report.records.length || report.overview.length || Object.keys(report.stats).length ? "" : "已核对当前页。");
+    });
+  }
+
+  function connect() {
+    panel = panelMarkup();
+    const { dialog, back, close, stop, load, fill, json, csv, next } = panel;
+    const dismiss = () => { inProgress?.abort(); dialog.close(); };
+    close.addEventListener("click", dismiss);
+    back.addEventListener("click", () => { dismiss(); onBack?.(); });
+    stop.addEventListener("click", () => inProgress?.abort());
+    dialog.addEventListener("cancel", () => inProgress?.abort());
+    load.addEventListener("click", () => void read());
     fill.addEventListener("click", () => {
       const chosen = editRows.filter(item => item.use.checked);
       if (!chosen.length) {
@@ -211,7 +260,7 @@ export function bindTemuSellerOperationsPanel({ getTargetTab, isAgentBusy, downl
       }
       if (chosen.some(({ price, inventory }) => !price.reportValidity() || !inventory.reportValidity())) return;
       const values = chosen.map(item => ({ id: item.id, price: item.price.value, inventory: item.inventory.value }));
-      void run(async signal => {
+      void run("正在试填活动报名表…", async signal => {
         active = await getTargetTab();
         const receipt = await trialTemuEnrollment({ tab: active, snapshot, values, next: next.checked, signal });
         const completed = receipt.verified.length + " 行已填写并回读。";
@@ -237,24 +286,26 @@ export function bindTemuSellerOperationsPanel({ getTargetTab, isAgentBusy, downl
   return async function openTemuSellerOperations({ mode: id } = {}) {
     if (!Object.hasOwn(TEMU_SELLER_OPERATIONS, id)) return false;
     if (!panel) connect();
-    if (panel.dialog.open || inProgress) return true;
+    if (panel.dialog.open) return true;
     mode = TEMU_SELLER_OPERATIONS[id];
-    active = await getTargetTab();
+    active = undefined;
+    preferredSource = undefined;
     report = undefined;
     snapshot = undefined;
     editRows = [];
     panel.title.textContent = mode.title;
     panel.allPages.checked = false;
-    panel.links.replaceChildren(...(mode.links || [{ label: "打开 Temu 页面", href: mode.href }]).map(link => {
-      const target = element("a", link.label);
-      target.href = link.href;
-      target.target = "_blank";
-      target.rel = "noopener";
+    const sources = mode.kind === "enrollment" ? [] : mode.links || [];
+    panel.sources.replaceChildren(...sources.map(source => {
+      const target = button(source.label, "temu-operations-source");
+      target.addEventListener("click", () => void read(source));
       return target;
     }));
+    panel.sources.hidden = !sources.length;
     status("");
     present();
     panel.dialog.showModal();
+    void read();
     return true;
   };
 }

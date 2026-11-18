@@ -1,4 +1,5 @@
 import { requireHostUrl } from "../../../lib/optional-permissions.js";
+import { waitForTemu } from "../workflow-tab.js";
 import { operateTemuEnrollment } from "./enrollment.js";
 import { operateTemuSellerData } from "./page-state.js";
 import { isTemuEnrollmentPage, temuSellerDataPage } from "./routes.js";
@@ -18,25 +19,10 @@ export function canReadTemuSellerData(url, kind) {
   return Boolean(page && (!kind || page.kind === kind));
 }
 
-function sleep(signal, ms) {
-  signal?.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 async function bind(tab, accepts, signal) {
   const url = tab?.url;
   if (!url || !Number.isInteger(tab.id) || !accepts(url)) {
-    throw new Error("请在当前标签打开对应的 Temu 商家页面。");
+    throw new Error("Temu 页面已变化，请重新读取。");
   }
   signal?.throwIfAborted();
   const denied = await requireHostUrl(url, { tabId: tab.id, userGesture: true });
@@ -79,7 +65,7 @@ async function waitForPage(target, kind, oldKey) {
     snapshot = await inject(target, operateTemuSellerData, { kind }, { pagination: Boolean(oldKey) });
     if (snapshot.ok && (!oldKey || snapshot.records.length && snapshot.pageKey !== oldKey)) return snapshot;
     if (!snapshot.ok && snapshot.code !== "loading") throw new Error(snapshot.error);
-    await sleep(target.signal, 250);
+    await waitForTemu(target.signal, 250);
   } while (Date.now() < deadline);
   if (oldKey) return null;
   throw new Error(snapshot?.error || "Temu 页面数据加载超时。");

@@ -1,180 +1,446 @@
-import { loadTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../flows/temu/product-listing/input.js";
+import { chooseTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../flows/temu/product-listing/input.js";
 import { replayTemuListing } from "../flows/temu/product-listing/listing.flow.mjs";
 import { isTemuCategoryPage } from "../flows/temu/product-listing/stage1.js";
 import { createTemuListingToolCaller } from "../flows/temu/product-listing/tool-adapter.js";
-import { searchTemuCategories, loadTemuOrigins } from "../flows/temu/product-listing/taxonomy.js";
-import { requireHostUrl, requireOptionalFeature } from "../lib/optional-permissions.js";
+import { loadTemuCategoryChildren, loadTemuOrigins, resolveTemuOrigin, searchTemuCategories } from "../flows/temu/product-listing/taxonomy.js";
+import { suggestTemuCategory } from "../flows/temu/product-listing/category-suggestion.js";
+import { openTemuWorkflowTab } from "../flows/temu/workflow-tab.js";
+import { requireHostUrl } from "../lib/optional-permissions.js";
+import { bindTemuListingSelect } from "./temu-listing-select.js";
 
 const startUrl = "https://agentseller.temu.com/goods/create/category";
+const sitePreference = "pagelens.temu.listingSite";
+const defaultOrigin = { country: "中国大陆", region: "浙江省" };
+// Snapshot of the seller's Step 1 options. Replay verifies the choice against the current store.
+const knownSites = [
+  "美国站", "加拿大站", "英国站", "澳大利亚站、新西兰站", "欧盟地区", "墨西哥站", "瑞士站", "日本站", "沙特站",
+  "阿联酋站", "科威特站", "挪威站", "智利站", "马来西亚站", "菲律宾站", "泰国站", "卡塔尔站", "约旦站", "阿曼站",
+  "巴林站", "以色列站", "南非站", "塞尔维亚", "摩尔多瓦", "黑山", "冰岛", "波黑", "阿尔巴尼亚",
+  "秘鲁", "哥伦比亚", "格鲁吉亚", "亚美尼亚", "阿塞拜疆", "乌克兰", "毛里求斯", "摩洛哥", "巴拿马站",
+  "厄瓜多尔站", "斯里兰卡站", "越南站", "文莱站", "北马其顿", "吉尔吉斯斯坦站", "列支敦士登站",
+];
+const icon = name => `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
-export function bindTemuListingPanel({ getTargetTab, getSettings, isAgentBusy, onBack }) {
+function field(id, label, { search, trail = false, hidden = false } = {}) {
+  return `<div class="temu-field" id="temu-${id}" ${hidden ? "hidden" : ""}>
+    <span class="temu-label" id="temu-${id}-label">${label}</span>
+    <button class="temu-select-trigger" type="button" aria-labelledby="temu-${id}-label temu-${id}-value">
+      <span id="temu-${id}-value"></span>${icon("chevron")}
+    </button>
+    <div class="temu-select-menu" id="temu-${id}-menu" hidden>
+      ${search ? `<input type="search" aria-label="${search}" placeholder="${search}" autocomplete="off" />` : ""}
+      ${trail ? '<nav class="temu-category-trail" aria-label="当前分类层级" hidden></nav>' : ""}
+      <div class="temu-select-options"></div>
+    </div>
+  </div>`;
+}
+
+function jsonObject(value) {
+  const content = value.trim();
+  if (!content) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error("商品 JSON 格式有误，请核对后重试。");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("请提供商品 JSON 对象。");
+  return parsed;
+}
+
+export function bindTemuListingPanel({
+  getTargetTab, getSettings, isAgentBusy, onBack,
+  chooseDirectory = chooseTemuProductDirectory, suggestCategory = suggestTemuCategory,
+  fetchImpl = fetch, openTab = openTemuWorkflowTab, replay = replayTemuListing,
+}) {
   const dialog = document.createElement("dialog");
   dialog.className = "temu-listing-dialog";
   dialog.setAttribute("aria-labelledby", "temu-listing-title");
   dialog.innerHTML = `
-    <header><h2 id="temu-listing-title">Temu 商品上架</h2><button type="button" data-action="close">关闭</button></header>
-    <p id="temu-listing-page" role="status"></p>
-    <a href="${startUrl}" target="_blank" rel="noopener">打开 Temu 新建商品页</a>
-    <div class="temu-listing-source">
-      <label for="temu-products-path">商品目录</label>
-      <div class="temu-listing-row">
-        <input id="temu-products-path" type="text" placeholder="商品或批量目录的绝对路径" />
-        <button type="button" data-action="load">读取目录</button>
-      </div>
-      <select id="temu-product-item" aria-label="目录中的商品" hidden></select>
-      <details>
-        <summary>使用或补充 JSON</summary>
-        <textarea id="temu-product-json" rows="4" aria-label="商品 JSON"
-          placeholder='{"title":"商品名称","temu":{"origin":{"country":"产地"},"handlingTime":"发货时效","freightTemplate":"运费模板"}}'></textarea>
-        <p>选择目录商品后，JSON 可补充 Temu 字段。图片从已读取的目录选取。</p>
-      </details>
-      <label for="temu-listing-site">经营站点</label>
-      <input id="temu-listing-site" type="text" placeholder="如 美国站" />
-      <label for="temu-listing-category">商品类目</label>
-      <input id="temu-listing-category" type="text" list="temu-category-options" placeholder="搜索，或输入以 &gt; 分隔的完整类目" autocomplete="off" />
-      <datalist id="temu-category-options"></datalist>
-      <label for="temu-listing-origin">商品产地</label>
-      <input id="temu-listing-origin" type="text" list="temu-origin-options" placeholder="按实填写" />
-      <datalist id="temu-origin-options"></datalist>
-      <label for="temu-listing-region">产地省份或地区</label>
-      <input id="temu-listing-region" type="text" list="temu-region-options" placeholder="按需选择省份或地区" />
-      <datalist id="temu-region-options"></datalist>
-      <label class="temu-listing-check"><input id="temu-listing-ai" type="checkbox" /> 允许将商品资料和表单候选发给已配置的 AI 模型</label>
-      <label class="temu-listing-check"><input id="temu-listing-upload" type="checkbox" /> 上传这件商品目录中的图片</label>
+    <header class="temu-listing-header">
+      <button class="icon-btn" type="button" data-action="back" aria-label="返回工作流" title="返回工作流">${icon("back")}</button>
+      <h2 id="temu-listing-title">Temu 商品上架</h2>
+      <button class="icon-btn" type="button" data-action="close" aria-label="关闭" title="关闭">${icon("close")}</button>
+    </header>
+    <div class="temu-listing-body">
+      <fieldset class="temu-listing-source" aria-label="商品资料">
+        <div class="temu-field">
+          <span class="temu-label">商品目录</span>
+          <button class="temu-listing-action temu-directory-button" type="button" data-action="choose">
+            ${icon("folder")}<span>选择商品目录</span>
+          </button>
+          <p id="temu-directory-summary" class="temu-hint" role="status">可选单个商品目录或包含多个商品的文件夹。</p>
+        </div>
+        ${field("product-item", "目录中的商品", { search: "搜索商品", hidden: true })}
+        ${field("listing-site", "经营站点", { search: "搜索站点" })}
+        <div>
+          ${field("listing-category", "商品类目", { search: "搜索商品类目", trail: true })}
+          <p id="temu-category-hint" class="temu-hint" aria-live="polite"></p>
+        </div>
+        <div class="temu-listing-grid">
+          ${field("listing-origin", "商品产地", { search: "搜索国家或地区" })}
+          ${field("listing-region", "省份或地区", { search: "搜索省份或地区" })}
+        </div>
+        <label class="temu-listing-check" id="temu-upload-option" hidden><input id="temu-listing-upload" type="checkbox" />上传商品目录中的图片</label>
+        <details class="temu-listing-advanced">
+          <summary>补充资料</summary>
+          <label for="temu-product-json">商品 JSON</label>
+          <textarea id="temu-product-json" rows="4" spellcheck="false" placeholder='{"title":"商品名称"}'></textarea>
+          <label class="temu-listing-check"><input id="temu-listing-ai" type="checkbox" />让已配置的 AI 补齐第二步商品表单</label>
+        </details>
+      </fieldset>
+      <div id="temu-listing-message" role="status" aria-live="polite"></div>
+      <ul id="temu-listing-issues"></ul>
     </div>
-    <p>进入第二步时 Temu 会分配新草稿。试填完成后可在商品页核对。</p>
-    <div id="temu-listing-message" role="status" aria-live="polite"></div>
-    <ul id="temu-listing-issues"></ul>
-    <footer><button type="button" data-action="back">返回工作流</button><button type="button" data-action="run">开始试填</button><button type="button" data-action="stop" hidden>停止</button></footer>`;
+    <footer class="temu-listing-footer">
+      <span class="temu-hint">试填到草稿，发布前可核对。</span>
+      <button class="temu-listing-action primary" type="button" data-action="run">开始试填</button>
+      <button class="temu-listing-action" type="button" data-action="stop" hidden>停止</button>
+    </footer>`;
   document.body.append(dialog);
-  const find = id => dialog.querySelector(`#${id}`);
-  const action = name => dialog.querySelector(`[data-action="${name}"]`);
-  const message = find("temu-listing-message");
-  const issues = find("temu-listing-issues");
-  const path = find("temu-products-path");
-  const picker = find("temu-product-item");
-  const category = find("temu-listing-category");
-  const country = find("temu-listing-origin");
-  const region = find("temu-listing-region");
-  const site = find("temu-listing-site");
-  let products = [];
-  let origins = [];
-  let run;
-  let loadedPath = "";
-  let searchedCategory = "";
 
-  function options(target, values) {
-    target.replaceChildren(...values.map(value => Object.assign(document.createElement("option"), { value })));
-  }
+  const find = id => dialog.querySelector(`#temu-${id}`);
+  const action = name => dialog.querySelector(`[data-action="${name}"]`);
+  const message = find("listing-message");
+  const issues = find("listing-issues");
+  const source = dialog.querySelector("fieldset");
+  const directorySummary = find("directory-summary");
+  const categoryHint = find("category-hint");
+  const categoryTrail = dialog.querySelector(".temu-category-trail");
+  const upload = find("listing-upload");
+  const json = find("product-json");
+  let products = [];
+  let productIndex = 0;
+  let origins;
+  let originsPending;
+  let chosenOrigin = { ...defaultOrigin };
+  let chosenSite = knownSites[0];
+  let chosenCategory;
+  let manualCategory = false;
+  let manualOrigin = false;
+  let categoryRequest;
+  let categoryTrailParts = [];
+  let categoryQuery = 0;
+  let categoryTimer;
+  let jsonTimer;
+  let directoryRequest;
+  let run;
+
+  try {
+    const saved = document.defaultView.localStorage.getItem(sitePreference);
+    if (knownSites.includes(saved)) chosenSite = saved;
+  } catch { /* The preference remains available in the current panel. */ }
 
   function tell(text, error = false) {
     message.textContent = text;
     message.toggleAttribute("data-error", error);
   }
 
-  function selected() {
-    return loadedPath === path.value.trim() ? products[Number(picker.value)]?.input : undefined;
+  function select(id, label, placeholder, render) {
+    return bindTemuListingSelect(find(id), { label, placeholder, search: render, onOpen: () => render("") });
   }
 
-  function showRegions() {
-    options(find("temu-region-options"), origins.find(row => row.country === country.value.trim())?.regions || []);
+  function renderChoices(control, values, query, pick) {
+    control.render(values.filter(label => label.toLowerCase().includes(query.toLowerCase()))
+      .map(label => ({ key: label, label, pick: () => pick(label) })));
   }
 
-  picker.addEventListener("change", () => {
-    const product = selected();
-    if (!product) return;
-    category.value = product.categoryPath.join(" > ");
-    site.value = product.sites[0] || "美国站";
-    country.value = product.origin?.country || "";
-    region.value = product.origin?.region || "";
-    showRegions();
-    tell(`已读取 ${product.mainImages.length} 张主图、${product.detailImages.length} 张详情图和 ${product.skus.length} 个 SKU。`);
-  });
-  path.addEventListener("input", () => { picker.hidden = path.value.trim() !== loadedPath || !products.length; });
-  country.addEventListener("input", showRegions);
-  category.addEventListener("input", async () => {
-    const query = category.value.trim();
-    searchedCategory = query;
-    if (!query) return options(find("temu-category-options"), []);
-    try {
-      const rows = await searchTemuCategories(query);
-      if (searchedCategory === query) options(find("temu-category-options"), rows.map(row => row.path.join(" > ")));
-    } catch { /* 手动输入的类目仍会在 Temu 页面校验。 */ }
-  });
+  const site = select("listing-site", "经营站点", "选择站点", query => renderChoices(site, knownSites, query, value => {
+    chosenSite = value;
+    site.setValue(value);
+    try { document.defaultView.localStorage.setItem(sitePreference, value); } catch { /* Keep the current selection. */ }
+  }));
+  site.setValue(chosenSite);
 
-  action("load").addEventListener("click", async () => {
-    const currentPath = path.value.trim();
-    action("load").disabled = true;
+  const country = select("listing-origin", "商品产地", "选择产地", async query => {
     try {
-      const denied = await requireOptionalFeature("nativeMessaging", { userGesture: true });
-      if (denied) throw new Error(denied);
-      const result = await loadTemuProductDirectory(currentPath);
-      if (currentPath !== path.value.trim()) return;
-      loadedPath = currentPath;
-      products = result.products;
-      picker.replaceChildren(...products.map(({ title }, index) =>
-        Object.assign(document.createElement("option"), { value: String(index), textContent: title })));
-      picker.hidden = !products.length;
-      if (products.length) picker.dispatchEvent(new Event("change"));
-      if (result.issues.length || !products.length) {
-        tell(result.issues.map(item => `${item.folder}：${item.error}`).join("。") || "目录中没有可用商品。", true);
-      }
-    } catch (error) {
-      tell(error.message, true);
-    } finally {
-      action("load").disabled = false;
+      await ensureOrigins();
+      if (!country.isOpen() || find("listing-origin").querySelector("input").value.trim() !== query) return;
+      renderChoices(country, origins.filter(row =>
+        !query || [row.country, ...row.aliases].some(name => name.toLowerCase().includes(query.toLowerCase()))
+      ).map(row => row.country), "", value => {
+        manualOrigin = true;
+        setOrigin(value === defaultOrigin.country ? defaultOrigin : { country: value });
+      });
+    } catch {
+      if (country.isOpen()) country.render([], "无法加载产地目录，请重新打开选择器。");
+    }
+  });
+  const region = select("listing-region", "省份或地区", "选择省份或地区", async query => {
+    try {
+      await ensureOrigins();
+      if (!region.isOpen() || find("listing-region").querySelector("input").value.trim() !== query) return;
+      renderChoices(region, regions(), query, value => {
+        manualOrigin = true;
+        setOrigin({ ...chosenOrigin, region: value });
+      });
+    } catch {
+      if (region.isOpen()) region.render([], "无法加载产地目录，请重新打开选择器。");
     }
   });
 
-  function prepareInput() {
-    const edited = find("temu-product-json").value.trim();
+  function regions() {
+    return origins?.find(row => row.country === chosenOrigin.country)?.regions || [];
+  }
+
+  function setOrigin(value) {
+    chosenOrigin = { ...value };
+    country.setValue(chosenOrigin.country);
+    region.setValue(chosenOrigin.region);
+    const unavailable = Boolean(origins && !regions().length);
+    region.setDisabled(unavailable);
+    if (unavailable) region.setValue("此产地无需选择");
+  }
+  setOrigin(defaultOrigin);
+
+  function ensureOrigins() {
+    if (origins) return Promise.resolve(origins);
+    if (!originsPending) originsPending = loadTemuOrigins({ fetchImpl }).then(rows => {
+      origins = rows;
+      setOrigin(chosenOrigin);
+      return rows;
+    }).finally(() => { originsPending = undefined; });
+    return originsPending;
+  }
+
+  const productItem = select("product-item", "目录中的商品", "选择商品", query => {
+    productItem.render(products.flatMap(({ title }, index) => title.toLowerCase().includes(query.toLowerCase())
+      ? [{ key: String(index), label: title, pick: () => setProduct(index) }]
+      : []));
+  });
+
+  const category = bindTemuListingSelect(find("listing-category"), {
+    label: "商品类目",
+    placeholder: "选择类目",
+    onOpen: () => {
+      categoryTrailParts = (chosenCategory?.ids || []).slice(0, -1)
+        .map((id, index) => ({ id, label: chosenCategory.path[index] }));
+      showCategoryLevel("");
+    },
+    search: query => {
+      clearTimeout(categoryTimer);
+      ++categoryQuery;
+      category.render([], "正在查找类目…");
+      categoryTimer = setTimeout(() => showCategoryLevel(query), query ? 160 : 0);
+    },
+  });
+
+  function updateCategory(value) {
+    chosenCategory = value;
+    const path = value?.path.join(" › ");
+    category.setValue(path, value?.id || "");
+  }
+
+  function pickCategory(value) {
+    manualCategory = true;
+    categoryRequest?.abort();
+    updateCategory(value);
+    categoryHint.textContent = "";
+  }
+
+  function showTrail(searching) {
+    categoryTrail.replaceChildren();
+    categoryTrail.hidden = searching || !categoryTrailParts.length;
+    if (categoryTrail.hidden) return;
+    categoryTrail.append(...["全部类目", ...categoryTrailParts.map(part => part.label)].map((name, index) => {
+      const bread = document.createElement("button");
+      bread.type = "button";
+      bread.textContent = name;
+      bread.addEventListener("click", () => {
+        categoryTrailParts = categoryTrailParts.slice(0, index);
+        find("listing-category").querySelector("input").focus();
+        void showCategoryLevel("");
+      });
+      return bread;
+    }));
+  }
+
+  async function showCategoryLevel(query) {
+    clearTimeout(categoryTimer);
+    const revision = ++categoryQuery;
+    const trail = categoryTrailParts;
+    const ids = trail.map(part => part.id);
+    showTrail(Boolean(query));
+    category.render([], "正在加载类目…");
+    try {
+      const rows = query
+        ? (await searchTemuCategories(query, { withIds: true, fetchImpl })).map(value => ({
+          key: value.id, label: value.path.join(" › "), pick: () => pickCategory(value),
+        }))
+        : (await loadTemuCategoryChildren(ids, { fetchImpl })).map(node => ({
+          key: node.id, label: node.label, branch: !node.leaf, pick: () => {
+            if (node.leaf) {
+              pickCategory({ id: node.id, ids: [...ids, node.id], path: [...trail.map(part => part.label), node.label] });
+            } else {
+              categoryTrailParts = [...trail, node];
+              void showCategoryLevel("");
+            }
+          },
+        }));
+      if (revision === categoryQuery && category.isOpen()) category.render(rows, "没有匹配的商品类目。");
+    } catch {
+      if (revision === categoryQuery && category.isOpen()) category.render([], "无法加载类目，请重新打开选择器。");
+    }
+  }
+
+  function selected() {
+    return products[productIndex]?.input;
+  }
+
+  function sourceInput() {
+    const raw = jsonObject(json.value);
     const base = selected();
-    const raw = edited ? JSON.parse(edited) : {};
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("请提供商品 JSON 对象。");
-    const normalized = normalizeTemuListingInput({ ...base, ...raw, title: raw.title || base?.title, temu: raw.temu });
-    const overlayAttributes = normalized.listingAttributes;
+    if (!base && !raw.title) throw new Error("请先选择商品目录，或在补充资料中提供商品 JSON。");
+    const normalized = normalizeTemuListingInput({ ...base, ...raw, title: raw.title || base?.title });
     const filled = { ...base };
     for (const [key, value] of Object.entries(normalized)) {
       if (value == null || value === "" || (Array.isArray(value) && !value.length)) continue;
       filled[key] = value;
     }
-    filled.listingAttributes = { ...base?.listingAttributes, ...overlayAttributes };
-    for (const key of ["mainImages", "detailImages", "variantImages", "sizeChartImagePath"]) filled[key] = base?.[key];
+    filled.attributes = { ...base?.attributes, ...normalized.attributes };
+    filled.listingAttributes = { ...base?.listingAttributes, ...normalized.listingAttributes };
+    for (const key of ["mainImages", "detailImages", "variantImages", "sizeChartImagePath", "sizeChart"]) filled[key] = base?.[key] ?? normalized[key];
     for (const key of ["skus", "variantGroups"]) filled[key] = base?.[key]?.length ? base[key] : normalized[key];
-    filled.sites = [site.value.trim() || normalized.sites[0] || base?.sites[0]].filter(Boolean);
-    filled.categoryPath = category.value.trim() ? category.value.split(/\s*[>＞›»]\s*/u).map(s => s.trim()).filter(Boolean) : normalized.categoryPath;
-    const namedCountry = country.value.trim();
-    if (namedCountry) filled.origin = { country: namedCountry, region: region.value.trim() };
     return filled;
   }
 
-  action("run").addEventListener("click", async () => {
-    if (run || isAgentBusy?.()) return tell("请等当前任务结束后再试。", true);
-    const signal = (run = new AbortController()).signal;
+  async function recommend() {
+    categoryRequest?.abort();
+    let product;
+    try { product = sourceInput(); } catch { return; }
+    const controller = new AbortController();
+    categoryRequest = controller;
+    const { signal } = controller;
+
+    void ensureOrigins().then(rows => {
+      if (signal.aborted || manualOrigin || !dialog.open) return;
+      const exact = product.origin && resolveTemuOrigin(rows, product.origin);
+      setOrigin(exact?.country === defaultOrigin.country ? { ...defaultOrigin, ...exact } : exact || defaultOrigin);
+    }).catch(() => { /* Default display stays available while the packaged catalog retries. */ });
+
+    if (manualCategory) return;
+    updateCategory(undefined);
+    categoryHint.textContent = "正在根据商品推荐类目…";
+    try {
+      const result = await suggestCategory(product, { settings: getSettings?.(), signal, fetchImpl });
+      if (signal.aborted || manualCategory || !dialog.open) return;
+      updateCategory(result.category);
+      categoryHint.textContent = result.source === "model" ? "AI 推荐，可修改。"
+        : result.source === "provided" ? "已匹配商品资料中的类目。"
+        : result.category ? "已按商品资料匹配，可修改。" : "暂无合适推荐，请从类目列表选择。";
+    } catch {
+      if (!signal.aborted && dialog.open) categoryHint.textContent = "类目推荐暂不可用，可手动选择。";
+    }
+  }
+
+  function setProduct(index) {
+    productIndex = index;
+    const product = products[index];
+    productItem.setValue(product.title, String(index));
+    manualCategory = false;
+    manualOrigin = false;
+    setOrigin(defaultOrigin);
+    updateCategory(undefined);
+    const { mainImages, detailImages, skus, variantImages, sizeChartImagePath } = product.input;
+    const hasImages = mainImages.length + detailImages.length + variantImages.length > 0 || Boolean(sizeChartImagePath);
+    find("upload-option").hidden = !hasImages;
+    if (!hasImages) upload.checked = false;
+    const counts = [`${mainImages.length} 张主图`, `${detailImages.length} 张详情图`, `${skus.length} 个 SKU`].join(" · ");
+    tell(counts);
+    void recommend();
+  }
+
+  action("choose").addEventListener("click", async () => {
+    if (directoryRequest || run) return;
+    const pending = { open: true };
+    directoryRequest = pending;
+    action("choose").disabled = true;
     action("run").disabled = true;
+    action("choose").querySelector("span").textContent = "正在选择目录…";
+    try {
+      const result = await chooseDirectory();
+      if (!result || !pending.open || !dialog.open) return;
+      products = result.products;
+      productIndex = 0;
+      find("product-item").hidden = products.length < 2;
+      directorySummary.textContent = products.length === 1 ? products[0].title : `${result.directoryName} · ${products.length} 件商品`;
+      upload.checked = false;
+      issues.replaceChildren();
+      if (products.length) {
+        setProduct(0);
+      } else {
+        categoryRequest?.abort();
+        categoryHint.textContent = "";
+        manualCategory = manualOrigin = false;
+        updateCategory(undefined);
+        setOrigin(defaultOrigin);
+        find("upload-option").hidden = true;
+        upload.checked = false;
+        tell("该目录没有可读取的商品。请选择包含 product.json 的目录。", true);
+      }
+      renderIssues(result.issues.map(item => `${item.folder}：${item.error}`));
+    } catch (error) {
+      if (pending.open && dialog.open) tell(error.message, true);
+    } finally {
+      directoryRequest = undefined;
+      action("choose").disabled = false;
+      action("run").disabled = Boolean(run);
+      action("choose").querySelector("span").textContent = products.length ? "更换商品目录" : "选择商品目录";
+    }
+  });
+
+  json.addEventListener("input", () => {
+    if (!manualCategory) {
+      categoryRequest?.abort();
+      updateCategory(undefined);
+      categoryHint.textContent = "";
+    }
+    clearTimeout(jsonTimer);
+    jsonTimer = setTimeout(() => void recommend(), 400);
+  });
+
+  function renderIssues(receipts) {
+    issues.replaceChildren(...[...new Set(receipts)].map(textContent => Object.assign(document.createElement("li"), { textContent })));
+  }
+
+  action("run").addEventListener("click", async () => {
+    if (run || directoryRequest || isAgentBusy?.()) return tell("请等当前任务结束后再试。", true);
+    const signal = (run = new AbortController()).signal;
+    for (const control of [site, category, country, region, productItem]) control.close();
+    source.disabled = action("run").disabled = true;
     action("stop").hidden = false;
     issues.replaceChildren();
     try {
-      const input = prepareInput();
-      if (!input.sites.length || !input.categoryPath.length) throw new Error("请选择经营站点和完整商品类目。");
-      const tab = await getTargetTab();
-      if (!isTemuCategoryPage(tab?.url)) throw new Error("请切到 Temu 新建商品的第 1 步，再开始试填。");
-      try {
-        await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => true });
-      } catch (error) {
-        if (!/cannot access|missing host permission/iu.test(error?.message || "")) throw error;
-        const permission = await requireHostUrl(startUrl, { tabId: tab.id, userGesture: true });
+      const input = sourceInput();
+      if (!chosenCategory) throw new Error("请选择完整的商品类目。");
+      categoryRequest?.abort();
+      clearTimeout(jsonTimer);
+      input.sites = [chosenSite];
+      input.categoryPath = chosenCategory.path;
+      input.categoryId = chosenCategory.id;
+      input.origin = { ...chosenOrigin };
+      tell("正在打开 Temu 新建商品页…");
+      const active = await getTargetTab();
+      signal.throwIfAborted();
+      let canAccess = false;
+      if (isTemuCategoryPage(active?.url)) {
+        canAccess = await chrome.scripting.executeScript({ target: { tabId: active.id }, func: () => true })
+          .then(() => true, () => false);
+      }
+      if (!canAccess) {
+        const permission = await requireHostUrl(startUrl, { userGesture: true, tabId: active?.id });
         if (permission) throw new Error(permission);
       }
+      const tab = await openTab({ tab: active, href: startUrl, accepts: isTemuCategoryPage, signal });
       signal.throwIfAborted();
-      const approved = find("temu-listing-upload").checked;
-      const useModel = find("temu-listing-ai").checked;
+      const approved = upload.checked;
+      const useModel = find("listing-ai").checked;
       const imagePaths = new Set([...(input.mainImages || []), ...(input.detailImages || []), ...(input.variantImages || []), input.sizeChartImagePath]);
       const call = createTemuListingToolCaller({
         tabId: tab.id, url: tab.url, signal,
         confirmUpload: ({ paths }) => approved && paths.every(file => imagePaths.has(file)),
       });
-      const result = await replayTemuListing({
+      const result = await replay({
         tabId: tab.id, input, call, signal,
         suggestFields: (product, schema, { signal }) =>
           suggestTemuFields(product, schema, { signal, settings: getSettings?.(), useModel }),
@@ -182,32 +448,40 @@ export function bindTemuListingPanel({ getTargetTab, getSettings, isAgentBusy, o
       });
       const completed = result.items.filter(item => /^(?:filled|verified|unchanged)$/u.test(item.status)).length;
       tell(`试填${result.missing.length || result.issues.length ? "待核对" : "已完成"}，已核对 ${completed} 项，必填待补 ${result.missing.length} 项。`, result.status === "needs-review");
-      const receipts = [...result.issues.map(({ label, message }) => `${label}：${message}`), ...result.missing.map(({ label }) => `待填：${label}`)];
-      issues.replaceChildren(...[...new Set(receipts)].map(textContent => Object.assign(document.createElement("li"), { textContent })));
+      renderIssues([...result.issues.map(({ label, message }) => `${label}：${message}`), ...result.missing.map(({ label }) => `待填：${label}`)]);
     } catch (error) {
       tell(signal.aborted ? "试填已停止。" : error.message || "Temu 试填失败。", !signal.aborted);
     } finally {
       run = undefined;
-      action("run").disabled = false;
+      source.disabled = action("run").disabled = false;
       action("stop").hidden = true;
     }
   });
 
+  function cancelPending() {
+    for (const control of [site, category, country, region, productItem]) control.close();
+    clearTimeout(categoryTimer);
+    clearTimeout(jsonTimer);
+    if (directoryRequest) directoryRequest.open = false;
+    categoryRequest?.abort();
+    run?.abort();
+  }
+
+  function dismiss() {
+    cancelPending();
+    dialog.close();
+  }
+
   action("stop").addEventListener("click", () => run?.abort());
-  action("close").addEventListener("click", () => dialog.close());
-  action("back").addEventListener("click", () => { dialog.close(); onBack?.(); });
-  dialog.addEventListener("close", () => run?.abort());
-  site.value = "美国站";
+  action("close").addEventListener("click", dismiss);
+  action("back").addEventListener("click", () => { dismiss(); onBack?.(); });
+  dialog.addEventListener("cancel", cancelPending);
+
   return async function open() {
-    if (!dialog.open) dialog.showModal();
-    const tab = await getTargetTab();
-    find("temu-listing-page").textContent = isTemuCategoryPage(tab?.url) ? "当前页是 Temu 新建商品第 1 步。" : "请先打开 Temu 新建商品页。";
-    if (!origins.length) {
-      loadTemuOrigins().then(rows => {
-        origins = rows;
-        options(find("temu-origin-options"), origins.map(row => row.country));
-        showRegions();
-      }).catch(() => {});
+    if (!dialog.open) {
+      dialog.showModal();
+      void ensureOrigins().catch(() => {});
+      if (!chosenCategory && !manualCategory && (selected() || json.value.trim())) void recommend();
     }
     return true;
   };

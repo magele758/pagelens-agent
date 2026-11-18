@@ -3,8 +3,10 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../input.js";
+import { chooseTemuProductDirectory, loadTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../input.js";
 import { loadProductDirectory } from "../../../../../native/product-directory.mjs";
+import { handleRequest } from "../../../../../native/pagelens-host.mjs";
+import { pickProductDirectory } from "../../../../../native/product-directory-picker.mjs";
 
 test("normalizes the desktop listing format and converts kg to g without changing SKU values", () => {
   const product = normalizeTemuListingInput({
@@ -105,6 +107,63 @@ test("native importer verifies auxiliary capture images and reports missing or s
   assert.deepEqual(input.variantImages, [join(folder, "images/detail.jpg")]);
   assert.equal(input.skus[0].imagePath, undefined);
   assert.equal(input.variantGroups[0].options[0].imagePath, join(folder, "images/detail.jpg"));
+});
+
+test("picks a product folder and loads its validated manifest and images in the same action", async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pagelens-temu-picker-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const folder = join(root, "跨境商品 ");
+  await mkdir(folder);
+  await writeFile(join(folder, "product.json"), JSON.stringify({ title: "运动水杯", imagePath: "main.jpg" }));
+  await writeFile(join(folder, "main.jpg"), Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]));
+  const options = {
+    authorize: async (permission, options) => {
+      assert.equal(permission, "nativeMessaging");
+      assert.deepEqual(options, { userGesture: true });
+      return "";
+    },
+    choose: () => handleRequest({ op: "chooseProductDirectory", path: "/ignored" }, { pickDirectory: async () => folder }),
+  };
+  const selected = await chooseTemuProductDirectory(options);
+  assert.equal(selected.directoryName, "跨境商品 ");
+  assert.equal(selected.root, root);
+  assert.deepEqual(selected.products[0].input.mainImages, [join(folder, "main.jpg")]);
+  const invalid = join(root, "不完整商品");
+  await mkdir(invalid);
+  await writeFile(join(invalid, "product.json"), JSON.stringify({ title: "衣服", temu: { composition: "棉" } }));
+  const batch = await chooseTemuProductDirectory({ ...options,
+    choose: () => handleRequest({ op: "chooseProductDirectory" }, { pickDirectory: async () => root }),
+  });
+  assert.deepEqual(batch.products.map(product => product.folder), ["跨境商品 "]);
+  assert.match(batch.issues[0].error, /商品成分/u);
+  assert.equal(await chooseTemuProductDirectory({ ...options, choose: async () => ({ ok: true, cancelled: true }) }), null);
+  await assert.rejects(chooseTemuProductDirectory({ ...options, authorize: async () => "拒绝连接本机助手",
+    choose: () => assert.fail("the native dialog needs permission before opening"),
+  }), /拒绝连接本机助手/u);
+  assert.equal((await handleRequest({ op: "chooseProductDirectory", scope: "agent" }, {
+    pickDirectory: () => assert.fail("the agent cannot open the native dialog"),
+  })).ok, false);
+});
+
+test("native picker preserves paths and recognizes cancellation on macOS and Linux", async () => {
+  const picked = await pickProductDirectory({ platform: "darwin", execute: async (program, args, options) => {
+    assert.equal(program, "/usr/bin/osascript");
+    assert.deepEqual(args.slice(0, 3), ["-l", "JavaScript", "-e"]);
+    assert.ok(options.timeout <= 120_000);
+    return { stdout: '"/商品目录 /"\n' };
+  } });
+  assert.equal(picked, "/商品目录 /");
+  const linuxPrograms = [];
+  const linuxPicked = await pickProductDirectory({ platform: "linux", execute: async program => {
+    linuxPrograms.push(program);
+    if (program === "zenity") throw Object.assign(new Error("absent"), { code: "ENOENT" });
+    return { stdout: "/商品目录 \n" };
+  } });
+  assert.deepEqual(linuxPrograms, ["zenity", "kdialog"]);
+  assert.equal(linuxPicked, "/商品目录 ");
+  assert.equal(await pickProductDirectory({ platform: "linux", execute: async () => {
+    throw Object.assign(new Error("cancel"), { code: 1 });
+  } }), null);
 });
 
 test("suggests only live allowed option IDs and descriptive fields, preserving technical values and using one model call", async () => {

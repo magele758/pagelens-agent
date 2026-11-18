@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
 import { JSDOM } from "jsdom";
 import { operateTemuSellerData } from "../page-state.js";
 import { operateTemuEnrollment } from "../enrollment.js";
+import { bindTemuSellerOperationsPanel } from "../panel.js";
 import { canReadTemuSellerData, readTemuSellerData, temuSellerCsv } from "../runtime.js";
 import { isTemuEnrollmentPage, temuSellerDataPage } from "../routes.js";
+import { openTemuWorkflowTab } from "../../workflow-tab.js";
 
 const seller = "https://agentseller.temu.com";
 const goods = seller + "/goods/list";
@@ -222,4 +225,103 @@ assert.equal(isTemuEnrollmentPage(campaigns + "/auto-sign"), false);
   assert.match(partial.warnings[0], /未能验证/);
   tab.active = false;
   await assert.rejects(readTemuSellerData({ tab, kind: "products" }), /标签已切换/u);
+}
+
+{
+  const dom = fixture("https://fixture.invalid/sidepanel/index.html", "");
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+  const navigations = [];
+  const reads = [];
+  const downloads = [];
+  let active = { id: 20, active: true, windowId: 7, url: "https://example.invalid/" };
+  let backClicks = 0;
+  let redirect = false;
+  let loadingUrl;
+  let waited = false;
+  globalThis.chrome = {
+    tabs: {
+      create: async ({ url, active: select, windowId }) => {
+        assert.equal(select, true);
+        assert.equal(windowId, 7);
+        navigations.push(url);
+        active = { id: active.id + 1, active: true, windowId, url: "about:blank", pendingUrl: url, status: "loading" };
+        loadingUrl = redirect ? seller + "/login" : url;
+        waited = false;
+        return active;
+      },
+      get: async id => {
+        assert.equal(id, active.id);
+        if (loadingUrl && waited) {
+          active = { id, active: true, windowId: 7, url: loadingUrl, status: "complete" };
+          loadingUrl = undefined;
+        }
+        waited = true;
+        return active;
+      },
+    },
+    scripting: { executeScript: async ({ target, args }) => {
+      assert.equal(target.tabId, active.id);
+      assert.equal(active.status, "complete");
+      assert.equal(active.url, args[0].expectedUrl);
+      reads.push(args[0].expectedUrl);
+      return [{ frameId: 0, documentId: "doc-" + active.id, result: {
+        ok: true, title: "报表测试", records: [{ table: "报表", fields: { 商品: "夹克" } }],
+        warnings: [], next: false, pageKey: "first", page: 1, total: 1, filters: [], stats: {}, overview: [],
+      } }];
+    } },
+  };
+
+  async function eventually(condition) {
+    for (let count = 0; count < 100; count++) {
+      if (condition()) return;
+      await delay(10);
+    }
+    assert.fail("Temu 数据面板操作未完成");
+  }
+  const open = bindTemuSellerOperationsPanel({
+    getTargetTab: async () => active,
+    downloadText: (...payload) => downloads.push(payload),
+    onBack: () => backClicks++,
+  });
+  assert.equal(await open({ mode: "temu-product-data" }), true);
+  const panel = document.getElementById("temu-operations-dialog");
+  assert.equal(panel.open, true);
+  assert.equal(panel.querySelector("header").firstElementChild.getAttribute("aria-label"), "返回工作流");
+  assert.equal(panel.querySelector("header").lastElementChild.getAttribute("aria-label"), "关闭");
+  assert.equal(panel.querySelector("a"), null);
+  await eventually(() => !panel.querySelector(".temu-operations-preview").hidden);
+  assert.deepEqual(navigations, [goods]);
+  assert.deepEqual(reads, [goods]);
+  assert.match(panel.querySelector(".temu-operations-preview").textContent, /1 条记录/u);
+  [...panel.querySelectorAll("footer button")].find(button => button.textContent === "下载 JSON").click();
+  assert.equal(downloads[0][0], "temu-products.json");
+  assert.equal(JSON.parse(downloads[0][1]).sourceUrl, goods);
+
+  panel.querySelector("header button").click();
+  assert.equal(backClicks, 1);
+  assert.equal(panel.open, false);
+  active = { ...active, url: campaigns + "/log?status=1" };
+  assert.equal(await open({ mode: "temu-campaign-data" }), true);
+  await eventually(() => reads.length === 2 && !panel.querySelector(".temu-operations-preview").hidden);
+  assert.deepEqual(navigations, [goods]);
+  assert.equal(reads.at(-1), campaigns + "/log?status=1");
+  const sources = panel.querySelector("nav");
+  assert.equal(sources.querySelector("[aria-pressed='true']").textContent, "报名记录");
+  sources.querySelectorAll("button")[1].click();
+  await eventually(() => reads.length === 3 && !panel.querySelector(".temu-operations-preview").hidden);
+  assert.equal(navigations.at(-1), campaigns + "/result");
+  assert.equal(reads.at(-1), campaigns + "/result");
+  assert.equal(sources.querySelector("[aria-pressed='true']").textContent, "报名结果");
+
+  panel.querySelector("header button[aria-label='关闭']").click();
+  assert.equal(backClicks, 1);
+  redirect = true;
+  assert.equal(await open({ mode: "temu-order-data" }), true);
+  await eventually(() => panel.querySelector("[data-error]"));
+  assert.equal(navigations.at(-1), orders);
+  assert.equal(reads.length, 3, "The workflow must not read the unrelated login page");
+  assert.match(panel.querySelector("[data-error]").textContent, /登录状态/u);
+  await assert.rejects(openTemuWorkflowTab({ tab: active, href: "https://example.invalid", accepts: url => canReadTemuSellerData(url, "orders") }), /地址无效/u);
+  dom.window.close();
 }
