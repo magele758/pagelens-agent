@@ -9,6 +9,8 @@ export function readShopeeSellerPromotions(expectedUrl, action = "read") {
     "/portal/marketing/shop-flash-sale/list": {
       title: "Shopee 店铺限时抢购",
       type: "店铺限时抢购",
+      emptyLabel: "未发现任何店内秒杀活动",
+      tableColumns: ["开始/结束时间", "商品", "已设置提醒的数量：", "商品的点击数/浏览数", "状态", "开启/关闭", "操作"],
     },
     "/portal/marketing/global-discount/list": {
       title: "Shopee 全球商品折扣",
@@ -38,13 +40,17 @@ export function readShopeeSellerPromotions(expectedUrl, action = "read") {
   const headersOf = table => all(table, "thead th,[role=columnheader]").map(text);
   const titleColumn = label => /^(?:全部|活动名称|促销活动名称|限时抢购名称)$/u.test(label);
   const empty = /^(?:暂无数据|暂无活动|无活动|未找到活动|未创建活动|暂无促销活动|[没沒]有折扣活动|No Data|No Results|0\s*个结果)[。.!]?$/iu;
-  const dataMatches = (candidate, headers) => route.columns
-    ? candidate.length === headers.length && headers.every((label, index) => candidate[index] === label)
-    : candidate.some(titleColumn) && candidate.includes("商品") && candidate.includes("活动期间") && candidate.includes("操作");
+  const isEmpty = value => value === route.emptyLabel || empty.test(value);
+  const sameColumns = (candidate, expected) => candidate.length === expected.length &&
+    expected.every((label, index) => candidate[index] === label);
+  const dataMatches = candidate => route.columns
+    ? sameColumns(candidate, route.columns)
+    : sameColumns(candidate.filter(Boolean), route.tableColumns) ||
+      (candidate.some(titleColumn) && candidate.includes("商品") && candidate.includes("活动期间") && candidate.includes("操作"));
   const tables = all(document, "table,[role=table],[role=grid]");
-  const header = one(tables.filter(table => dataMatches(headersOf(table), route.columns)));
+  const header = one(tables.filter(table => dataMatches(headersOf(table))));
   const columns = header ? headersOf(header) : [];
-  const looksLikeBody = table => rowsOf(table).some(row => rowCells(row).length === columns.length || empty.test(text(row)));
+  const looksLikeBody = table => rowsOf(table).some(row => rowCells(row).length === columns.length || isEmpty(text(row)));
 
   // Shopee can render the header and body in separate tables.
   let tableRoot = header?.parentElement;
@@ -62,7 +68,7 @@ export function readShopeeSellerPromotions(expectedUrl, action = "read") {
   const rows = [];
   let emptyMessage = "";
   for (const row of body ? rowsOf(body) : []) {
-    if (empty.test(text(row))) {
+    if (isEmpty(text(row))) {
       emptyMessage = text(row);
       continue;
     }
@@ -134,6 +140,14 @@ export function readShopeeSellerPromotions(expectedUrl, action = "read") {
   if (!rows.length && !emptyMessage && tableRoot) {
     emptyMessage = candidates.filter(node => tableRoot.contains(node)).map(text)
       .find(value => empty.test(value)) || "";
+  }
+  if (!rows.length && !emptyMessage && route.emptyLabel) {
+    for (let region = header?.parentElement; region && region !== document.body; region = region.parentElement) {
+      const labels = candidates.filter(node => region.contains(node)).map(text);
+      if (!labels.includes("活动列表")) continue;
+      if (labels.includes(route.emptyLabel)) emptyMessage = route.emptyLabel;
+      break;
+    }
   }
   const flashGuide = !header && location.pathname.includes("/shop-flash-sale/") &&
     candidates.map(text).find(value => /^(?:快速上手|开始使用|创建你的第一个店铺限时抢购)$/u.test(value));

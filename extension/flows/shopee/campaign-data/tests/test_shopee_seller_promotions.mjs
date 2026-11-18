@@ -123,3 +123,24 @@ test("recognizes the flash sale guide with a trailing slash and requires the exa
   assert.equal(duplicate.run(duplicateUrl).code, "page-changed");
   duplicate.window.close();
 });
+
+test("recognizes the empty flash sale table", () => {
+  const url = `${urlFor("shop-flash-sale/list")}&type=0`;
+  const label = "未发现任何店内秒杀活动";
+  const columns = ["开始/结束时间", "商品", "已设置提醒的数量：", "商品的点击数/浏览数", "状态", "开启/关闭", "操作"];
+  const { window, run } = page(url, `<main><section>
+    <h2>活动列表</h2>
+    <div>${headers(columns)}</div>
+    <div id="empty"><img alt=""><span>${label}</span></div>
+  </section><aside></aside></main>`);
+  const result = run(url);
+  assert.equal(result.ok, true);
+  assert.equal(result.rows.length, 0);
+  assert.deepEqual([...result.meta.columns], columns);
+  assert.equal(result.meta.emptyMessage, label);
+  assert.equal(result.warnings.join(""), label);
+  assert.equal(result.next, null);
+  window.document.querySelector("aside").append(window.document.querySelector("#empty"));
+  assert.equal(run(url).meta.emptyMessage, null);
+  window.close();
+});
