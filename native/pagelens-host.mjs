@@ -30,7 +30,7 @@ import {
 } from "../extension/lib/fs-path.js";
 
 export const HOST_NAME = "com.pagelens.host";
-export const HOST_VERSION = "1.4.0";
+export const HOST_VERSION = "1.5.0";
 export const DEFAULT_TIMEOUT_MS = 60_000;
 export const MAX_TIMEOUT_MS = 300_000;
 export const MAX_OUTPUT = 200_000;
@@ -304,7 +304,7 @@ export function handleFs(req) {
       const { folder, expectedPath, offset, revision, asset } = req;
       return readProductSizeChartChunk({ root: resolveAbs(req.root), folder, expectedPath, offset, revision, asset });
     }
-    if (agentScope && (action === "writeText" || action === "deleteFile" || action === "ensureDir")) {
+    if (agentScope && ["writeText", "deleteFile", "ensureDir", "claimInboxJob"].includes(action)) {
       return { ok: false, op: "fs", action, error: "已拦截：agent 不能通过此接口写文件。" };
     }
     if (action === "stat") {
@@ -343,16 +343,18 @@ export function handleFs(req) {
       if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
         return { ok: false, op: "fs", action, error: `不是目录：${abs}` };
       }
-      const names = fs.readdirSync(abs, { withFileTypes: true });
       const relParts = String(req.rel || "").trim() ? splitRelParts(req.rel) : [];
-      const entries = [];
-      for (const ent of names.slice(0, 200)) {
-        const kind = ent.isDirectory() ? "directory" : "file";
-        entries.push({
-          name: ent.name,
-          kind,
-          path: [...relParts, ent.name].join("/"),
-        });
+      const list = (directory, prefix) => sortEntries(fs.readdirSync(directory, { withFileTypes: true }).slice(0, 200).map(ent => ({
+        name: ent.name,
+        kind: ent.isDirectory() ? "directory" : "file",
+        path: [...prefix, ent.name].join("/"),
+      })));
+      const entries = list(abs, relParts);
+      let directedEntries;
+      if (!agentScope && /^[a-p]{32}$/.test(req.inboxId || "")) {
+        const directedDir = path.join(abs, req.inboxId);
+        try { directedEntries = list(directedDir, [req.inboxId]); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
       }
       return {
         ok: true,
@@ -361,7 +363,8 @@ export function handleFs(req) {
         folder: path.basename(abs),
         path: relParts.join("/"),
         count: entries.length,
-        entries: sortEntries(entries),
+        entries,
+        ...(directedEntries && { directedEntries }),
       };
     }
     if (action === "readText") {
@@ -373,7 +376,7 @@ export function handleFs(req) {
         if (denied) return { ok: false, op: "fs", action, error: denied };
       }
       if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
-        return { ok: false, op: "fs", action, error: `文件不存在：${abs}` };
+        return { ok: false, op: "fs", action, code: "ENOENT", error: `文件不存在：${abs}` };
       }
       const text = fs.readFileSync(abs, "utf8");
       if (text.length > MAX_FS_TEXT) {
@@ -406,6 +409,24 @@ export function handleFs(req) {
       fs.writeFileSync(abs, body, "utf8");
       return { ok: true, op: "fs", action, path: parts.join("/"), bytes: body.length };
     }
+    if (action === "claimInboxJob") {
+      const rel = String(req.rel || "");
+      if (!/^[^/\\]+\.json$/i.test(rel)) throw Error("Expected a flat JSON inbox filename");
+      const pending = safeJoinRoot(req.root, rel);
+      const claim = `processing/${rel}`;
+      const processing = safeJoinRoot(req.root, claim);
+      fs.mkdirSync(path.dirname(processing), { recursive: true, mode: 0o700 });
+      try {
+        // Reserve the name even if another producer submits it while the job is running.
+        if (!fs.lstatSync(pending).isFile()) throw Error("Expected a regular inbox file");
+        fs.linkSync(pending, processing);
+      } catch (error) {
+        if (error.code === "ENOENT" || error.code === "EEXIST") return { ok: true, claimed: false };
+        throw error;
+      }
+      fs.unlinkSync(pending);
+      return { ok: true, claimed: true, rel: claim };
+    }
     if (action === "deleteFile") {
       const rel = String(req.rel || "").trim();
       const parts = splitRelParts(rel);
@@ -437,7 +458,7 @@ export function handleFs(req) {
     }
     return { ok: false, op: "fs", action, error: `未知 fs action：${action || "(空)"}` };
   } catch (err) {
-    return { ok: false, op: "fs", action, error: err.message || String(err) };
+    return { ok: false, op: "fs", action, code: err.code, error: err.message || String(err) };
   }
 }
 

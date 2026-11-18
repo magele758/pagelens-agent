@@ -57,17 +57,30 @@ async function ensureDirs() {
 }
 
 async function listInboxJobs() {
-  const res = await nativeFs({ action: "readdir", root: INBOX_ROOT, rel: "" });
+  const id = chrome.runtime?.id;
+  const inboxId = /^[a-p]{32}$/.test(id || "") ? id : undefined;
+  const res = await nativeFs({ action: "readdir", root: INBOX_ROOT, rel: "", inboxId });
   if (!res?.ok) throw new Error(res?.error || "list inbox failed");
-  return (res.entries || [])
-    .filter((e) => e.kind === "file" && String(e.name).toLowerCase().endsWith(".json"))
-    .map((e) => e.name)
-    .sort();
+  const pending = (items, root) => (items || [])
+    .filter(entry => entry.kind === "file" && String(entry.name).toLowerCase().endsWith(".json"))
+    .map(entry => entry.name)
+    .sort()
+    .map(name => ({ root, name }));
+  return [
+    ...pending(inboxId ? res.directedEntries : [], `${INBOX_ROOT}/${inboxId}`),
+    ...pending(res.entries, INBOX_ROOT),
+  ];
+}
+
+async function claimInboxFile(root, name) {
+  const claim = await nativeFs({ action: "claimInboxJob", root, rel: name });
+  if (!claim?.ok) throw new Error(claim?.error || "Could not claim the inbox job");
+  return claim.claimed ? claim.rel : null;
 }
 
 async function readJson(root, rel) {
   const res = await nativeFs({ action: "readText", root, rel });
-  if (!res?.ok) throw new Error(res?.error || `read failed: ${rel}`);
+  if (!res?.ok) throw Object.assign(new Error(res?.error || `read failed: ${rel}`), { code: res?.code });
   if (res.truncated) throw new Error(`job too large (truncated): ${rel}`);
   return JSON.parse(res.text);
 }
@@ -84,7 +97,7 @@ async function deleteRel(root, rel) {
 }
 
 /** Move job to processed/ then write outbox result. */
-async function finishJob(jobName, job, result) {
+async function finishJob(root, jobName, job, result, claimedRel) {
   const id = String(job?.id || jobName.replace(/\.json$/i, ""));
   const out = {
     id,
@@ -92,14 +105,12 @@ async function finishJob(jobName, job, result) {
     finishedAt: new Date().toISOString(),
     action: job?.action || null,
     ...result,
+    consumerExtensionId: chrome.runtime?.id,
   };
-  await writeJson(INBOX_ROOT, `${PROCESSED_REL}/${jobName}`, redactJobToken(job));
-  try {
-    await deleteRel(INBOX_ROOT, jobName);
-  } catch {
-    /* already gone */
-  }
+  await writeJson(root, `${PROCESSED_REL}/${jobName}`, redactJobToken(job));
+  if (!claimedRel) await deleteRel(root, jobName).catch(() => {});
   await writeJson(OUTBOX_ROOT, `${id}.json`, out);
+  if (claimedRel) await deleteRel(root, claimedRel);
   return out;
 }
 
@@ -805,7 +816,7 @@ async function expireAgentPrompt() {
 }
 
 /**
- * 每轮只调一次 Native Host（readdir）；目录在首次成功后不再重复创建。
+ * 每轮检查共享 inbox。有本扩展的子目录时，也检查定向 inbox。
  * Host 不可用时指数退避（1 分钟起、最长 30 分钟），期间轮询直接跳过、不拉起进程。
  */
 export async function pollAgentInboxOnce(deps = {}) {
@@ -833,32 +844,48 @@ export async function pollAgentInboxOnce(deps = {}) {
     }
 
     const results = [];
-    for (const name of names) {
+    for (const { root, name } of names) {
+      const directed = root !== INBOX_ROOT;
+      const filenameId = name.replace(/\.json$/i, "");
+      if (directed && !/^[a-zA-Z0-9_-]{1,128}$/.test(filenameId)) continue;
+      let claimedRel;
+      if (directed) {
+        claimedRel = await claimInboxFile(root, name);
+        if (!claimedRel) continue;
+      }
       let job;
       try {
-        job = await readJson(INBOX_ROOT, name);
+        job = await readJson(root, claimedRel || name);
+        if (directed && job?.id !== filenameId) throw new Error("Directed inbox ID must match its filename");
       } catch (err) {
-        await finishJob(name, { id: name.replace(/\.json$/i, "") }, {
+        if (err.code === "ENOENT") continue;
+        await finishJob(root, name, { id: filenameId }, {
           ok: false,
           error: `invalid job json: ${err?.message || err}`,
-        }).catch(() => {});
+        }, claimedRel).catch(() => {});
         continue;
       }
-      if (job?.action === "agent_prompt") {
+      if (!directed && job?.action === "agent_prompt") {
         const outcome = await dispatchAgentPrompt(name, job);
         if (outcome) results.push(outcome);
         continue;
+      }
+      if (!directed && ["ptc_create_mx_draft", "ptc_inspect_mx_draft"].includes(job?.action)) {
+        claimedRel = await claimInboxFile(root, name);
+        if (!claimedRel) continue;
       }
       const startedAt = Date.now();
       markJobStarted();
       let result;
       try {
+        if (directed && ["agent_prompt", "agent_cancel"].includes(job?.action))
+          throw new Error("Agent prompts and cancellations use the shared inbox");
         result = await executeJob(job, { ...deps, settings });
       } catch (err) {
         result = { ok: false, error: err?.message || String(err) };
       }
       await recordJobFinished(job, result, startedAt);
-      results.push(await finishJob(name, job, result));
+      results.push(await finishJob(root, name, job, result, claimedRel));
       if (result.ok && job.followUp === true && ["bridge_call", "fill_mx_draft", "read_mx_draft", "refresh_mx_draft_list"].includes(job.action))
         pollForNextStep();
     }
