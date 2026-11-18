@@ -552,6 +552,11 @@ console.log(
   const win = fixture.window, doc = win.document;
   Object.defineProperty(win.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
   win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
+  assert.equal(doc.hidden, true);
+  win.HTMLElement.prototype.checkVisibility = function () {
+    // A background tab can keep an open option transparent while it has layout.
+    return !this.closest("[hidden]") && !this.matches('[role="option"]');
+  };
   const portals = [];
   const opens = [], escaped = [];
   const control = (name, choices, multiple) => {

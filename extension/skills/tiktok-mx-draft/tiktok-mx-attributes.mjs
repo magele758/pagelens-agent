@@ -42,8 +42,9 @@ export async function sellerAttributes(expectedUrl, plan = null) {
       if (menu) ownedPortals.add(menu);
       return menu;
     };
+    // In background tabs, an open menu can expose options before its fade-in progresses.
     const options = () => [...(portal()?.querySelectorAll('[role="option"]') || [])]
-      .filter(e => visible(e) && e.getAttribute("aria-disabled") !== "true");
+      .filter(e => e.getClientRects().length && e.getAttribute("aria-disabled") !== "true");
     const wait = async (ready, error) => {
       for (let i = 0; i < 20 && !ready(); i++) await pause(100);
       if (!ready()) throw Error(error + name);
