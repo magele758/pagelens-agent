@@ -6,8 +6,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { createPtcExecTool } from "@mage-ai-lab/agent-loop/ptc";
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
+import { commerceScript, setDraftSkuPrice } from "../tools/tiktok-mx-commerce.mjs";
 import {
-  mxEditor, readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
+  readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
 import { registeredListing } from "./mx-ptc-inspect.mjs";
 
@@ -16,8 +17,8 @@ const sameSnapshotValue = (before, after) => JSON.stringify(before) === JSON.str
 const exactId = /^\d{12,22}$/;
 
 function priceTargets(baseline, multiplier) {
-  if (multiplier !== 10 || !Array.isArray(baseline) || !baseline.length)
-    throw Error("Expected existing SKU prices and a multiplier of 10");
+  if (![10, 100].includes(multiplier) || !Array.isArray(baseline) || !baseline.length)
+    throw Error("Expected existing SKU prices and a multiplier of 10 or 100");
   const labels = new Set();
   return baseline.map(({ label, priceMXN }) => {
     if (typeof label !== "string" || !label.trim() || labels.has(normalizeLabel(label)))
@@ -64,7 +65,7 @@ function verifyPreserved(before, state, targets) {
   return rows.every(row => row.currentMXN === row.afterMXN);
 }
 
-function expectedPriceUpdate(copy, prices) {
+function expectedPriceUpdate(copy, prices, multiplier) {
   if (copy.salesAndShipping?.skus?.length !== prices.length || !copy.salesAndShipping.origins) return null;
   const next = structuredClone(copy);
   const used = new Set();
@@ -77,7 +78,7 @@ function expectedPriceUpdate(copy, prices) {
     if (sku.priceMXN === row.afterMXN) continue;
     sku.priceMXN = row.afterMXN;
     next.salesAndShipping.origins[sku.option + ".priceMXN"] = {
-      kind: "seller", verified: true, basis: "用户指定卖家草稿售价 MXN " + row.beforeMXN + " × 10。已刷新核对 MXN " + row.afterMXN,
+      kind: "seller", verified: true, basis: `用户指定卖家草稿售价 MXN ${row.beforeMXN} × ${multiplier}。已刷新核对 MXN ${row.afterMXN}`,
     };
   }
   return next;
@@ -124,7 +125,6 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     if (!reply?.ok) throw Error(reply?.error || "Draft price editor did not respond");
     return reply.result;
   }
-  const { typeSkuValue } = mxEditor((tool, args) => inEditor(tool, args), runCode, []);
   await fs.mkdir(lock);
   try {
     const { copy, dir } = await (hooks.registeredListing ?? registeredListing)(sourceId, draftId);
@@ -138,10 +138,9 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     let saved = before, signal = null;
     if (changes.length) {
       await inEditor("activate_tab", {});
-      await runCode(tab, verification + "return true;");
       group.pendingForm = tab;
       for (const row of changes)
-        await typeSkuValue(tab, row.label, "priceMXN", row.afterMXN, false, row.beforeMXN);
+        await runCode(tab, verification + commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, row.afterMXN));
       const staged = await runCode(tab, snapshot);
       if (!verifyPreserved(before, staged, prices)) throw Error("Draft prices differ before saving");
       signal = await runCode(tab, verification + saveDraftCode(link));
@@ -157,7 +156,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       }
     }
     await ptcVerify(before, saved, prices);
-    const expected = expectedPriceUpdate(copy, prices);
+    const expected = expectedPriceUpdate(copy, prices, multiplier);
     const expectedPlanUpdated = Boolean(expected && !isDeepStrictEqual(copy, expected));
     const receiptFile = path.join(dir, "reprice-" + randomUUID() + "-receipt.json");
     const receipt = {

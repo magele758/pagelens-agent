@@ -564,8 +564,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
     return runCode(tab, "for(let i=0;i<50;i++){const s=(" + formState.toString() +
       ")(); if(s.detailImages >= " + details.length + ") return s; await new Promise(r=>setTimeout(r,200))} throw Error('Detail images did not finish uploading')");
   }
-  async function typeSkuValue(tab, option, field, value, force = false, expectedCurrent = null) {
-    const selector = await runCode(tab, commerceScript(locateSkuInput, option, field, value, force, expectedCurrent));
+  async function typeSkuValue(tab, option, field, value, force = false) {
+    const selector = await runCode(tab, commerceScript(locateSkuInput, option, field, value, force));
     if (!selector) return false;
     const typed = await bridge("trusted_type", { tabId: tab, selector, clear: true, value: String(value) });
     if (typed?.ok === false) throw Error("Trusted SKU input failed");
@@ -814,7 +814,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     phases.fieldsRead = Date.now();
     return { state, commerce, phases };
   }
-  return { fillPage, setCopy, category, supplement, repairSavedCopy, restoreDetails, commercialState, typeSkuValue };
+  return { fillPage, setCopy, category, supplement, repairSavedCopy, restoreDetails, commercialState };
 }
 
 // Runs inside the extension. Each browser operation still uses the ordinary

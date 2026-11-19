@@ -5,21 +5,23 @@ import { readMxOrders } from "../native/mx-ptc-orders.mjs";
 
 const orderUrl = "https://seller.tiktokshopglobalselling.com/order?shop_region=MX";
 const toShipUrl = "https://seller.tiktokshopglobalselling.com/order?order_status%5B%5D=1&selected_sort=1&tab=to_ship";
+const allOrdersUrl = "https://seller.tiktokshopglobalselling.com/order?selected_sort=6&tab=all";
 const options = { all: "全部订单", to_ship: "待发货", shipped: "已发货", completed: "已完成", cancelled: "已取消" };
 
-function orderBrowser({ refreshCount = 0, refreshSummary, badRegion = false, duplicate = false, urlSelectionOnly = false } = {}) {
+function orderBrowser({ refreshCount = 0, refreshSummary, badRegion = false, duplicate = false, urlSelectionOnly = false, ignoredClicks = 0 } = {}) {
   const calls = [];
   const tabId = 7;
   let status = "to_ship";
   let timeOrigin = 200;
   let refreshPending = false;
   let page;
+  const statusUrl = () => ({ all: allOrdersUrl, to_ship: toShipUrl })[status] ?? orderUrl + "&tab=" + status;
   function install(count, summary) {
     page?.window.close();
     const buttons = Object.entries(options).map(([key, label]) =>
       `<button role="tab" data-status="${key}" aria-selected="${!urlSelectionOnly && key === status}">${label}</button>`);
     if (duplicate) buttons.push('<button role="tab">全部</button>');
-    const url = badRegion ? orderUrl.replace("MX", "GB") : status === "to_ship" ? toShipUrl : orderUrl + "&tab=" + status;
+    const url = badRegion ? orderUrl.replace("MX", "GB") : statusUrl();
     page = new JSDOM(`<!doctype html><h1>管理订单</h1>
     <section role="tablist">${buttons.join("")}</section>
     ${summary ?? `<div>${count} 个订单</div>
@@ -31,11 +33,15 @@ function orderBrowser({ refreshCount = 0, refreshSummary, badRegion = false, dup
     window.HTMLElement.prototype.getClientRects = function () { return [this.getBoundingClientRect()]; };
     for (const element of window.document.querySelectorAll("[data-status]")) {
       element.addEventListener("click", () => {
+        calls.push("select:" + element.dataset.status);
+        if (ignoredClicks > 0) {
+          ignoredClicks -= 1;
+          return;
+        }
         status = element.dataset.status;
-        calls.push("select:" + status);
         for (const button of window.document.querySelectorAll("[data-status]"))
-          button.setAttribute("aria-selected", String(button.dataset.status === status));
-        window.history.replaceState(null, "", orderUrl + "&tab=" + status);
+          button.setAttribute("aria-selected", String(!urlSelectionOnly && button.dataset.status === status));
+        window.history.replaceState(null, "", statusUrl());
       });
     }
   }
@@ -90,6 +96,18 @@ test("accepts the observed to_ship redirect with an explicit empty state", async
   });
   assert.ok(!calls.some(call => call.startsWith("select:")));
   assert.equal(calls.at(-1), "close_tab");
+});
+
+test("retries the exact All selection when the first click has no effect", async () => {
+  const { calls, send } = orderBrowser({ ignoredClicks: 1 });
+  assert.equal((await readMxOrders(send)).orderStatus, "all");
+  assert.equal(calls.filter(call => call === "select:all").length, 2);
+  assert.ok(calls.lastIndexOf("select:all") < calls.indexOf("reload_tab"));
+});
+
+test("checks All using the observed seller URL with an exact visible control", async () => {
+  const { send } = orderBrowser({ urlSelectionOnly: true });
+  assert.equal((await readMxOrders(send)).orderStatus, "all");
 });
 
 test("accepts a fresh exact filtered zero count without the generic empty label", async () => {

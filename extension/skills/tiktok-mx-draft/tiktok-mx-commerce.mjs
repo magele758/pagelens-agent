@@ -231,6 +231,14 @@ function commerceDom(localizedColor) {
         price: field("skus.sale_price." + id)?.querySelector("input"),
       };
     });
+  const skuRow = option => {
+    const tags = options().map(optionLabels).filter(labels => labels.some(label => norm(label) === norm(option)));
+    if (tags.length !== 1) throw Error("Cannot identify variant " + option);
+    const aliases = tags[0].map(norm);
+    const matches = rows().filter(row => aliases.includes(norm(row.label)));
+    if (matches.length !== 1) throw Error("Cannot identify SKU row " + option);
+    return matches[0];
+  };
   const units = () =>
     text(field("package_weight")?.querySelector("[role=combobox]"));
   const lengthUnit = () =>
@@ -277,6 +285,7 @@ function commerceDom(localizedColor) {
     axisKey,
     brandValue,
     rows,
+    skuRow,
     units,
     lengthUnit,
     weightFactor,
@@ -499,18 +508,10 @@ export function sellerRead(ui) {
 
 // Resolve the current row immediately before each trusted edit. Seller Center
 // may replace its numeric SKU IDs when an earlier input commits.
-export function locateSkuInput(ui, option, field, value, force = false, expectedCurrent = null) {
-  const tags = ui.options().map(ui.optionLabels).filter(labels =>
-    labels.some(label => ui.norm(label) === ui.norm(option)));
-  if (tags.length !== 1) throw Error("Cannot identify variant " + option);
-  const matches = ui.rows().filter(row => tags[0].some(label => ui.norm(label) === ui.norm(row.label)));
-  if (matches.length !== 1) throw Error("Cannot identify SKU row " + option);
-  const input = matches[0][field === "stock" ? "stock" : "price"];
+export function locateSkuInput(ui, option, field, value, force = false) {
+  const input = ui.skuRow(option)[field === "stock" ? "stock" : "price"];
   if (!input || input.disabled || input.readOnly) throw Error("Cannot edit " + option + " " + field);
-  const current = ui.numeric(input);
-  if (!force && current === value) return null;
-  if (expectedCurrent !== null && current !== expectedCurrent)
-    throw Error("SKU value changed before editing " + option + " " + field);
+  if (!force && ui.numeric(input) === value) return null;
   input.scrollIntoView({ block: "center", inline: "center" });
   const id = input.closest("[data-id]")?.dataset.id;
   if (!/^product\.publish\.skus\.(stock|sale_price)\.[\w-]+$/.test(id)) throw Error("Unexpected SKU control");
@@ -535,6 +536,24 @@ export function locateSkuInput(ui, option, field, value, force = false, expected
     document.addEventListener("input", record, true);
   }
   return selector;
+}
+
+export async function setDraftSkuPrice(ui, option, baseline, target) {
+  const input = ui.skuRow(option).price;
+  if (!/^product\.publish\.skus\.sale_price\.[\w-]+$/.test(input?.closest("[data-id]")?.dataset.id))
+    throw Error("Unexpected SKU price control for " + option);
+  const current = ui.numeric(input);
+  if (current === target) return false;
+  if (current !== baseline) throw Error("SKU price changed before editing " + option);
+  ui.set(input, target);
+  let previousMatch = false;
+  await ui.wait(() => {
+    const match = ui.numeric(ui.skuRow(option).price) === target;
+    const settled = match && previousMatch;
+    previousMatch = match;
+    return settled;
+  }, "price commit for " + option, 6);
+  return true;
 }
 
 export async function sellerNumbers(ui, readState, mode, plan) {

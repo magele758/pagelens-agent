@@ -75,5 +75,11 @@ const table = rows => `<h1>商品管理</h1><table><thead><tr><th>商品</th><th
   assert.equal(mxSellerUrlAllowed({ mode: "read_orders" }, "https://seller.tiktokshopglobalselling.com/order?tab=to_ship"), true);
   assert.equal(mxSellerUrlAllowed({ mode: "read_orders" }, "https://seller.tiktokshopglobalselling.com/order?shop_region=MX&shop_region=JP"), false);
 }
+{
+  const request = { mode: "reprice_draft", sourceId: "1733781903228241493", draftId: productId,
+    multiplier: 100, baselinePricesMXN: [{ label: "Silver / 1 piece", priceMXN: 120 }] };
+  assert.deepEqual(mxSellerRequest(request), request);
+  assert.throws(() => mxSellerRequest({ ...request, multiplier: 1000 }), /multiplier/);
+}
 
 console.log("PASS exact product row, one-click submission, offer data and seller scope");

@@ -42,7 +42,7 @@ node tools/agent-inbox.mjs wait "$JOB_ID" --extension-id "$EXTENSION_ID"
 
 | Mode | Request fields and readback |
 | --- | --- |
-| `reprice_draft` | `sourceId`, `draftId`, `multiplier: 10` and `baselinePricesMXN` with one `{label, priceMXN}` entry per saved SKU. Use the same baseline on retries. Verify the target prices and unchanged inventory after refreshing the registered draft. |
+| `reprice_draft` | `sourceId`, `draftId`, `multiplier` and `baselinePricesMXN` with one `{label, priceMXN}` entry per saved SKU. Set `multiplier: 100` for the listing test. A value of 10 remains accepted for existing jobs. Use the same multiplier and baseline on retries. Verify the target prices and unchanged inventory after refreshing the registered draft. |
 | `publish_draft` | `sourceId`, `draftId` and `offer` with confirmed `brand`, `packagedWeightGrams`, `packageCm` with `length`, `width` and `height`, and `skus` with `label`, `priceMXN` and `stock`. Verify the exact saved offer, then select 提交审核 on the registered draft. An uncertain result stays recorded for reconciliation and prevents a duplicate submit. |
 | `listing_status` | `productId`. Read the status and any edit link from the product column and status column for that exact ID. `under_review` records review and `active` records a confirmed live listing. |
 | `optimize_listing` | `productId`, the `editorUrl` displayed for that exact product, and the `beforeTitle` and `afterTitle` in Spanish. Verify saved title, price and stock after refreshing. |
