@@ -5,7 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { commercialDifferences, commercialPlan } from "./tiktok-mx-commerce.mjs";
 export { normDraftTitle, draftTitleOf, draftIdOf, selectDraftRows, draftListReady } from "./tiktok-mx-editor.mjs";
-import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, normDraftTitle, readFreshDocument, saveDraftCode, sellerCategoryOptionsCode, sellerCategorySearchCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
+import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, normDraftTitle, readFreshDocument, saveDraftCode, sellerCategoryOptionsCode, sellerCategorySearchCode, shopAllowedCategoriesCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -53,12 +53,15 @@ async function bridge(tool, args) {
   if (bridgeOverride) return bridgeOverride(tool, args);
   return inbox(tool, { action: "bridge_call", request: { tool, args } });
 }
-async function fillPage(tabId, url, copy, plan, gallery, details, force = false) {
+async function fillPage(tabId, url, copy, plan, gallery, details, force = false, preuploaded = 0) {
   const { title, description, enTitle, enDescription, category } = copy;
   const content = { title, description, enTitle, enDescription, category, gallery: copy.gallery, details: copy.details };
   const { brand, axis, skus, packagedWeightGrams, packageCm } = plan;
   const commerce = { brand, axis, skus, packagedWeightGrams, packageCm };
-  const job = { action: "fill_mx_draft", tabId, url, copy: content, plan: commerce, gallery, details, force };
+  const job = {
+    action: "fill_mx_draft", tabId, url, copy: content, plan: commerce, gallery, details, force,
+    ...(preuploaded > 0 && { preuploadedGallery: preuploaded }),
+  };
   let result;
   try {
     result = await inbox("fill_mx_draft", job, 600000);
@@ -66,7 +69,7 @@ async function fillPage(tabId, url, copy, plan, gallery, details, force = false)
     // An older running extension rejected the job before executing any steps.
     if (!String(error.message).includes("unknown action: fill_mx_draft")) throw error;
     console.error("PageLens needs an extension reload for single-request filling; using the installed bridge");
-    const legacy = await editor.fillPage(tabId, url, content, commerce, gallery, details, force);
+    const legacy = await editor.fillPage(tabId, url, content, commerce, gallery, details, force, preuploaded);
     formRuns.push({ url, transport: "per-step", phases: legacy.phases });
     return legacy;
   }
@@ -149,7 +152,8 @@ function sourceId(url) {
   return id;
 }
 async function extract(id) {
-  for (let i = 0; i < 45; i++) {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
     const el = document.querySelector("#__MODERN_ROUTER_DATA__");
     if (el) {
       const data = Object.values(JSON.parse(el.textContent).loaderData).find(
@@ -194,8 +198,8 @@ async function extract(id) {
         document.title + " " + document.body?.innerText?.slice(0, 1000),
       )
     )
-      break;
-    await new Promise((r) => setTimeout(r, 250));
+      throw new Error("TikTok Shop verification required on product tab");
+    await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error(
     "Product data unavailable. Check the product tab for region, login or verification.",
@@ -263,14 +267,14 @@ async function imageFile(url, file) {
     raw + "[0]",
     "-auto-orient",
     "-resize",
-    "1400x1400>",
+    "1000x1000>",
     "-background",
     "white",
     "-alpha",
     "remove",
     "-strip",
     "-quality",
-    "90",
+    "82",
     file,
   ]);
   await fs.unlink(raw);
@@ -384,22 +388,25 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
     path.join(os.tmpdir(), "pagelens-mx-" + id + "-"),
   );
   group = new DraftTabs(id, bridge);
-  const tab = reuseSourceForCreate ? await group.open(url, [drafts], false) : await open(url);
+  const tab = await group.open(url, reuseSourceForCreate ? [drafts] : [], true);
   await waitForSourceTab(tab, url);
-  if (!reuseSourceForCreate) afterOpening?.();
   let data;
-  try {
-    data = await js(tab, extract, id);
-  } catch (error) {
-    if (!/Frame with ID 0 is showing error page/i.test(error.message)) throw error;
-    mark("sourceReload");
-    await bridge("reload_tab", { tabId: tab });
-    data = await js(tab, extract, id);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      data = await js(tab, extract, id);
+      break;
+    } catch (error) {
+      if (attempt === 2 || !/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed/i.test(error.message)) throw error;
+      mark("sourceReload");
+      await bridge("activate_tab", { tabId: tab });
+      if (attempt === 1) await bridge("reload_tab", { tabId: tab });
+      await sleep(1200);
+    }
   }
   mark("sourceRead");
   if (!data.title || !data.gallery?.length)
     throw new Error("Product title or gallery missing");
-  if (reuseSourceForCreate) afterOpening?.(tab);
+  afterOpening?.(tab);
   await write(path.join(dir, "source-capture.json"), {
     ...data,
     url,
@@ -418,30 +425,33 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
   const assets = images.map((url, i) => ({
     name: "image-" + String(i + 1).padStart(2, "0") + ".jpg", url, reused: false,
   }));
-  const downloadImages = async () => {
-    for (let i = 0; i < assets.length; i += 5) {
-      await Promise.all(assets.slice(i, i + 5).map(async asset => {
-        const file = path.join(dir, asset.name);
-        const cacheFile = path.join(cacheDir, assetKey(asset.url) + ".jpg");
-        const previous = priorSource?.assets.find(a => a.url === asset.url);
-        for (const candidate of [cacheFile, ...(previous ? [path.join(previousRun.dir, previous.name)] : [])]) {
-          try {
-            await fs.copyFile(candidate, file);
-            asset.reused = true;
-            break;
-          } catch (error) {
-            if (error.code !== "ENOENT") throw error;
-          }
-        }
-        if (!asset.reused) await imageFile(asset.url, file);
-        const tmp = cacheFile + "." + randomUUID();
-        await fs.copyFile(file, tmp);
-        await fs.rename(tmp, cacheFile);
-      }));
+  const assetPromises = new Map();
+  const downloadOne = async asset => {
+    const file = path.join(dir, asset.name);
+    const cacheFile = path.join(cacheDir, assetKey(asset.url) + ".jpg");
+    const previous = priorSource?.assets.find(a => a.url === asset.url);
+    for (const candidate of [cacheFile, ...(previous ? [path.join(previousRun.dir, previous.name)] : [])]) {
+      try {
+        await fs.copyFile(candidate, file);
+        asset.reused = true;
+        break;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
     }
-    mark("mediaReady");
+    if (!asset.reused) await imageFile(asset.url, file);
+    const tmp = cacheFile + "." + randomUUID();
+    await fs.copyFile(file, tmp);
+    await fs.rename(tmp, cacheFile);
+    return file;
   };
-  await Promise.all([downloadImages(), onFactsReady?.({ ...data, assets }, dir)]);
+  for (const asset of assets) {
+    const p = downloadOne(asset);
+    p.catch(() => {});
+    assetPromises.set(asset.name, p);
+  }
+  const mediaDone = Promise.all(assetPromises.values()).then(() => { mark("mediaReady"); });
+  await Promise.all([mediaDone, onFactsReady?.({ ...data, assets }, dir, { all: mediaDone, byName: assetPromises })]);
   await write(path.join(dir, "source.json"), {
     ...data,
     url,
@@ -467,18 +477,165 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
 
 async function createDraft(url, rate) {
   await assertSourceCanBeCreated(sourceId(url));
-  const { generateListing, matchingPlan } = await import("./tiktok-mx-ptc.mjs");
-  let generated, initialList;
+  const { generateListing, matchingPlan, categorySearchQuery, chooseCategory, chooseAttributes, hanCategoryTerm } = await import("./tiktok-mx-ptc.mjs");
+  const { confirmedControls } = await import("./tiktok-mx-flows.mjs");
+  let generated, initialList, preselected, confirmedInitialList = false, preuploadedCount = 0;
   const dir = await prepare(url, false, tab => {
     pendingPreflight = openCreateForm(tab);
     pendingPreflight.catch(() => {});
-  }, async (facts, dir) => {
+  }, async (facts, dir, media) => {
     const previous = await matchingPlan(facts);
+    const controls = previous ? null : await confirmedControls(facts);
     mark("generationStarted");
-    generated = await generateListing(facts, previous, rate, undefined, Boolean(previous));
+    const listingPromise = generateListing(facts, previous, rate, undefined, Boolean(previous)).then(res => {
+      const listTab = group.tabs.get(drafts);
+      if (listTab) {
+        confirmedInitialList = true;
+        initialList = listDrafts(listTab, res.copy.title, null)
+          .then(snap => confirmCreateList(snap, () => refreshDraftList(listTab, res.copy.title)));
+        initialList.catch(() => {});
+      }
+      return res;
+    });
+    let earlyGalleryPromise = Promise.resolve(0);
+    const startEarlyGallery = formTab => {
+      earlyGalleryPromise = listingPromise.then(async gen => {
+        const names = gen.copy.gallery || [];
+        if (names.length < 2) return 0;
+        const firstBatch = names.slice(0, 3);
+        const paths = await Promise.all(firstBatch.map(n => media.byName.get(n)));
+        const canMulti = await js(formTab, sel => document.querySelector(sel)?.multiple === true, 'input[type=file][accept=".jpg,.png,.jpeg"]');
+        const batch = canMulti ? paths : paths.slice(0, 1);
+        await bridge("upload_file", { tabId: formTab, selector: 'input[type=file][accept=".jpg,.png,.jpeg"]', paths: batch });
+        return batch.length;
+      }).catch(() => 0);
+    };
+    const searchQueryPromise = (!previous && !controls?.category?.label && pendingPreflight)
+      ? categorySearchQuery(facts).catch(() => null)
+      : Promise.resolve(null);
+    const preselectPromise = (!previous && !controls?.category?.label && pendingPreflight)
+      ? (async () => {
+          const [tab, gen] = await Promise.all([pendingPreflight, listingPromise]);
+          startEarlyGallery(tab);
+          let tempCopy = { category: null };
+          let selected = null;
+          // Trigger Seller Center's own AI category suggestions (✨ 建议) from the title first.
+          try {
+            const titleReady = await js(tab, async (sel, enSel) => {
+              for (let i = 0; i < 20; i++) {
+                if (document.querySelector(sel)) return { title: true, en: Boolean(document.querySelector(enSel)) };
+                await new Promise(r => setTimeout(r, 100));
+              }
+              return { title: false, en: false };
+            }, titleSelector, '[data-id="product.publish.title.input_lang"]');
+            if (titleReady.en && gen.copy.enTitle) {
+              await bridge("trusted_type", { tabId: tab, selector: '[data-id="product.publish.title.input_lang"]', clear: true, value: gen.copy.enTitle });
+              await bridge("press_keys", { tabId: tab, selector: '[data-id="product.publish.title.input_lang"]', keys: ["Tab"] });
+            }
+            if (titleReady.title && gen.copy.title) {
+              await bridge("trusted_type", { tabId: tab, selector: titleSelector, clear: true, value: gen.copy.title });
+              await bridge("press_keys", { tabId: tab, selector: titleSelector, keys: ["Tab"] });
+            }
+            const suggested = await js(tab, async expected => {
+              const readAllowedRoots = () => {
+                const el = document.querySelector("#product-cascader-select-view");
+                const fk = el && Object.keys(el).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+                for (let f = fk && el[fk], d = 0; f && d < 14; f = f.return, d++) {
+                  const opts = f.memoizedProps?.options;
+                  if (Array.isArray(opts) && opts.length > 3) {
+                    return opts.filter(o => o && !o.disabled && !o.showDisabledStyle && !o.disabledReason && !o.category?.unauthorized)
+                      .map(o => String(o.label || "").trim()).filter(Boolean);
+                  }
+                }
+                return [];
+              };
+              const roots = readAllowedRoots();
+              for (let i = 0; i < 18; i++) {
+                if (location.href !== expected) throw Error("Draft changed during category suggestions");
+                const collapsed = [...document.querySelectorAll("span,div,button")].find(e =>
+                  !e.children.length && /^\d+\s*条建议$/.test((e.textContent || "").trim()) && e.getClientRects().length);
+                if (collapsed && i === 2) collapsed.click();
+                const rows = [];
+                for (const b of document.querySelectorAll("button")) {
+                  if (b.innerText.trim() !== "应用" || b.disabled || !b.getClientRects().length) continue;
+                  for (let el = b.parentElement, d = 0; el && d < 4; el = el.parentElement, d++) {
+                    if (el.querySelectorAll("button").length > 1) break;
+                    const text = el.innerText.replace(/\s*应用\s*$/g, "").trim();
+                    const parts = text.split(/\s*[>/-]\s*/).filter(Boolean);
+                    if (parts.length >= 3) {
+                      if (!roots.length || roots.includes(parts[0])) rows.push(text);
+                      break;
+                    }
+                  }
+                }
+                const list = [...new Set(rows)];
+                if (list.length) return list;
+                await new Promise(r => setTimeout(r, 100));
+              }
+              return [];
+            }, createUrl);
+            if (suggested.length) {
+              const picked = await chooseCategory(facts, suggested).catch(() => null);
+              if (picked?.choice?.label) {
+                const applied = await category(tab, picked.choice);
+                if (applied?.selected) {
+                  selected = applied;
+                  tempCopy.category = picked.choice;
+                  await write(path.join(dir, "category-generation.json"), picked.ptc);
+                  mark("aiSuggestedCategoryApplied");
+                }
+              }
+            }
+          } catch (error) {
+            if (/verification|验证/i.test(error.message)) throw error;
+          }
+          if (!selected?.selected) {
+            const searchRes = (await searchQueryPromise) || await categorySearchQuery(facts);
+            const firstTerm = searchRes.query;
+            tempCopy = { category: { searches: [firstTerm], search: firstTerm } };
+            try {
+              selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+            } catch (error) {
+              if (/verification|验证/i.test(error.message) || !/No suitable seller category|offered no category candidates/.test(error.message)) throw error;
+              const rest = [...searchRes.queries.slice(1)];
+              const alt = gen?.copy?.category?.search?.trim();
+              if (alt && hanCategoryTerm.test(alt) && alt !== firstTerm && !rest.includes(alt)) rest.push(alt);
+              if (!rest.length) throw error;
+              tempCopy = { category: { searches: rest.slice(0, 3), search: rest[0] } };
+              selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+            }
+          }
+          let catalog = null;
+          let attrDecision = Promise.resolve(null);
+          try {
+            await supplement(tab, { attributes: {} });
+            catalog = await runCode(tab, attributeCode(createUrl));
+            if (catalog.length) {
+              attrDecision = chooseAttributes(facts, catalog, undefined, {});
+              attrDecision.catch(() => {});
+            }
+          } catch (error) {
+            if (/verification|验证/i.test(error.message)) throw error;
+            stages.preselectAttributesFallback = error.message;
+            console.error("Preselect attributes fallback: " + error.message);
+          }
+          mark("preselectReady");
+          return { selected, category: tempCopy.category, catalog, attrDecision };
+        })().catch(error => {
+          if (/verification|验证/i.test(error.message)) throw error;
+          stages.preselectFallback = error.message;
+          console.error("Preselect fallback: " + error.message);
+          return null;
+        })
+      : Promise.resolve(null);
+    [generated, preselected] = await Promise.all([listingPromise, preselectPromise]);
+    preuploadedCount = await earlyGalleryPromise;
+    if (preselected?.category?.label) generated.copy.category = preselected.category;
     mark("generationReady");
-    initialList = listDrafts(group.tabs.get(drafts), generated.copy.title, null);
-    initialList.catch(() => {});
+    if (!initialList) {
+      initialList = listDrafts(group.tabs.get(drafts), generated.copy.title, null);
+      initialList.catch(() => {});
+    }
     await write(path.join(dir, "generation.json"), generated.ptc);
   }, true);
   const data = await read(path.join(dir, "source.json"));
@@ -486,7 +643,7 @@ async function createDraft(url, rate) {
   commercialPlan(generated.copy, data);
   await write(path.join(dir, "listing.json"), generated.copy);
   mark("planReady");
-  await save(dir, false, false, null, null, null, tab, false, initialList);
+  await save(dir, false, false, null, null, null, tab, false, initialList, preselected, confirmedInitialList, preuploadedCount);
   return dir;
 }
 
@@ -507,13 +664,14 @@ export async function createHostedDraft(sourceId, rate, dispatch) {
 async function rerun(url, yenToPeso) {
   const registered = await lookup(sourceRecord(sourceId(url)));
   if (!registered?.id) throw Error("No registered draft to rerun");
+  const copy = await read(path.join(registered.dir, "listing.json"));
   expectedEdit =
     seller + "/product/edit-draft/" + registered.id + "?shop_region=MX";
   let preflight;
   const dir = await prepare(url, true, () => {
     preflight = (async () => {
-      const edit = await open(expectedEdit);
-      const original = await readyForm(edit, true);
+      const edit = await group.open(expectedEdit, [], true);
+      const original = await runCode(edit, snapshotCode(true, false, true, copy.details?.length || 0));
       if (original.url !== expectedEdit || original.title !== registered.title)
         throw Error("Registered draft ID or title differs in the editor");
       // A real focus event lets the bilingual editor commit its controlled fields.
@@ -556,7 +714,6 @@ async function rerun(url, yenToPeso) {
         dir +
         " before resaving the original draft.",
     );
-  const copy = await read(path.join(registered.dir, "listing.json"));
   const { generateListing } = await import("./tiktok-mx-ptc.mjs");
   const [prepared, target] = await Promise.all([
     generateListing(fresh, copy, yenToPeso),
@@ -711,34 +868,124 @@ async function readSaved(tab, link, copy, plan, attempts, repairProse = false) {
 }
 const categoryPath = value => String(value || "").trim().replace(/\s+/g, " ").replace(/\s*>\s*|\s+[-/]\s+/g, "/");
 
-export async function resolveCategory(tab, url, source, copy, dir) {
+export async function resolveCategory(tab, url, source, copy, dir, persistListing = true, planners = {}) {
   const suggestions = () => js(tab, expected => {
     if (location.href !== expected) throw Error("Draft changed during category selection");
     return [...new Set([...document.querySelectorAll("button")].filter(b => b.innerText.trim() === "应用" &&
       !b.disabled && b.getClientRects().length).map(b => b.parentElement.parentElement.innerText.replace(/\s*应用\s*$/, "").trim())
       .filter(path => path.split(/\s+[>/-]\s+/).length >= 3))];
   }, url);
-  const { chooseCategory, categorySearchQuery } = await import("./tiktok-mx-ptc.mjs");
-  const planned = copy.category?.search?.trim();
-  const query = planned && [...planned].length === 1 && /\p{Script=Han}/u.test(planned)
-    ? planned : (await categorySearchQuery(source)).query;
-  const opened = await runCode(tab, sellerCategorySearchCode(url));
-  const typed = await bridge("trusted_type", { tabId: tab, selector: opened.selector, clear: true, value: query });
-  if (!typed?.ok) throw Error("Seller category search failed");
-  const menu = await runCode(tab, sellerCategoryOptionsCode(url));
-  const candidates = [...new Set([...(await suggestions()), ...(menu.choices || [])])];
-  if (!candidates.length) throw Error("Seller offered no category candidates for " + query);
-  const { choice, ptc } = await chooseCategory(source, candidates);
-  choice.search = query;
-  const inMenu = (menu.choices || []).some(label => categoryPath(label) === categoryPath(choice.label));
-  const selected = inMenu
-    ? await runCode(tab, sellerCategoryOptionsCode(url, choice.label)).then(applied => ({
-        selected: categoryPath(applied.choice) === categoryPath(choice.label), label: choice.label, shown: applied.choice,
-      }))
-    : await category(tab, choice);
+  const { chooseCategory, categorySearchQuery, hanCategoryTerm } = await import("./tiktok-mx-ptc.mjs");
+  const choose = planners.chooseCategory ?? chooseCategory;
+  const queryWorker = planners.categorySearchQuery ?? categorySearchQuery;
+  const candidateTerms = list => [...new Set((Array.isArray(list) ? list : [])
+    .map(term => (typeof term === "string" ? term.trim() : ""))
+    .filter(term => hanCategoryTerm.test(term)))].slice(0, 3);
+  const planned = candidateTerms(copy.category?.searches?.length ? copy.category.searches : [copy.category?.search]);
+  let usedQueryWorker = Boolean(copy.category?.searches?.length && planned.length);
+  let terms = planned;
+  if (!terms.length) {
+    terms = (await queryWorker(source)).queries;
+    usedQueryWorker = true;
+  }
+  const paths = new Map();
+  const searched = [];
+  let lastTerm = null;
+  let lastChoices = [];
+  const searchOnce = async term => {
+    await runCode(tab, sellerCategorySearchCode(url));
+    const typed = await bridge("trusted_type", { tabId: tab, value: term });
+    if (!typed?.ok) throw Error("Seller category search failed");
+    return runCode(tab, sellerCategoryOptionsCode(url));
+  };
+  const searchAndRead = async term => {
+    try {
+      return await searchOnce(term);
+    } catch (error) {
+      if (!/Search the current draft category before reading choices/.test(error.message)) throw error;
+      return searchOnce(term);
+    }
+  };
+  const searchTerms = async list => {
+    for (const term of list) {
+      if (searched.includes(term)) continue;
+      searched.push(term);
+      const menu = await searchAndRead(term);
+      lastTerm = term;
+      lastChoices = menu.choices || [];
+      for (const label of lastChoices) {
+        const key = categoryPath(label);
+        if (!paths.has(key)) paths.set(key, { label, term });
+      }
+    }
+  };
+  await searchTerms(terms.slice(0, 3));
+  if (!paths.size && !usedQueryWorker) {
+    const fallback = await queryWorker(source);
+    await searchTerms(fallback.queries);
+  }
+  const candidates = [...new Set([...(await suggestions()), ...[...paths.values()].map(entry => entry.label)])];
+  let choice, ptc, selected;
+  const fallbackToAllowedScope = async () => {
+    const scope = await runCode(tab, shopAllowedCategoriesCode(url)).catch(() => ({ roots: [], leaves: [] }));
+    if (!scope?.leaves?.length) return null;
+    const flex = await choose(source, scope.leaves, undefined, { flexibleScope: true });
+    const leafTerm = flex.choice.label.split(/\s+[>/-]\s+/).at(-1);
+    const flexChoice = { label: flex.choice.label, search: leafTerm };
+    const applied = await category(tab, flexChoice);
+    if (!applied?.selected) return null;
+    return { choice: flexChoice, ptc: flex.ptc, selected: applied };
+  };
+  if (!candidates.length) {
+    const flexDone = await fallbackToAllowedScope();
+    if (!flexDone) throw Error("Seller offered no category candidates for " + searched.join(", "));
+    ({ choice, ptc, selected } = flexDone);
+  } else {
+    try {
+      ({ choice, ptc } = await choose(source, candidates));
+    } catch (error) {
+      if (!/No suitable seller category/.test(error.message)) throw error;
+      const flexDone = await fallbackToAllowedScope();
+      if (!flexDone) throw error;
+      ({ choice, ptc, selected } = flexDone);
+    }
+    if (!selected) {
+      const hit = paths.get(categoryPath(choice.label));
+      if (hit) {
+        const applyChoice = async forceReopen => {
+          if (forceReopen || lastTerm !== hit.term || !lastChoices.some(label => categoryPath(label) === categoryPath(choice.label))) {
+            await runCode(tab, sellerCategorySearchCode(url));
+            const typed = await bridge("trusted_type", { tabId: tab, value: hit.term });
+            if (!typed?.ok) throw Error("Seller category search failed");
+          }
+          return runCode(tab, sellerCategoryOptionsCode(url, choice.label));
+        };
+        let applied;
+        try {
+          applied = await applyChoice(false);
+        } catch (error) {
+          if (!/Search the current draft category before reading choices/.test(error.message)) throw error;
+          applied = await applyChoice(true);
+        }
+        selected = {
+          selected: categoryPath(applied.choice) === categoryPath(choice.label),
+          label: choice.label,
+          shown: applied.choice,
+        };
+        choice.search = hit.term;
+      } else {
+        choice.search = searched[0] || terms[0];
+        selected = await category(tab, choice);
+      }
+      if (!selected.selected && selected.reason === "Category outside shop business scope") {
+        const flexDone = await fallbackToAllowedScope();
+        if (flexDone) ({ choice, ptc, selected } = flexDone);
+      }
+    }
+  }
   if (!selected.selected) throw Error("Recommended category did not persist: " + choice.label);
   copy.category = choice;
-  await write(path.join(dir, "listing.json"), copy);
+  if (persistListing) await write(path.join(dir, "listing.json"), copy);
   await write(path.join(dir, "category-generation.json"), ptc);
   return selected;
 }
@@ -811,6 +1058,9 @@ export async function save(
   preparedForm = null,
   replaceClosed = false,
   initialList = null,
+  preselected = null,
+  confirmedInitialList = false,
+  preuploadedCount = 0,
 ) {
   const data = fresh || (await read(path.join(dir, "source.json"))),
     copy = revised || (await read(path.join(dir, "listing.json")));
@@ -874,7 +1124,7 @@ export async function save(
     }
     const list = skipList ? null : await sellerTab(drafts, preparedForm == null && !freshCreate);
     let listState = skipList ? { matches: [], ids: [] } : await (initialList && !knownId ? initialList : listDrafts(list, copy.title, knownId));
-    if (freshCreate)
+    if (freshCreate && !confirmedInitialList)
       listState = await confirmCreateList(listState, () => refreshDraftList(list, copy.title));
     const seenIds = [...new Set((listState.ids || []).map(String))];
     if (!skipList) mark("listRead");
@@ -969,9 +1219,10 @@ export async function save(
         await write(path.join(dir, "gallery-checkpoint.json"), galleryCheckpoint);
         return current;
       };
+      let verifiedCreateCatalog = null;
       if (!checkpoint?.gallery && !checkpoint?.detailImages) {
         try {
-          const result = await fillPage(tab, createUrl, copy, plan, gallery, details);
+          const result = await fillPage(tab, createUrl, copy, plan, gallery, details, false, preuploadedCount);
           cat = result.category;
           if (!cat?.selected && copy.category) {
             cat = await resolveCategory(tab, createUrl, data, copy, dir);
@@ -979,7 +1230,26 @@ export async function save(
             await commercialState(tab, plan, true);
             result.state = await js(tab, formState);
           }
-          if (cat?.selected) await ensureAttributes(tab, createUrl, result.state, data, copy, dir);
+          if (cat?.selected && preselected?.catalog &&
+              categoryPath(preselected.category?.label) === categoryPath(cat.shown)) {
+            result.state.attributeCatalog = preselected.catalog;
+            const decided = await preselected.attrDecision?.catch?.(() => null);
+            if (decided && !copy.attributePlan && compatibleAttributePlan({
+              category: result.state.category || cat.shown,
+              values: decided.values,
+            }, result.state.category || cat.shown, preselected.catalog)) {
+              copy.attributePlan = {
+                category: result.state.category || cat.shown,
+                values: decided.values,
+              };
+              await write(path.join(dir, "attribute-generation.json"), decided.ptc);
+              await write(path.join(dir, "listing.json"), copy);
+            }
+          }
+          if (cat?.selected) {
+            await ensureAttributes(tab, createUrl, result.state, data, copy, dir);
+            verifiedCreateCatalog = result.state.attributeCatalog ?? null;
+          }
           checkpoint = null;
         } catch (error) {
           if (error.message.includes("Seller readback differs") && (checkpoint = await recordGalleryPrefix())) {
@@ -1019,19 +1289,20 @@ export async function save(
           await supplement(tab, { attributes: {} });
           await commercialState(tab, plan, true);
           await ensureAttributes(tab, createUrl, checkpoint, data, copy, dir);
+          verifiedCreateCatalog = checkpoint.attributeCatalog ?? null;
         }
       }
       try {
         const ready = await readyForm(tab, true);
         if (ready.url !== createUrl) throw Error("Unexpected create form URL before saving");
         check(ready, copy);
-        const categoryPath = value => value?.trim().replace(/\s*[-/>]\s*/g, "/");
-        if (!ready.category || categoryPath(ready.category) !== categoryPath(copy.category?.label))
+        const trimCategoryPath = value => value?.trim().replace(/\s*[-/>]\s*/g, "/");
+        if (!ready.category || trimCategoryPath(ready.category) !== trimCategoryPath(copy.category?.label))
           throw Error("Category did not match before saving");
         const differences = commercialDifferences(ready.salesAndShipping, plan);
         if (differences.length) throw Error("Commercial fields differ before saving: " + differences.join(", "));
         if (ready.hasCategoryAttributes || copy.attributePlan)
-          ready.attributeCatalog = await runCode(tab, attributeCode(createUrl));
+          ready.attributeCatalog = verifiedCreateCatalog ?? await runCode(tab, attributeCode(createUrl));
         checkDraftAttributes(copy, ready, { exact: true });
       } catch (error) {
         await write(resultFile, { ...pending, fillError: error.message });
@@ -1048,8 +1319,10 @@ export async function save(
       // Reload the existing list immediately. A second fresh read is cheaper
       // than waiting on a list document that cannot see the new row yet.
       const identifyUntil = Date.now() + 60000;
+      if (!id) await bridge("activate_tab", { tabId: list });
       for (let i = 0; i < 24 && Date.now() < identifyUntil && !id; i++) {
-        const saved = await refreshDraftList(list, copy.title, i >= 2);
+        if (i === 0) await sleep(600);
+        const saved = await refreshDraftList(list, copy.title, true);
         const fresh = (saved.matches || []).filter((row) => row.id && !seenIds.includes(String(row.id)));
         if (fresh.length > 1) throw new Error("Ambiguous draft match");
         if (fresh.length === 1) id = fresh[0].id;
@@ -1068,6 +1341,7 @@ export async function save(
     let edit = target?.edit ?? (savedFrom == null
       ? await sellerTab(link, Boolean(knownId && !readOnly))
       : await group.reopenSavedDraft(savedFrom, link));
+    if (!knownId && !readOnly) await bridge("activate_tab", { tabId: edit });
     // One read waits for the editor and captures bilingual text, media and every SKU.
     // Reload explicitly after the initial save, then reuse this persisted snapshot.
     let state = target?.original;
@@ -1164,7 +1438,6 @@ export async function save(
     check(state, copy);
     const categoryShown = state.category || cat.shown;
     const expectedCategory = copy.category?.label;
-    const categoryPath = (s) => s?.trim().replace(/\s+(?:-|>|\/)\s+/g, "/");
     if (
       expectedCategory &&
       categoryPath(categoryShown) !== categoryPath(expectedCategory)
@@ -1201,6 +1474,7 @@ export async function save(
       mark("saved");
       // A successful save can navigate the editor back to the product list.
       edit = await group.reopenSavedDraft(edit, link);
+      await bridge("activate_tab", { tabId: edit });
       if (expectedEdit === link) editTabs.add(edit);
       state = await readSaved(edit, link, copy, plan);
       // A forced rewrite of identical values needs a positive save indication.
@@ -1210,6 +1484,7 @@ export async function save(
         mark("titleRepair");
         await draftButton(edit, true);
         edit = await group.reopenSavedDraft(edit, link);
+        await bridge("activate_tab", { tabId: edit });
         if (expectedEdit === link) editTabs.add(edit);
         state = await readSaved(edit, link, copy, plan);
       } else if (target && state.url === link && state.gallery === gallery.length &&
@@ -1220,6 +1495,7 @@ export async function save(
           await repairSavedCopy(edit, state, copy, details);
           await draftButton(edit, true);
           edit = await group.reopenSavedDraft(edit, link);
+          await bridge("activate_tab", { tabId: edit });
           if (expectedEdit === link) editTabs.add(edit);
           state = await readSaved(edit, link, copy, plan);
         }

@@ -43,11 +43,16 @@ export function formState() {
       ?.innerText.trim(),
     gallery,
     detailImages: editor
-      ? new Set(
-          [...editor.querySelectorAll("img")]
+      ? (() => {
+          const urls = [...editor.querySelectorAll("img")]
             .filter(i => realImage(i) && /^https?:/.test(i.src))
-            .map((i) => i.src.split("?")[0]),
-        ).size
+            .map(i => i.src.split("?")[0]);
+          editor.pmViewDesc?.node?.forEach?.(n => {
+            const s = n.type?.name === "image" && n.attrs?.src;
+            if (s && /^https?:/.test(s) && !/placeholder/.test(s)) urls.push(s.split("?")[0]);
+          });
+          return new Set(urls).size;
+        })()
       : 0,
     category:
       (document.querySelector("#product-cascader-select-view")?.innerText || "").split("\n")[0].trim(),
@@ -77,12 +82,13 @@ export function formState() {
 // Kept within the run_js size limit; the caller checks all values against its plan.
 export function snapshotCode(withCommerce, allowEmptyDescription, settle = false, expectedDetails = 0) {
   const numbers = withCommerce ? commerceScript(sellerRead).replace(/^return await /, "") : "null";
+  const readForm = formState.toString().replace(/\n\s+/g, "\n");
   return `let seen=0;for(let i=0;i<100;i++){
     if(document.querySelector('${titleSelector}')?.value && (document.querySelector('${localDesc} .ProseMirror')?.textContent.trim() || (${allowEmptyDescription} && i>=12 && document.querySelector('${localDesc} .ProseMirror')))){
-      const state=(${formState.toString()})();state.salesAndShipping=await ${numbers};
-      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=16)return state;
+      const state=(${readForm})();state.salesAndShipping=await ${numbers};
+      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=(${expectedDetails}>0?65:10))return state;
     }
-    await new Promise(r=>setTimeout(r,150));
+    await new Promise(r=>setTimeout(r,80));
   }throw Error("Draft editor did not load")`.split("\n").map(line => line.trimStart()).join("\n");
 }
 
@@ -142,19 +148,21 @@ async function categorySearchOperation() {
     const control = document.querySelector("#product-cascader-select-view");
     if (!control?.getClientRects().length) throw Error("Draft category selector unavailable");
     const current = control.innerText.trim();
+    control.scrollIntoView?.({ block: "nearest" });
     if (!repairCategoryInput(control)) control.click();
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 25; i++) {
       guard();
       const field = repairCategoryInput(control);
       if (field) {
         field.input.focus({ preventScroll: true });
         if (document.activeElement === field.input) {
+          if (field.input.value) field.input.setSelectionRange?.(0, field.input.value.length);
           document.querySelectorAll("[data-pagelens-category-search]").forEach(node => node.removeAttribute("data-pagelens-category-search"));
           field.input.setAttribute("data-pagelens-category-search", "1");
           return { selector: '[data-pagelens-category-search="1"]', current };
         }
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 80));
     }
     throw Error("Draft category search did not open");
 }
@@ -183,17 +191,21 @@ async function categoryOptionsOperation(wanted) {
         throw Error("Search the current draft category before reading choices");
       const owner = field.input.closest('[role="combobox"]');
       const controlId = field.input.getAttribute("aria-controls") || owner?.getAttribute("aria-controls");
-      const panel = controlId && document.getElementById(controlId);
-      return [...(panel || document).querySelectorAll(".core-cascader-list-search-item")]
+      const panel = (controlId && document.getElementById(controlId)) ||
+        [...document.querySelectorAll(".core-cascader-panel,.arco-cascader-list")].find(shown);
+      const entries = [...(panel || document).querySelectorAll(".core-cascader-list-search-item")]
         .filter(shown).map(row => ({ row, label: label(row), disabled: Boolean(disabled(row)) }))
         .filter(entry => entry.label);
+      const empty = Boolean(panel && /暂无数据|无匹配|No results|Sin resultados/i.test(panel.innerText || ""));
+      return { entries, empty };
     };
     if (wanted !== null && !fullPath(wanted)) throw Error("Expected a full category path");
     let entries = [];
-    const pause = () => new Promise(resolve => setTimeout(resolve, 150));
-    for (let i = 0; i < 24; i++) {
-      entries = search();
-      if (wanted === null ? entries.length : entries.some(entry => normalize(entry.label) === normalize(wanted))) break;
+    const pause = () => new Promise(resolve => setTimeout(resolve, 80));
+    for (let i = 0; i < 50; i++) {
+      const scan = search();
+      entries = scan.entries;
+      if (wanted === null ? (entries.length || (i >= 12 && scan.empty)) : entries.some(entry => normalize(entry.label) === normalize(wanted))) break;
       await pause();
     }
     const choices = [...new Set(entries.filter(entry => !entry.disabled).map(entry => entry.label))];
@@ -206,7 +218,7 @@ async function categoryOptionsOperation(wanted) {
     guard();
     match.row.click();
     let confirmed = false;
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 50; i++) {
       guard();
       const dialog = [...document.querySelectorAll('[role="dialog"]')].find(node =>
         shown(node) && node.innerText.includes("更改商品类目") && node.innerText.includes("属性信息将被清除"));
@@ -230,6 +242,39 @@ export function sellerCategoryOptionsCode(url, exactLabel = null) {
   return categoryRepairCode(url, categoryOptionsOperation, exactLabel, true);
 }
 
+export function shopAllowedCategoriesCode(expectedUrl = null) {
+  const read = url => {
+    if (url && location.href !== url) throw Error("Wrong draft document");
+    const el = document.querySelector("#product-cascader-select-view");
+    if (!el) return { roots: [], leaves: [] };
+    const fk = Object.keys(el).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+    let opts = null;
+    for (let f = fk && el[fk], d = 0; f && d < 14; f = f.return, d++) {
+      if (Array.isArray(f.memoizedProps?.options) && f.memoizedProps.options.length > 3) {
+        opts = f.memoizedProps.options;
+        break;
+      }
+    }
+    if (!opts) return { roots: [], leaves: [] };
+    const ok = o => o && !o.disabled && !o.showDisabledStyle && !o.disabledReason && !o.category?.unauthorized;
+    const roots = [];
+    const leaves = [];
+    const walk = (nodes, prefix) => {
+      for (const n of nodes || []) {
+        if (!ok(n)) continue;
+        const next = [...prefix, String(n.label || "").trim()].filter(Boolean);
+        if (prefix.length === 0 && next[0]) roots.push(next[0]);
+        if (n.isLeaf || !n.children?.length) {
+          if (next.length >= 2) leaves.push(next.join(" / "));
+        } else walk(n.children, next);
+      }
+    };
+    walk(opts, []);
+    return { roots: [...new Set(roots)], leaves: [...new Set(leaves)] };
+  };
+  return "return (" + read.toString() + ")(" + JSON.stringify(expectedUrl) + ")";
+}
+
 export function saveDraftCode(expectedUrl = null) {
   const click = async (url) => {
     if (url && location.href !== url) throw Error("Draft editor changed before saving");
@@ -247,8 +292,12 @@ export function saveDraftCode(expectedUrl = null) {
     observer.observe(document.body, { childList: true, subtree: true });
     try {
       button.click();
-      for (let i = 0; i < 18 && !message; i++)
-        await new Promise(resolve => setTimeout(resolve, 150));
+      for (let i = 0; i < 45 && !message; i++)
+        await new Promise(resolve => setTimeout(resolve, 60));
+      if (message.includes("草稿保存成功")) {
+        for (let i = 0; i < 6 && !savedLink && !/^\/product\/edit-draft\/\d+$/.test(location.pathname); i++)
+          await new Promise(resolve => setTimeout(resolve, 60));
+      }
       return { message, url: savedLink || location.href };
     } finally {
       observer.disconnect();
@@ -262,7 +311,7 @@ export async function readFreshDocument(url, call, snapshot = snapshotCode(true,
   const initial = await call("run_js", { code: guard + "return performance.timeOrigin" });
   if (!Number.isFinite(initial?.result)) throw Error("Draft document unavailable before reload");
   await call("reload_tab", {});
-  const code = guard + "if(performance.timeOrigin===" + initial.result + ")return null;" + snapshot;
+  const code = "if(location.href==='about:blank')return null;" + guard + "if(performance.timeOrigin===" + initial.result + ")return null;" + snapshot;
   const deadline = Date.now() + 20000;
   do {
     try {
@@ -271,7 +320,7 @@ export async function readFreshDocument(url, call, snapshot = snapshotCode(true,
     } catch (error) {
       if (!/frame (?:was removed|with ID 0 (?:was removed|does not exist))|execution context was destroyed|document unloaded/i.test(error.message)) throw error;
     }
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await new Promise(resolve => setTimeout(resolve, 75));
   } while (Date.now() < deadline);
   throw Error("Fresh draft document did not load");
 }
@@ -321,33 +370,46 @@ export function mxEditor(bridge, runCode, skuWrites) {
         const changeDialog = () => [...document.querySelectorAll('[role="dialog"]')].find(e =>
           e.getClientRects().length && e.innerText.includes("更改商品类目") && e.innerText.includes("属性信息将被清除"));
         if (changeDialog()) throw Error("A prior category change is awaiting confirmation");
+        const scopeBlocked = () => {
+          const wrap = document.querySelector('[data-id="product.publish.category"]')?.parentElement?.parentElement?.parentElement?.parentElement;
+          return wrap ? /非店铺允许经营|不在允许经营|超出.*经营范围|不支持销售|无销售权限|定邀类目|限售类目|禁售类目|无法在此类目/.test(wrap.innerText || "") : false;
+        };
         const readSelection = async () => {
           let confirmed = false;
-          for (let i = 0; i < 24; i++) {
+          for (let i = 0; i < 40; i++) {
             const dialog = changeDialog();
             if (dialog) {
               const confirm = [...dialog.querySelectorAll("button")].find(b => !b.disabled && b.innerText.trim() === "继续");
               if (confirm && !confirmed) { confirm.click(); confirmed = true; }
             }
-            if (norm(selected()) === norm(label) && !dialog) return { selected: true, label, shown: selected() };
-            await pause(200);
+            if (norm(selected()) === norm(label) && !dialog) {
+              if (document.querySelector('[data-id="product.publish.category"]')) await pause(120);
+              if (scopeBlocked()) return { selected: false, reason: "Category outside shop business scope", label, shown: selected() };
+              return { selected: true, label, shown: selected() };
+            }
+            await pause(80);
           }
           const shown = selected();
           return { selected: false, label, shown };
         };
         if (norm(selected()) === norm(label)) return readSelection();
         const recommendation = [...document.querySelectorAll("button")].find(
-          (b) =>
-            b.innerText.trim() === "应用" &&
-            norm(b.parentElement.parentElement.innerText.replace("应用", "")) ===
-              norm(label),
+          (b) => {
+            if (b.innerText.trim() !== "应用" || b.disabled) return false;
+            for (let el = b.parentElement, d = 0; el && d < 4; el = el.parentElement, d++) {
+              if (el.querySelectorAll("button").length > 1) break;
+              const text = el.innerText.replace(/\s*应用\s*$/g, "").trim();
+              if (norm(text) === norm(label)) return true;
+            }
+            return false;
+          },
         );
         if (recommendation && !recommendation.disabled) {
           recommendation.click();
           return readSelection();
         }
         control.click();
-        await pause(300);
+        await pause(120);
         const input = document.querySelector("input.core-cascader-view-input");
         if (!input)
           return { selected: false, reason: "Category search unavailable" };
@@ -356,8 +418,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
           "value",
         ).set.call(input, search);
         input.dispatchEvent(new Event("input", { bubbles: true }));
-        for (let i = 0; i < 18; i++) {
-          await pause(250);
+        for (let i = 0; i < 8; i++) {
+          await pause(120);
           const items = [...document.querySelectorAll("li[role=menuitem]")];
           const option = items.find(
             (e) => norm(e.title || e.innerText) === norm(label),
@@ -373,6 +435,25 @@ export function mxEditor(bridge, runCode, skuWrites) {
           }
           option.click();
           return readSelection();
+        }
+        // Fallback: click L1 -> L2 -> L3 directly in cascader columns if search input missed
+        const segs = norm(label).split("/").map(s => s.trim()).filter(Boolean);
+        if (segs.length >= 2) {
+          control.click();
+          await pause(100);
+          control.click();
+          await pause(150);
+          let matchedAll = true;
+          for (const seg of segs) {
+            const colItem = [...document.querySelectorAll(".core-cascader-list-item")].find(
+              e => e.getClientRects().length && e.getAttribute("aria-disabled") !== "true" &&
+                !e.className.includes("disabled") && e.innerText.trim() === seg,
+            );
+            if (!colItem) { matchedAll = false; break; }
+            colItem.click();
+            await pause(140);
+          }
+          if (matchedAll) return readSelection();
         }
         control.click();
         return { selected: false, reason: "Exact category not offered", label };
@@ -429,10 +510,11 @@ export function mxEditor(bridge, runCode, skuWrites) {
   const fillCopy = async (copy) => {
     const pause = (ms) => new Promise((r) => setTimeout(r, ms));
     const set = (el, val) => {
-      if (el.value === val) return;
+      if (!el || el.value === val) return;
+      getSelection?.()?.removeAllRanges?.();
       el.focus();
-      el.select();
-      if (document.execCommand("insertText", false, val)) {
+      el.select?.();
+      if (document.activeElement === el && document.execCommand("insertText", false, val) && el.value === val) {
         el.blur();
         return;
       }
@@ -441,38 +523,80 @@ export function mxEditor(bridge, runCode, skuWrites) {
         "value",
       ).set.call(el, val);
       el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
       el.blur();
     };
+    const pmView = (el) => {
+      if (el.pmViewDesc?.view) return el.pmViewDesc.view;
+      for (let cur = el, hop = 0; cur && hop < 3; cur = cur.parentElement, hop++) {
+        const fk = Object.keys(cur).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+        for (let f = fk && cur[fk], d = 0; f && d < 12; f = f.return, d++) {
+          const seen = new Set(), q = [f.memoizedState, f.memoizedProps, f.stateNode];
+          while (q.length) {
+            const x = q.pop();
+            if (!x || typeof x !== "object" || seen.has(x)) continue;
+            seen.add(x);
+            if (x.dom === el && x.state?.schema?.nodes?.paragraph && typeof x.dispatch === "function") return x;
+            if (seen.size < 120) for (const k of Object.keys(x).slice(0, 12)) if (!/^(return|alternate|child|sibling)$/.test(k)) q.push(x[k]);
+          }
+        }
+      }
+      return null;
+    };
+    const imgsOf = doc => { const a = []; doc?.forEach?.(n => { if (n.type?.name === "image") a.push(n); }); return a; };
+    const origEnImgs = copy.preserveImages
+      ? imgsOf(document.querySelector('[data-id="product.publish.description.input_lang"] .ProseMirror')?.pmViewDesc?.node)
+      : [];
+    const origEsImgs = copy.preserveImages
+      ? imgsOf(document.querySelector('[data-id="product.publish.description.local_lang"] .ProseMirror')?.pmViewDesc?.node)
+      : [];
+    const savedImgs = origEnImgs.length >= origEsImgs.length ? origEnImgs : origEsImgs;
     const desc = (id, val) => {
       const e = document.querySelector('[data-id="' + id + '"] .ProseMirror');
       if (!e) throw new Error("Missing description editor");
+      const view = pmView(e);
+      const enEd = copy.preserveImages && id.endsWith(".local_lang")
+        ? document.querySelector('[data-id="product.publish.description.input_lang"] .ProseMirror')
+        : null;
+      const liveEnImgs = imgsOf(enEd?.pmViewDesc?.node);
+      const refImgs = savedImgs.length > liveEnImgs.length ? savedImgs : liveEnImgs;
+      const curImgs = imgsOf(view?.state?.doc);
+      const needImgSync = Boolean(copy.preserveImages && view?.state?.schema.nodes.image && refImgs.length > curImgs.length);
       if (
+        !needImgSync &&
         e.innerText.replace(/\s+/g, " ").trim() ===
         val.replace(/\s+/g, " ").trim()
       )
         return;
-      const view = e.pmViewDesc?.view;
       if (view?.state?.schema.nodes.paragraph && view.dispatch) {
         const { doc, schema, tr } = view.state;
         const paragraphs = val
           .split(/\n+/)
           .filter(Boolean)
           .map((t) => schema.nodes.paragraph.create(null, schema.text(t)));
-        // Replace only paragraphs of prose. Images, including wrapped inline images, retain their original nodes.
-        const ranges = [];
-        doc.forEach((node, pos) => {
-          if (
-            node.type === schema.nodes.paragraph &&
-            [...node.content.content].every(
-              (n) => n.isText || n.type.name === "hardBreak",
-            )
-          )
-            ranges.push([pos, pos + node.nodeSize]);
-        });
         view.focus();
-        for (const [from, to] of ranges.slice(1).reverse()) tr.delete(from, to);
-        const [from, to] = ranges[0] || [0, 0];
-        tr.replaceWith(from, to, paragraphs);
+        if (needImgSync) {
+          tr.replaceWith(0, doc.content.size, [
+            ...paragraphs,
+            ...refImgs.map(n => schema.nodes.image.create(n.attrs)),
+            schema.nodes.paragraph.create(),
+          ]);
+        } else {
+          // Replace only paragraphs of prose. Images, including wrapped inline images, retain their original nodes.
+          const ranges = [];
+          doc.forEach((node, pos) => {
+            if (
+              node.type === schema.nodes.paragraph &&
+              [...node.content.content].every(
+                (n) => n.isText || n.type.name === "hardBreak",
+              )
+            )
+              ranges.push([pos, pos + node.nodeSize]);
+          });
+          for (const [from, to] of ranges.slice(1).reverse()) tr.delete(from, to);
+          const [from, to] = ranges[0] || [0, 0];
+          tr.replaceWith(from, to, paragraphs);
+        }
         view.dispatch(tr);
         e.dispatchEvent(
           new InputEvent("input", { bubbles: true, inputType: "insertText" }),
@@ -483,6 +607,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
         if (!view.state.doc.textContent.includes(paragraphs[0].textContent))
           throw Error("Editor did not commit description");
         e.blur();
+        getSelection?.()?.removeAllRanges?.();
         return;
       }
       e.focus();
@@ -510,6 +635,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
       if (!document.execCommand("insertText", false, val))
         throw new Error("Description edit failed");
       e.blur();
+      getSelection?.()?.removeAllRanges?.();
     };
     const src = document.querySelector(
       '[data-id="product.publish.title.input_lang"]',
@@ -517,7 +643,14 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (src && copy.enTitle) {
       set(src, copy.enTitle);
       desc("product.publish.description.input_lang", copy.enDescription);
-      await pause(1600);
+      await pause(copy.deferLocalDescription ? 800 : 1000);
+      if (!copy.deferLocalDescription) {
+        for (let w = 0; w < 25; w++) {
+          const t = document.querySelector('[data-id="product.publish.description.local_lang"] .ProseMirror')?.innerText?.trim() || "";
+          if (!/^(翻译中|Translating|Traduciendo)/i.test(t)) break;
+          await pause(200);
+        }
+      }
     }
     set(
       document.querySelector('[data-id="product.publish.product_name"]'),
@@ -566,13 +699,28 @@ export function mxEditor(bridge, runCode, skuWrites) {
     // On bilingual forms Seller Center copies source-language media into the
     // local editor. Local-only attachments can disappear on the next save.
     const sourceInput = '[data-id="product.publish.description.input_lang"] input[type=file]';
-    const useSource = copy.enDescription && await js(tab, selector => Boolean(document.querySelector(selector)), sourceInput);
+    const info = await js(tab, (srcSel, locSel) => {
+      const src = document.querySelector(srcSel);
+      const loc = document.querySelector(locSel);
+      return { hasSource: Boolean(src), multiple: Boolean((src || loc)?.multiple) };
+    }, sourceInput, localDesc + " input[type=file]");
+    const useSource = Boolean(copy.enDescription && info.hasSource);
     const selector = useSource ? sourceInput : localDesc + " input[type=file]";
-    for (const file of details) await bridge("upload_file", { tabId: tab, selector, paths: [file] });
+    const step = info.multiple ? 5 : 1;
+    for (let i = 0; i < details.length; i += step)
+      await bridge("upload_file", { tabId: tab, selector, paths: details.slice(i, i + step) });
   }
   async function restoreDetails(tab, state, copy, details) {
-    if (state.captcha || !details.length || state.detailImages !== 0 || state.gallery !== copy.gallery.length)
+    if (state.captcha || !details.length || state.detailImages >= details.length || state.gallery !== copy.gallery.length)
       return state;
+    if (state.detailImages > 0) {
+      if (copy.description) state = await setCopy(tab, { title: copy.title, description: copy.description, preserveImages: true });
+      if (state.detailImages >= details.length) return state;
+      state = await runCode(tab, "const ed=document.querySelector('" + localDesc + " .ProseMirror');for(let i=0;i<15;i++){if(ed){const ch=[...ed.children];if(ch.length)ch[(i*3)%ch.length].scrollIntoView?.({block:'center'});for(const n of ch)n.scrollIntoView?.({block:'nearest'});}const s=(" + formState.toString() +
+        ")(); if(s.detailImages >= " + details.length + " || s.detailImages === 0) return s; await new Promise(r=>setTimeout(r,200))} return (" + formState.toString() + ")()");
+      if (state.detailImages >= details.length) return state;
+    }
+    if (state.detailImages !== 0) return state;
     // Seller Center can replace the local description (including all its images)
     // when it translates the English text. Only restore a completely empty gallery.
     await uploadDetails(tab, copy, details);
@@ -632,13 +780,26 @@ export function mxEditor(bridge, runCode, skuWrites) {
         const attempts = [];
         for (let attempt = 0; attempt < 2; attempt++) {
           if (creating && !force && attempt === 0) {
-            await runCode(tab, commerceScript((ui, sku) => {
+            await runCode(tab, commerceScript(async (ui, sku) => {
               const labels = ui.options().map(ui.optionLabels).filter(aliases => aliases.includes(sku.option));
               if (labels.length !== 1) throw Error("Ambiguous option " + sku.option);
+              const touched = [];
               for (const [field, value] of [["stock", sku.stock], ["price", sku.priceMXN]]) {
                 const rows = ui.rows().filter(r => labels[0].includes(r.label));
                 if (rows.length !== 1) throw Error("Cannot identify SKU row " + sku.option);
-                if (ui.numeric(rows[0][field]) !== value) ui.set(rows[0][field], value);
+                if (ui.numeric(rows[0][field]) !== value) {
+                  ui.set(rows[0][field], value);
+                  touched.push(rows[0][field]);
+                }
+              }
+              if (touched.length) {
+                await ui.sleep(45);
+                for (const el of touched) if (el?.isConnected) {
+                  el.focus();
+                  el.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+                  el.dispatchEvent(new Event("change", { bubbles: true }));
+                  el.blur();
+                }
               }
               return true;
             }, { option: sku.option, stock: sku.stock, priceMXN: sku.priceMXN }));
@@ -702,7 +863,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
   }
 
 
-  async function fillPage(tab, url, copy, plan, gallery, details, force) {
+  async function fillPage(tab, url, copy, plan, gallery, details, force, preuploaded = 0) {
     const phases = { start: Date.now() };
     let state = await js(tab, formState);
     if (state.url !== url || state.captcha) throw Error("Unexpected draft editor or verification");
@@ -717,7 +878,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
       const uploadBatch = offset => bridge("upload_file", {
         tabId: tab, selector: gallerySelector, paths: gallery.slice(offset, offset + batchSize),
       });
-      await uploadBatch(0);
+      const startOffset = preuploaded > 0 ? Math.min(preuploaded, gallery.length) : batchSize;
+      if (preuploaded <= 0) await uploadBatch(0);
       const { title, description, enTitle, enDescription } = copy;
       if (enTitle && state.enTitle !== enTitle) {
         const selector = '[data-id="product.publish.title.input_lang"]';
@@ -729,31 +891,42 @@ export function mxEditor(bridge, runCode, skuWrites) {
         await js(tab, selector => Boolean(document.querySelector(selector)), sourceInput));
       const written = await setCopy(tab, { title, description, enTitle, enDescription, deferLocalDescription: bilingualMedia });
       if (bilingualMedia) {
-        if (written.captcha || written.enTitle !== enTitle || !sameText(written.enDescription || "", enDescription))
+        if (written.captcha)
+          throw Error("TikTok verification is open in the seller editor");
+        if (written.enTitle !== enTitle || !sameText(written.enDescription || "", enDescription))
           throw Error("Source-language copy changed before uploading images");
-        await uploadDetails(tab, copy, details);
-        phases.uploadsSubmitted = Date.now();
       } else checkCopy(written, copy);
       phases.copyRead = Date.now();
       const finishGallery = async () => {
         if (phases.gallerySubmitted) return;
-        for (let offset = batchSize; offset < gallery.length; offset += batchSize) {
+        for (let offset = startOffset; offset < gallery.length; offset += batchSize) {
           await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
             ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + offset +
-            ")return true;await new Promise(r=>setTimeout(r,150))}while(Date.now()<until);throw Error('Previous gallery batch still uploading')");
+            ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Previous gallery batch still uploading')");
           await uploadBatch(offset);
+        }
+        if (!detailsSubmitted || preuploaded >= gallery.length) {
+          await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
+            ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + gallery.length +
+            ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Gallery upload still pending')");
         }
         phases.gallerySubmitted = Date.now();
       };
-      let detailsSubmitted = bilingualMedia;
+      let detailsSubmitted = !details.length;
       const submitDetails = async () => {
+        if (bilingualMedia) {
+          const pre = await js(tab, formState);
+          if (pre.captcha) throw Error("TikTok verification is open in the seller editor");
+          if (pre.enTitle !== enTitle || !sameText(pre.enDescription || "", enDescription))
+            throw Error("Source-language copy changed before uploading images");
+        }
         await uploadDetails(tab, copy, details);
         detailsSubmitted = true;
         phases.uploadsSubmitted = Date.now();
       };
-      // Both widgets can upload the same asset. Finish the gallery queue before
-      // handing those files to the description widget.
-      if (!detailsSubmitted && (!details.some(file => gallery.includes(file)) || (await js(tab, formState)).gallery === gallery.length))
+      // Finish all gallery uploads before submitting description images so
+      // concurrent uploads never leave an earlier gallery slot stuck at 0%.
+      if (!detailsSubmitted && (await js(tab, formState)).gallery === gallery.length)
         await submitDetails();
       const fillSales = async selected => {
         const categoryPath = value => (value || "").replace(/\s*[-/>]\s*/g, "/");
@@ -780,7 +953,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
           [...document.querySelectorAll("button")].some(b=>!b.disabled && b.innerText.trim()==="应用" &&
             sameCategory(b.parentElement.parentElement.innerText.replace("应用","").trim(),expectedPath)))) return s;
         if(s.captcha || (s.gallery===${gallery.length} && (!detailsSubmitted || s.detailImages>=${details.length})) || Date.now()>=until)return s;
-        await new Promise(r=>setTimeout(r,250));
+        await new Promise(r=>setTimeout(r,120));
       }while(true)`;
       for (let i = 0; i < 4; i++) {
         state = await runCode(tab, "const commerceReady=" + Boolean(commerce || cat.selected) +
@@ -792,7 +965,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
         }
         if (state.captcha || (state.gallery === gallery.length && state.detailImages >= details.length)) break;
       }
-      if (!state.captcha && state.detailImages === details.length && copy.enDescription &&
+      if (!state.captcha && state.detailImages >= details.length && copy.enDescription &&
           (!sameText(state.description, copy.description) || state.title !== copy.title))
         state = await setCopy(tab, { title: copy.title, description: copy.description, preserveImages: true });
       check(state, copy);
@@ -817,12 +990,20 @@ export function mxEditor(bridge, runCode, skuWrites) {
       return { category: cat, state, commerce, phases };
 
     }
+    if (details.length > 0 && state.detailImages < details.length) {
+      state = await runCode(tab, "const read=" + formState.toString().replace(/\n\s+/g, "\n") +
+        ";for(let i=0;i<20;i++){const s=read();if(s.detailImages>=" + details.length + ")return s;await new Promise(r=>setTimeout(r,200))}return read()");
+    }
     if (!state.category || (copy.category?.label && !sameCategory(state.category, copy.category.label)) ||
         state.gallery !== gallery.length || (state.detailImages && state.detailImages < details.length))
       throw Error("Original draft category or media changed");
     const { title, description, enTitle, enDescription } = copy;
     state = await setCopy(tab, { title, description, enTitle, enDescription, preserveImages: true });
     state = await restoreDetails(tab, state, copy, details);
+    if (!sameText(state.description, description) || state.title !== title) {
+      await new Promise(resolve => setTimeout(resolve, 450));
+      state = await setCopy(tab, { title, description, preserveImages: true });
+    }
     check(state, copy);
     phases.copyRead = Date.now();
     const commerce = await commercialState(tab, plan, true, force);
@@ -835,7 +1016,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
 // Runs inside the extension. Each browser operation still uses the ordinary
 // bridge, with its existing origin, scope, upload and input checks.
 export async function runMxDraftJob(job, dispatch, tabUrl) {
-  const { tabId, url, copy, plan, gallery, details, force } = job;
+  const { tabId, url, copy, plan, gallery, details, force, preuploadedGallery = 0 } = job;
   const page = new URL(url);
   if (page.origin !== "https://seller.tiktokshopglobalselling.com" ||
       page.searchParams.get("shop_region") !== "MX" ||
@@ -867,6 +1048,6 @@ export async function runMxDraftJob(job, dispatch, tabUrl) {
     if (!result?.ok) throw Error("Seller page script did not complete");
     return result.result;
   }
-  const result = await mxEditor(call, runCode, skuWrites).fillPage(tabId, url, copy, plan, gallery, details, force);
+  const result = await mxEditor(call, runCode, skuWrites).fillPage(tabId, url, copy, plan, gallery, details, force, preuploadedGallery);
   return { ...result, skuWrites, steps };
 }

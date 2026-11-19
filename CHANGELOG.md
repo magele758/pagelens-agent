@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 回答渲染不再放行模型输出里的 `style` 属性（可伪装或遮挡确认按钮）；只保留 KaTeX 公式自身的排版样式。
 
 ### Changed
+- **TikTok MX PTC 全链路提速与店铺经营范围自适应**：冷启动建草稿并行提前上传首批主图、复用来源标签进入新建页、优先采纳后台 `✨ 建议` 类目（自动展开折叠建议）并按店铺允许经营范围过滤；遇超出经营范围或无直配类目时自动回退至店铺可经营类目树中就近匹配；`ptc_mx_seller_action` 动态读取后台实时价格上限、补齐 `delist_listing` 与 `optimize_listing` 异步传播核对，并通过 ProseMirror 视图保留双语详情图节点。
 - 宽泛权限改为按需申请。书签、历史、下载、cookie、通知、剪贴板、标签网址、标签组、用户脚本、Native Messaging、`tabCapture`、`webNavigation`、`favicon`，以及全部主机权限（含 `<all_urls>`）改为 optional。第一次使用对应功能时说明原因并单独申请。`debugger` 与 `tts` 仍在安装时申请，因为 Chrome 不允许把它们做成可选权限。已安装用户已经授予的权限会保留。
 - 项目以 Apache-2.0 发布（`LICENSE`）；新增 `SECURITY.md`；`package.json` 版本与 manifest 对齐为 0.12.1；`extension/vendor/VERSIONS.json` 记录第三方库版本，`npm test` 校验。
 - 下载的字幕和转写稿改为写入 `~/.cache/pagelens-docs`，不再自动落到 Obsidian 文稿文件夹。
@@ -56,8 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增单元测试 `extension/tools/test_clippings.mjs`，覆盖 URL 规范化过滤、Frontmatter 结构与书签标题组装校验。
 
 ### Fixed
+- 修复 TikTok 墨西哥类目搜索在打开级联输入框后再次点击外框导致面板被关掉的问题：`categorySearchOperation` 在聚焦输入后就地清空并选中文本，`resolveCategory` 与 `repairHostedDraft` 通过 `trusted_type` 无 `selector` 直接写入；`categorySearchQuery` 与 `listing-workers.ptc.js` 改为生成 1–3 个大陆简体中文类目关键词并显式转写日文汉字（如 `卵 -> 蛋`、`調理器具 -> 厨具`），合并搜索结果后按命中词重选应用。
 - TikTok 墨西哥类目搜索改为简体中文关键词。卖家类目框不匹配西语或英语；创建时用真实输入搜索，候选合并搜索结果和卖家建议，再由 PTC 选择，并记住这次中文关键词。
 - TikTok 墨西哥多 SKU 改价改为真实输入。卖家行内价格和库存控件会忽略页面脚本的合成输入，导致「另存为草稿」无提交、刷新后误报 `Unexpected stock change`。单 SKU 的批量编辑控件保持原路径；多 SKU 逐行用 `trusted_type` 写入后再保存。
+
+### Changed
+- 加速 TikTok 墨西哥新建上架与闭环衔接：`generateText` 传入紧凑 JSON 系统提示词并去除文案字数计数推理开销；`createDraft` 在文案生成期间并行预选类目并启动属性读取与决策，合并图片批量下载并复用已核对的属性目录；收敛类目/属性/提交/列表轮询节奏，`waitForListing` 复用同一卖家标签页，并在 `agent-inbox` 新增 `--follow-up` 延续全流程短窗口轮询。
 - TikTok 墨西哥改价兜底读取售价上限：卖家价格控件的「价格不能超过」提示 span 可能在改价观察窗口内不渲染，导致超上限价格被暂存、保存被表单校验静默拦截并误报 `Unexpected stock change`。改价循环现在先用独立脚本读取每个 SKU 价格控件自带的 `price_limitation.max_sale_price` 配置，直接以 `min(请求价, 上限)` 作为页面输入目标（多档不同上限视为无兜底）；页面提示仍优先生效，上限回执与上限计划文件照常记录。回执与文档口径：上限来自提示或控件配置。
 - 多选类任务过慢：`list_controls` 现在包含复选框/开关/单选（带 `checked` 与标签文字），弹窗内控件排在最前，默认 60、上限 150；工具结果归档阈值 1800→6000 字符、分页 3000→6000，避免小结果被迫分页多轮读取；页面被操作后再次读取同样参数不再被当作重复调用拦截；系统提示加入"并行调用 / 批量勾选"指引。
 

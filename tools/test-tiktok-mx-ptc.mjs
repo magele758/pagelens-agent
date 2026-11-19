@@ -859,9 +859,96 @@ await fs.writeFile(file, "return [];");
 await assert.rejects(generateListing(source, previous, 0.1161, async () => "{}"), /omitted required/);
 const searched = await categorySearchQuery(source, async () => '{"query":"刷"}');
 assert.equal(searched.query, "刷");
+assert.deepEqual(searched.queries, ["刷"]);
+const multiSearched = await categorySearchQuery(source, async () => '{"queries":["蛋","厨具","刷"]}');
+assert.equal(multiSearched.query, "蛋");
+assert.deepEqual(multiSearched.queries, ["蛋", "厨具", "刷"]);
 await assert.rejects(categorySearchQuery(source, async () => '{"query":"egg brush"}'), /Simplified Chinese/);
+
+{
+  const draft = await import("./tiktok-mx-draft.mjs?resolve-cat-test");
+  const createUrl = "https://seller.tiktokshopglobalselling.com/product/create?shop_region=MX";
+  const typedCalls = [];
+  const menuByTerm = {
+    "蛋": ["厨具 - 厨房用具与小工具 - 蛋类料理工具"],
+    "厨具": ["厨具 - 厨房用具与小工具 - 蛋类料理工具", "厨具 - 厨房用具与小工具 - 清洁刷"],
+  };
+  let activeTerm = "";
+  const mockCopy = { category: { searches: ["蛋", "厨具"] } };
+  const catDir = await fs.mkdtemp(path.join(flowDir, "resolve-cat-"));
+  draft.setDraftBridgeForTests(async (tool, args) => {
+    if (tool === "trusted_type") {
+      typedCalls.push(args);
+      assert.equal(args.selector, undefined, "cascader search must not re-click wrapper selector");
+      assert.equal(args.clear, undefined, "cascader search clears in page without Control+A");
+      activeTerm = args.value;
+      return { ok: true };
+    }
+    if (tool === "run_js") {
+      if (args.code.includes("应用")) return { ok: true, result: [] };
+      if (args.code.includes("Draft category search did not open")) return { ok: true, result: { selector: "focused" } };
+      if (args.code.includes("Expected a full category path")) {
+        if (args.code.endsWith('("厨具 - 厨房用具与小工具 - 蛋类料理工具")')) {
+          assert.equal(activeTerm, "蛋");
+          return { ok: true, result: { choice: "厨具 - 厨房用具与小工具 - 蛋类料理工具" } };
+        }
+        return { ok: true, result: { choices: menuByTerm[activeTerm] || [] } };
+      }
+    }
+    throw Error("Unexpected bridge tool in resolveCategory test: " + tool);
+  });
+  try {
+    const resolved = await draft.resolveCategory(9, createUrl, source, mockCopy, catDir, false, {
+      chooseCategory: async (_s, candidates) => {
+        assert.deepEqual(candidates, [
+          "厨具 - 厨房用具与小工具 - 蛋类料理工具",
+          "厨具 - 厨房用具与小工具 - 清洁刷",
+        ]);
+        return { choice: { label: "厨具 - 厨房用具与小工具 - 蛋类料理工具" }, ptc: { ok: true } };
+      },
+    });
+    assert.equal(resolved.selected, true);
+    assert.equal(mockCopy.category.search, "蛋");
+    assert.deepEqual(typedCalls.map(c => c.value), ["蛋", "厨具", "蛋"]);
+
+    // Transient popup blur on initial CDP attach should retry once cleanly.
+    let blurReads = 0;
+    const retryCopy = { category: { searches: ["蛋"] } };
+    draft.setDraftBridgeForTests(async (tool, args) => {
+      if (tool === "trusted_type") {
+        activeTerm = args.value;
+        return { ok: true };
+      }
+      if (tool === "run_js") {
+        if (args.code.includes("应用")) return { ok: true, result: [] };
+        if (args.code.includes("Draft category search did not open")) return { ok: true, result: { selector: "focused" } };
+        if (args.code.includes("Expected a full category path")) {
+          if (args.code.endsWith('("厨具 - 厨房用具与小工具 - 蛋类料理工具")'))
+            return { ok: true, result: { choice: "厨具 - 厨房用具与小工具 - 蛋类料理工具" } };
+          if (blurReads++ === 0) throw Error("Search the current draft category before reading choices");
+          return { ok: true, result: { choices: menuByTerm[activeTerm] || [] } };
+        }
+      }
+      throw Error("Unexpected bridge tool in resolveCategory retry test: " + tool);
+    });
+    const retried = await draft.resolveCategory(9, createUrl, source, retryCopy, catDir, false, {
+      chooseCategory: async (_s, candidates) => ({ choice: { label: candidates[0] }, ptc: { ok: true } }),
+    });
+    assert.equal(retried.selected, true);
+    assert.equal(blurReads, 2);
+  } finally {
+    draft.setDraftBridgeForTests(null);
+  }
+}
 const category = await chooseCategory(source, ["Cookware / Racks", "Electronics / Ovens"], async () => '{"index":0}');
 assert.equal(category.choice.label, "Cookware / Racks");
+let sawFlexibleScopePrompt = false;
+const flexCategory = await chooseCategory(source, ["厨具 / 厨房用具与小工具 / 烹饪器具"], async prompt => {
+  sawFlexibleScopePrompt = /permitted to sell/.test(prompt);
+  return '{"index":0}';
+}, { flexibleScope: true });
+assert.equal(sawFlexibleScopePrompt, true);
+assert.equal(flexCategory.choice.label, "厨具 / 厨房用具与小工具 / 烹饪器具");
 await assert.rejects(chooseCategory(source, ["Ovens"], async () => '{"index":2}'), /No suitable/);
 await assert.rejects(validateTranslatedTitle(updated.copy, "Something else", async () => '{"valid":false}'), /translation differs/);
 const sample = { ...source, id: "1729600000000000005", gallery: [], detail: [], skus: [{...source.skus[0],stock:4}] };
@@ -876,6 +963,10 @@ const material = [{ name: "材质", options: ["Glass\nVidrio", "Metal"] }, { nam
 const select = fields => chooseAttributes({ title: "Glass jar" }, material, async () => JSON.stringify({ fields }));
 const picked = await select([{ index: 0, evidence: "Glass" }, { index: null, evidence: null }]);
 assert.deepEqual(picked.values, { 材质: ["Glass\nVidrio"], 风格: [] });
+const pickedArrayEvidence = await select([{ index: 0, evidence: ["Glass"] }, { index: null, evidence: null }]);
+assert.deepEqual(pickedArrayEvidence.values, { 材质: ["Glass\nVidrio"], 风格: [] });
+const singleClamp = await select([[{ index: 0, evidence: "Glass" }, { index: 1, evidence: "Glass" }], [{ index: null, evidence: null }]]);
+assert.deepEqual(singleClamp.values, { 材质: ["Glass\nVidrio"], 风格: [] });
 await assert.rejects(select([{ index: 1, evidence: "Steel" }, {index:null}]), /Unsupported attribute/);
 await assert.rejects(select([{ index: 5, evidence: "Glass" }, {index:null}]), /Unsupported attribute/);
 await assert.rejects(select([]), /Incomplete attribute/);

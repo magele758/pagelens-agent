@@ -755,18 +755,26 @@ export async function executeJob(
   return { ok: false, error: `unknown action: ${action || "(empty)"}` };
 }
 
+const FOLLOW_UP_ACTIONS = new Set([
+  "bridge_call", "fill_mx_draft", "read_mx_draft", "refresh_mx_draft_list",
+  "dev_status", "ptc_create_mx_draft", "ptc_inspect_mx_draft", "ptc_repair_mx_draft", "ptc_mx_seller_action",
+]);
+
 let polling = false;
 let followUpTimer;
 function pollForNextStep() {
   clearTimeout(followUpTimer);
-  const until = Date.now() + 1800;
+  const until = Date.now() + 2800;
   const next = async () => {
     followUpTimer = null;
     const result = await pollAgentInboxOnce().catch(() => null);
-    if (!followUpTimer && result?.ok && !result.processed && Date.now() < until)
-      followUpTimer = setTimeout(next, 220);
+    if (!followUpTimer && result?.ok && !result.processed && Date.now() < until) {
+      followUpTimer = setTimeout(next, 200);
+      followUpTimer?.unref?.();
+    }
   };
-  followUpTimer = setTimeout(next, 130);
+  followUpTimer = setTimeout(next, 120);
+  followUpTimer?.unref?.();
 }
 
 async function claimJob(jobName, job) {
@@ -890,6 +898,7 @@ export async function pollAgentInboxOnce(deps = {}) {
   const results = [];
   let receiptError;
   let reloadAccepted = false;
+  let scheduleFollowUp = false;
 
   // Only execution overlaps. Outbox and activity writes are applied here, one at a time.
   async function finishNextDraft() {
@@ -898,6 +907,7 @@ export async function pollAgentInboxOnce(deps = {}) {
     try {
       await recordJobFinished(job, result, startedAt);
       results[index] = await finishJob(root, name, job, result, claimedRel);
+      if (result?.ok && job?.followUp === true && FOLLOW_UP_ACTIONS.has(job.action)) scheduleFollowUp = true;
     } catch (error) {
       receiptError ??= error;
     }
@@ -986,8 +996,8 @@ export async function pollAgentInboxOnce(deps = {}) {
         chrome.runtime.reload();
         break;
       }
-      if (result.ok && job.followUp === true && ["bridge_call", "fill_mx_draft", "read_mx_draft", "refresh_mx_draft_list"].includes(job.action))
-        pollForNextStep();
+      if (result.ok && job.followUp === true && FOLLOW_UP_ACTIONS.has(job.action))
+        scheduleFollowUp = true;
     }
     await drainDrafts();
     if (!reloadAccepted && settings.agentBridgeEnabled === true) {
@@ -999,7 +1009,10 @@ export async function pollAgentInboxOnce(deps = {}) {
     return { ok: true, processed: results.length, results };
   } finally {
     try { await drainDrafts(); }
-    finally { polling = false; }
+    finally {
+      polling = false;
+      if (scheduleFollowUp && !reloadAccepted) pollForNextStep();
+    }
   }
 }
 

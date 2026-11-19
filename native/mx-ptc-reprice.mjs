@@ -197,10 +197,21 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     if (!reply?.ok) throw Error(reply?.error || "Draft price editor did not respond");
     return reply.result;
   }
-  async function readAttributeSelections(state, stage) {
+  async function readAttributeSelections(state, stage, expectedValues = null) {
     if (!state.hasCategoryAttributes) return [];
-    const catalog = await runCode(tab, attributeCode(link));
-    if (!Array.isArray(catalog) || !catalog.length) throw Error("Category attribute controls unavailable " + stage);
+    let catalog;
+    const maxAttempts = expectedValues ? 10 : 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      catalog = await runCode(tab, attributeCode(link));
+      if (!Array.isArray(catalog) || !catalog.length) throw Error("Category attribute controls unavailable " + stage);
+      if (!expectedValues) return catalog;
+      const hydrated = catalog.every(field => {
+        const want = expectedValues[field.name];
+        return !Array.isArray(want) || !want.length || field.selected.length >= want.length;
+      });
+      if (hydrated || attempt === maxAttempts - 1) return catalog;
+      await sleep(250);
+    }
     return catalog;
   }
   await fs.mkdir(lock);
@@ -214,7 +225,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       const maxPriceMXN = caps.get(row.label);
       return { ...row, planLabel: row.label, requestedMXN: row.afterMXN, afterMXN: maxPriceMXN ?? row.afterMXN, maxPriceMXN };
     });
-    tab = await group.open(link, [], false);
+    tab = await group.open(link, [], true);
     await group.waitForUrl(tab, link);
     const before = await readFreshDocument(link, inEditor, snapshot);
     if (before.url !== link || before.captcha || before.title !== copy.title)
@@ -222,7 +233,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     const prices = capInventory(bindPrices(before.salesAndShipping, requested), maxTotalStock);
     const changes = prices.filter(row => row.currentMXN !== row.afterMXN || row.stock !== row.afterStock);
     if (changes.length) await inEditor("activate_tab", {});
-    before.attributeCatalog = await readAttributeSelections(before, "before editing");
+    before.attributeCatalog = await readAttributeSelections(before, "before editing", copy.attributePlan?.values);
     let saved = before, signal = null;
     if (changes.length) {
       group.pendingForm = tab;

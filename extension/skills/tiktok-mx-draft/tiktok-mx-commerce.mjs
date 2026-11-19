@@ -554,16 +554,17 @@ export async function setDraftSkuPrice(ui, resolve, singleBatch, validateStock, 
     return controls;
   };
   async function applyBatch(price) {
-    const controls = batchControls();
-    if (!controls) throw Error("Single-SKU batch controls changed");
-    if (inventory && ui.numeric(controls.stock) !== inventory.after) ui.set(controls.stock, inventory.after);
+    let c = batchControls();
+    if (!c) throw Error("Single-SKU batch controls changed");
+    if (inventory && ui.numeric(c.stock) !== inventory.after) ui.set(c.stock, inventory.after);
     ui.set(batchControls()?.price, price);
+    await ui.sleep(45);
+    c = batchControls();
+    for (const e of [inventory && c?.stock, c?.price]) e && (e.focus(), e.blur());
     const apply = await ui.wait(() => {
-      const controls = batchControls();
-      const button = controls?.apply;
-      return button && !button.disabled && button.getAttribute("aria-disabled") !== "true" &&
-        (!inventory || ui.numeric(controls.stock) === inventory.after) &&
-        ui.numeric(controls.price) === price && button;
+      const x = batchControls(), btn = x?.apply;
+      return btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true" &&
+        (!inventory || ui.numeric(x.stock) === inventory.after) && ui.numeric(x.price) === price && btn;
     }, "single SKU batch price", 6);
     if (!priceMatches(price)) throw Error("SKU price changed before applying");
     checkStock();
@@ -622,6 +623,9 @@ export async function setDraftSkuStock(ui, resolve, singleBatch, validateStock, 
   const batch = batchControls();
   ui.set(batch?.stock ?? stock, target);
   if (batch) {
+    await ui.sleep(45);
+    const el = batchControls()?.stock;
+    if (el) { el.focus(); el.blur(); }
     const apply = await ui.wait(() => {
       const controls = batchControls();
       const button = controls?.apply;
@@ -743,7 +747,7 @@ export async function sellerNumbers(ui, readState, mode, plan) {
 // Each submission stays within PageLens's run_js source limit. Send only the
 // current batch of SKUs; provenance belongs in the local receipt.
 export function commerceScript(fn, ...args) {
-  const source = fn => fn.toString().replace(/^ *\/\/.*\n/gm, "");
+  const source = fn => fn.toString().replace(/^ *\/\/.*\n/gm, "").replace(/\n\s*\n/g, "\n");
   const skuSource = "(" + source(skuDom) + ")()";
   const ceilingRead = fn === readDraftSkuCeiling || fn === readDraftSkuNumbers;
   const modeRead = fn === draftSkuEditorMode;
@@ -755,7 +759,7 @@ export function commerceScript(fn, ...args) {
     fn === sellerNumbers ? [sellerRead] : fn === locateSkuInput ? [resolveSkuRow] : [];
   let code =
     "return await (" +
-    fn.toString() +
+    source(fn) +
     ")(" + domSource + "," +
     helpers.map(helper => "(" + source(helper) + "),").join("") +
     "..." +
