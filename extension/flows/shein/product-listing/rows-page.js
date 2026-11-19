@@ -95,13 +95,15 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
       return Date.now() - since >= 120;
     }, 5000);
   }
-  async function write(field, value, label, options = {}) {
+  async function write(field, value, label, options = {}, supply) {
     if (value == null || clean(value) === "") return;
     const expected = options.numeric ? safeNumber(value, options) : clean(value);
     const agrees = node => options.numeric ? safeNumber(node.value, options) && Number(node.value) === Number(expected) : clean(node.value) === expected;
     const first = field();
     if (!expected || !first || first.maxLength >= 0 && expected.length > first.maxLength || !live()) {
-      issues.push({ label, code: "SHEIN_ROW_FIELD", message: "缺少唯一控件或所给值不符合输入范围。" });
+      const issue = { label, code: "SHEIN_ROW_FIELD", message: "缺少唯一控件或所给值不符合输入范围。" };
+      if (supply && expected && !first && live()) issue.supply = supply;
+      issues.push(issue);
       return;
     }
     if (agrees(first)) {
@@ -310,20 +312,22 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     return cdn.test(hero) && cdn.test(square) && hero.replace(/_square(?=\.(?:jpe?g|png|gif)(?:[?#]|$))/iu, "") === square;
   }
 
-  if (kind !== "fill") return fail("SHEIN_ACTION_UNSUPPORTED", "此 SHEIN 表单操作不可用。");
+  if (kind !== "fill" && kind !== "retrySupply") return fail("SHEIN_ACTION_UNSUPPORTED", "此 SHEIN 表单操作不可用。");
   if (expectSupply) await waitForSupply();
   for (const row of rows) {
     if (!live()) return fail("SHEIN_EDIT_CONTEXT_CHANGED", "SHEIN 商品、类目或弹窗已变化。");
     const options = row.options || [];
     if (!options.length) continue;
     const label = options.join(" / ");
-    if (!rowFor(refs.supply(), options) && !rowFor(refs.package(), options)) {
+    if (kind === "fill" && !rowFor(refs.supply(), options) && !rowFor(refs.package(), options)) {
       issues.push({ label, code: "SHEIN_SKU_MISSING", message: "当前表格未找到唯一对应规格。" });
       continue;
     }
     for (const field of supplyFields) {
-      await write(() => rowInput("supply", options, field.header), row[field.key], label + " " + field.label, field);
+      await write(() => rowInput("supply", options, field.header),
+        row[field.key], label + " " + field.label, field, { options, key: field.key });
     }
+    if (kind === "retrySupply") continue;
     await write(() => rowInput("package", options, /^含包装重量/u), row.weightG, label + " 包装重量 (g)", { numeric: true });
     const edges = [["lengthCm", "长(最长边)"], ["widthCm", "宽(次长边)"], ["heightCm", "高(最短边)"]];
     if (edges.some(([key]) => clean(row[key])) && await useCentimeters(options, label + " 包装尺寸单位")) {

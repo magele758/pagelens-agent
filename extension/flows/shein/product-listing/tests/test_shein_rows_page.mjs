@@ -138,6 +138,26 @@ test("waits for the requested supply row and its price and merchant-code inputs,
   assert.equal(publishes() + saves(), 0);
 });
 
+test("retries only deferred supply fields when the first SKU row reappears after media processing", async t => {
+  const { run, document, publishes, saves } = fixture(t);
+  const options = ["黑色", "500 ml"];
+  const early = document.getElementById("black-code");
+  early.disabled = true;
+  const first = await run({ kind: "fill", rows: [{ options, priceUsd: 39.5, sellerSku: "PL-01", weightG: 340 }] });
+  assert.deepEqual(first.issues.map(issue => issue.supply), [{ options, key: "sellerSku" }]);
+  assert.equal(document.getElementById("black-price").value, "39.5");
+  assert.equal(document.getElementById("black-weight").value, "340");
+  early.disabled = false;
+  const retry = await run({ kind: "retrySupply", expectSupply: true, rows: [{ options, sellerSku: "PL-01", weightG: 400 }] });
+  assert.deepEqual(retry.issues, []);
+  assert.deepEqual(retry.items.map(item => item.label), ["黑色 / 500 ml 商家 SKU"]);
+  assert.equal(early.value, "PL-01");
+  assert.equal(document.getElementById("black-price").value, "39.5");
+  assert.equal(document.getElementById("black-weight").value, "340");
+  assert.equal(document.getElementById("red-code").value, "");
+  assert.equal(publishes() + saves(), 0);
+});
+
 test("binds the selected SKC image cell and waits for the remote preview instead of counting the local blob", async t => {
   const { run, document, window } = fixture(t);
   const black = document.getElementById('black-detail');

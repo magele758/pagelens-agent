@@ -289,7 +289,8 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
   }, signal);
   if (!table.ok) return outcome(table, "SKU 表格");
   items.push(...table.items || []);
-  issues.push(...table.issues || []);
+  const pendingSupply = (table.issues || []).filter(issue => issue.supply);
+  issues.push(...(table.issues || []).filter(issue => !issue.supply));
   const stock = rows.filter(row => row.quantity !== undefined && row.quantity !== null && row.quantity !== "").map(row => ({
     options: row.options, quantity: row.quantity, siteLabel: row.siteLabel || (activeSites.length === 1 ? activeSites[0].replace(/站$/u, "") : ""),
   }));
@@ -324,6 +325,24 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
     } else {
       issues.push({ label, code: uploaded.code, message: uploaded.message });
     }
+  }
+  if (pendingSupply.length) {
+    const retryRows = rows.flatMap(row => {
+      const target = JSON.stringify(row.options);
+      const fields = pendingSupply.filter(issue => JSON.stringify(issue.supply.options) === target)
+        .map(({ supply }) => [supply.key, row[supply.key]]);
+      return fields.length ? [{ options: row.options, ...Object.fromEntries(fields) }] : [];
+    });
+    if (retryRows.length) {
+      report("复核刚加载的价格与商家 SKU");
+      const retry = await pageCall(api, tab, sheinRowsPage, {
+        ...pinned, kind: "retrySupply", rows: retryRows, expectSupply: activeSites.length > 0,
+      }, signal);
+      if (retry.ok) {
+        items.push(...retry.items || []);
+        issues.push(...retry.issues || []);
+      } else issues.push(...pendingSupply);
+    } else issues.push(...pendingSupply);
   }
   await currentTab(tab.id, tab.url, api, signal);
   return outcome();
