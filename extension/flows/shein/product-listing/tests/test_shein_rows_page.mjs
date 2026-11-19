@@ -183,6 +183,34 @@ test("binds the selected SKC image cell and waits for the remote preview instead
   assert.equal(red.files.length, 0);
 });
 
+test("recognizes the required swatch column and verifies removal of the matching row's upload error", async t => {
+  const { run, document, window, publishes, saves } = fixture(t);
+  const black = document.getElementById("black-swatch");
+  const red = document.getElementById("red-swatch");
+  simulateFileInput(window, black);
+  const error = document.createElement("span");
+  error.textContent = "请上传色块图";
+  black.closest("td").append(error);
+  red.closest("td").append(error.cloneNode(true));
+  assert.equal((await run()).tables.swatchRequired, true);
+  assert.deepEqual((await run()).tables.swatches, []);
+  appendThumbnail(red, "https://cdn.test/manual-red.png");
+  assert.deepEqual((await run()).tables.swatches, []);
+  let cleared = false;
+  black.onchange = () => {
+    assert.equal(black.files.length, 1);
+    appendThumbnail(black, "https://cdn.test/verified-black.png");
+    setTimeout(() => { error.remove(); cleared = true; }, 360);
+  };
+  const result = await run({ kind: "upload", upload: { role: "swatch", options: ["黑色"],
+    files: [{ name: "black-swatch.png", type: "image/png", base64: "iVBORw0KGgo=" }] } });
+  assert.deepEqual(result, { ok: true, status: "verified" });
+  assert.equal(cleared, true);
+  assert.deepEqual((await run()).tables.swatches, [["黑色"]]);
+  assert.match(red.closest("td").textContent, /请上传色块图/u);
+  assert.equal(publishes() + saves(), 0);
+});
+
 test("replays a main-spec image batch idempotently while its previews remain in the same cell", async t => {
   const { run, document, window, publishes, saves } = fixture(t);
   const black = document.getElementById('black-detail');

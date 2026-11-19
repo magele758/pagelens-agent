@@ -17,10 +17,14 @@ export function buildSheinImagePlan({ product = {}, variant = {}, rows = [], ima
 
   const media = array(tables.media).filter(validOptions);
   const supply = array(tables.supply).filter(validOptions);
+  const swatchRequired = tables.swatchRequired !== false;
+  const swatches = array(tables.swatches).filter(validOptions);
   const primary = variant.groups?.[0];
   const sourceOptions = array(product.variantGroups?.[0]?.options);
   const imagePaths = roles => paths(available.filter(image => roles.includes(image.role)).map(image => image.path));
-  const add = (role, options, image) => tasks.push({ role, options, image });
+  const hasSwatch = options => swatches.filter(row => optionKey(row) === optionKey(options)).length === 1;
+  const add = (role, options, image, deriveSwatch = false) =>
+    tasks.push({ role, options, image, ...(deriveSwatch && { deriveSwatch }) });
   const report = (label, code, message) => issues.push({ label, code, message });
 
   function lookup(path, roles, label) {
@@ -79,23 +83,43 @@ export function buildSheinImagePlan({ product = {}, variant = {}, rows = [], ima
   }
 
   for (const { option, options, label, heroPath } of plans) {
+    let hero;
     if (!heroPath || plans.filter(plan => plan.heroPath === heroPath).length !== 1) {
       report(label + " 详情图首图", "MEDIA_HERO_UNVERIFIED", "请为每个主规格登记唯一的首图，公共详情图不会补入首图位置。");
     } else {
-      const hero = lookup(heroPath, single ? ["variant", "main"] : ["variant"], label + " 详情图首图");
+      hero = lookup(heroPath, single ? ["variant", "main"] : ["variant"], label + " 详情图首图");
       if (hero) for (const image of [hero, ...shared.slice(0, maxGalleryImages - 1)]) add("detail", options, image);
     }
 
     for (const [role, field, title] of [["square", "squareImagePath", "方形图"], ["swatch", "swatchImagePath", "色块图"]]) {
-      const fallback = single ? pathValue(product[field] ?? product.shein?.[field]) || one(imagePaths([role])) : "";
-      const imagePath = pathValue(option[field]) || fallback;
-      if (!imagePath) {
-        if (role === "square") report(label + " " + title, "MEDIA_SQUARE_MISSING", "请为该主规格单独登记方形图。");
+      if (role === "swatch" && !swatchRequired) continue;
+      const topLevel = single ? product[field] ?? product.shein?.[field] : "";
+      const declared = option[field] || topLevel;
+      const imageLabel = label + " " + title;
+      if (role === "swatch" && declared && !pathValue(declared)) {
+        report(imageLabel, "MEDIA_SWATCH_PATH_INVALID", "色块图须使用商品目录内的相对路径。");
         continue;
       }
-      const image = lookup(imagePath, single ? [`variant-${role}`, role] : [`variant-${role}`], label + " " + title);
+      const fallback = single ? pathValue(topLevel) || one(imagePaths([role])) : "";
+      const imagePath = pathValue(option[field]) || fallback;
+      if (!imagePath) {
+        if (role === "square") report(imageLabel, "MEDIA_SQUARE_MISSING", "请为该主规格单独登记方形图。");
+        else if (!hasSwatch(options)) {
+          if (hero) add("swatch", options, hero, true);
+          else report(imageLabel, "MEDIA_SWATCH_MISSING", "色块图为必填项，请提供该主规格的色块图或主图。");
+        }
+        continue;
+      }
+      const image = lookup(imagePath, single ? [`variant-${role}`, role] : [`variant-${role}`], imageLabel);
       if (image) add(role, options, image);
     }
+  }
+
+  for (const options of swatchRequired ? media : []) {
+    const key = optionKey(options);
+    if (plans.some(plan => optionKey(plan.options) === key) || media.filter(row => optionKey(row) === key).length !== 1 ||
+        hasSwatch(options)) continue;
+    report(options.join(" / ") + " 色块图", "MEDIA_SWATCH_MISSING", "SHEIN 页面已有该主规格，请提供对应色块图。");
   }
 
   const skuRows = array(rows).filter(row => validOptions(row.options));
@@ -123,7 +147,8 @@ export function buildSheinImagePlan({ product = {}, variant = {}, rows = [], ima
   }
 
   if (!plans.length && !available.length) {
-    report("商品图片", "MEDIA_ASSET_MISSING", "本次未读取到图片，请在卖家页核对必填的详情图、方形图和 SKU 图。");
+    const requiredImages = swatchRequired ? "详情图、方形图、色块图和 SKU 图" : "详情图、方形图和 SKU 图";
+    report("商品图片", "MEDIA_ASSET_MISSING", `本次未读取到图片，请在卖家页核对必填的${requiredImages}。`);
   } else if (!tasks.length && !issues.length) {
     report("商品图片", "MEDIA_MAPPING_REQUIRED", "未找到图片与已确认规格的唯一对应关系。");
   }

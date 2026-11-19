@@ -168,10 +168,25 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     return false;
   }
 
-  const state = () => Object.fromEntries(Object.entries(refs).map(([key, find]) => {
-    const table = find();
-    return [key, table ? tableRows(table).map(row => partition(table, row)) : []];
-  }));
+  const missingSwatch = cell => /请上传色块图/u.test(clean(cell?.innerText || cell?.textContent));
+  const remoteImage = image => /^(?:https?:)?\/\//iu.test(image.currentSrc || image.getAttribute("src") || "") &&
+    image.complete && image.naturalWidth > 0;
+  const state = () => {
+    const tables = Object.fromEntries(Object.entries(refs).map(([key, find]) => {
+      const table = find();
+      return [key, table ? tableRows(table).map(row => partition(table, row)) : []];
+    }));
+    const media = refs.media();
+    const headers = columns(media);
+    const swatchColumn = headers.indexOf("色块图");
+    const swatchRequired = media ? swatchColumn >= 0 : undefined;
+    const swatches = swatchRequired ? tableRows(media).flatMap(row => {
+      const cell = row.cells[swatchColumn];
+      const loaded = [...cell?.querySelectorAll("img") || []].filter(image => visible(image) && remoteImage(image));
+      return loaded.length === 1 && !missingSwatch(cell) ? [partition(media, row, headers)] : [];
+    }) : [];
+    return { ...tables, swatchRequired, swatches };
+  };
   if (kind === "inspect") return { ok: true, tables: state() };
 
   if (kind === "upload") {
@@ -294,7 +309,8 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
       field.files = transfer.files;
       field.dispatchEvent(new Event("change", { bubbles: true }));
       const verified = await settledPreviews(role, thumbs => thumbs.length === expected.length + 1 &&
-        !expected.includes(thumbs.at(-1)) && expected.every((src, index) => src === thumbs[index]));
+        !expected.includes(thumbs.at(-1)) && expected.every((src, index) => src === thumbs[index]) &&
+        (role !== "swatch" || !missingSwatch(findCell())));
       if (!verified) {
         return fail("SHEIN_IMAGE_READBACK", "未核对到 SHEIN 图片按预期顺序回显，请检查当前规格图片和上传进度。");
       }
