@@ -617,7 +617,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (state.captcha || !details.length || state.detailImages >= details.length || state.gallery !== copy.gallery.length)
       return state;
     if (state.detailImages > 0) {
-      state = await runCode(tab, "for(let i=0;i<15;i++){const s=(" + formState.toString() +
+      state = await runCode(tab, "const ed=document.querySelector('" + localDesc + " .ProseMirror');for(let i=0;i<15;i++){if(ed){ed.scrollTop=(i%2?0:ed.scrollHeight);[...ed.children].slice(-4).forEach(n=>n.scrollIntoView?.({block:'nearest'}));}const s=(" + formState.toString() +
         ")(); if(s.detailImages >= " + details.length + " || s.detailImages === 0) return s; await new Promise(r=>setTimeout(r,200))} return (" + formState.toString() + ")()");
       if (state.detailImages >= details.length) return state;
     }
