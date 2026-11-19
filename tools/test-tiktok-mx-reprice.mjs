@@ -27,6 +27,12 @@ await fs.writeFile(listingFile, JSON.stringify(listing));
 function buildEditor(rows, documentEpoch) {
   const input = value => `<input role="spinbutton" value="${value}">`;
   const field = (id, value) => `<div data-id="product.publish.${id}">${value}</div>`;
+  const attribute = (name, id, options) => `<section>${name}\n<div><div><div>
+    <div role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="${id}">
+    <button class="core-select-view">${name}</button></div></div></div></div></section>
+    <ul id="${id}" hidden>${options.map(([label, selected]) =>
+      `<li role="option" aria-selected="${selected}">${label}</li>`).join("")}</ul>`;
+  const metal = documentEpoch % 2 ? "Stainless steel\nAcero inoxidable" : "Acero inoxidable\nStainless steel";
   const dom = new JSDOM(`<body>
     <input data-id="product.publish.product_name" value="${title}">
     <input data-id="product.publish.title.input_lang" value="Bread lame">
@@ -34,6 +40,9 @@ function buildEditor(rows, documentEpoch) {
     ${field("description.local_lang", '<div class="ProseMirror">Cuchilla</div>')}
     <div data-id="product.widget.main_image.0"><img src="/test.jpg"></div>
     ${field("brand", '<span class="core-select-view-value">Marca</span>')}
+    <div id="focus-status" role="combobox" aria-haspopup="dialog">Cargando ${documentEpoch}</div>
+    ${attribute("Material", "material", [[metal, true], ["Plastic\nPlástico", false]])}
+    ${attribute("Función", "function", [["Reusable\nReutilizable", persistedFunction]])}
     ${field("sale_property.name.1", '<span class="core-cascader-view-value">Color</span>')}
     ${rows.map(({ label, option }, id) => field("sale_property.value.name." + id,
       `<span class="pulse-input-tag-item">${label}</span><span class="pulse-input-tag-item">${option}</span>`)).join("")}
@@ -44,16 +53,27 @@ function buildEditor(rows, documentEpoch) {
   Object.defineProperty(win.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
   Object.defineProperty(win.performance, "timeOrigin", { value: documentEpoch });
   win.HTMLElement.prototype.scrollIntoView = () => {};
+  win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
   return dom;
 }
 
 let persisted = structuredClone(original), dom, epoch = 0, open = false, clicks = 0, reloads = 0;
-let corruptStock = false, priceChangedAfterRead = false;
+let corruptStock = false, priceChangedAfterRead = false, changeFunctionBeforeSave = false;
+let persistedFunction = false, changeFunctionAfterSave = false;
 const writes = [];
 function render() {
   dom?.window.close();
   dom = buildEditor(persisted, ++epoch);
   const doc = dom.window.document;
+  for (const box of doc.querySelectorAll('[role="combobox"][aria-haspopup="listbox"]')) {
+    const menu = doc.getElementById(box.getAttribute("aria-controls"));
+    box.querySelector("button").onclick = () => {
+      box.setAttribute("aria-expanded", String(menu.hidden));
+      menu.hidden = !menu.hidden;
+    };
+    for (const option of menu.querySelectorAll('[role="option"]'))
+      option.onclick = () => assert.fail("The repricing workflow must only read category options");
+  }
   const priceInput = '[data-id*=".skus.sale_price."] input';
   doc.addEventListener("input", event => {
     assert.ok(event.target.matches(priceInput), "Only SKU price inputs may be edited");
@@ -79,6 +99,8 @@ function render() {
     // Restore the pre-edit value while seller state catches up with blur.
     dom.window.setTimeout(() => {
       replacement.value = price;
+      doc.querySelector("#focus-status").textContent = "Editando precio";
+      if (changeFunctionBeforeSave) doc.querySelector('#function [role="option"]').setAttribute("aria-selected", "true");
       for (const field of doc.querySelectorAll('[data-id*=".skus."]')) field.dataset.id += "-r";
       writes.push({ label, price });
     }, 300);
@@ -91,6 +113,7 @@ function render() {
       row.priceMXN = Number(tr.querySelector('[data-id*="sale_price"] input').value);
     }
     if (corruptStock) persisted[0].stock++;
+    if (changeFunctionAfterSave) persistedFunction = true;
     doc.body.insertAdjacentHTML("beforeend", `<p role="alert">草稿保存成功<a href="${link}"></a></p>`);
   };
 }
@@ -157,9 +180,21 @@ try {
   assert.deepEqual([clicks, writes.length], [1, 2]);
 
   persisted = structuredClone(original);
+  changeFunctionBeforeSave = true;
+  await assert.rejects(runMxDraftReprice(args, hooks), /Category attribute Función changed before saving/);
+  assert.equal(clicks, 1);
+  changeFunctionBeforeSave = false;
+
+  changeFunctionAfterSave = true;
+  await assert.rejects(runMxDraftReprice(args, hooks), /Category attribute Función changed after refresh/);
+  assert.equal(clicks, 2);
+  changeFunctionAfterSave = false;
+  persistedFunction = false;
+
+  persisted = structuredClone(original);
   corruptStock = true;
   await assert.rejects(runMxDraftReprice(args, hooks), /Unexpected stock change/);
-  assert.equal(clicks, 2);
+  assert.equal(clicks, 3);
   assert.deepEqual(await readJson(listingFile), updated);
   assert.ok(!(await fs.readdir(tmp)).some(name => name.endsWith(".lock")));
   console.log("MX draft repricing verified only exact SKU targets, readback, and idempotent retries");

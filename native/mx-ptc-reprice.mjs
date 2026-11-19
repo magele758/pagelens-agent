@@ -8,7 +8,7 @@ import { createPtcExecTool } from "@mage-ai-lab/agent-loop/ptc";
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
 import { commerceScript, setDraftSkuPrice } from "../tools/tiktok-mx-commerce.mjs";
 import {
-  readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
+  attributeCode, matchAttributeValue, readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
 import { registeredListing } from "./mx-ptc-inspect.mjs";
 
@@ -52,17 +52,31 @@ function bindPrices(commerce, targets) {
   });
 }
 
-function verifyPreserved(before, state, targets) {
-  if (state.url !== before.url || state.captcha) throw Error("Wrong draft or seller verification");
-  for (const field of ["title", "description", "enTitle", "enDescription", "gallery", "detailImages", "category", "attributes"])
-    if (!sameSnapshotValue(before[field], state[field])) throw Error("Unexpected change to draft " + field);
+function verifyPreserved(before, state, targets, stage) {
+  if (state.url !== before.url || state.captcha) throw Error("Wrong draft or seller verification " + stage);
+  for (const field of ["title", "description", "enTitle", "enDescription", "gallery", "detailImages", "category"])
+    if (!sameSnapshotValue(before[field], state[field])) throw Error("Unexpected change to draft " + field + " " + stage);
   for (const field of ["brand", "axes", "axisLabels", "options", "weightUnit", "dimensionsInCm", "packagedWeightGrams", "packageCm"])
     if (!sameSnapshotValue(before.salesAndShipping[field], state.salesAndShipping?.[field]))
-      throw Error("Unexpected change to draft " + field);
+      throw Error("Unexpected change to draft " + field + " " + stage);
   const rows = bindPrices(state.salesAndShipping, targets);
   for (const [index, row] of rows.entries())
-    if (row.stock !== targets[index].stock) throw Error("Unexpected stock change for " + row.label);
+    if (row.stock !== targets[index].stock) throw Error("Unexpected stock change for " + row.label + " " + stage);
   return rows.every(row => row.currentMXN === row.afterMXN);
+}
+
+function verifyAttributeSelections(before, observed, stage) {
+  const byName = new Map(observed.map(field => [field.name, field]));
+  if (byName.size !== observed.length || before.length !== observed.length)
+    throw Error("Category attribute fields changed " + stage);
+  for (const { name, selected } of before) {
+    const field = byName.get(name);
+    if (!field || field.selected.length !== selected.length)
+      throw Error("Category attribute " + name + " changed " + stage);
+    const matched = new Set(selected.map(value => matchAttributeValue(field.options, value)));
+    if (matched.size !== selected.length || [...matched].some(value => !field.selected.includes(value)))
+      throw Error("Category attribute " + name + " changed " + stage);
+  }
 }
 
 function expectedPriceUpdate(copy, prices, multiplier) {
@@ -95,7 +109,9 @@ async function ptcVerify(before, saved, prices) {
   const executor = createPtcExecTool({ getAuthorizedTools: () => [{
     name: "verify_draft_prices", ptc: { kind: "read" },
     async execute() {
-      if (!verifyPreserved(before, saved, prices)) throw Error("Draft prices differ on refreshed readback");
+      if (!verifyPreserved(before, saved, prices, "after refresh"))
+        throw Error("Saved SKU prices did not reach their targets after refreshing the draft");
+      verifyAttributeSelections(before.attributeCatalog, saved.attributeCatalog, "after refresh");
       return { ok: true, content: "verified" };
     },
   }] });
@@ -125,6 +141,12 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     if (!reply?.ok) throw Error(reply?.error || "Draft price editor did not respond");
     return reply.result;
   }
+  async function readAttributeSelections(state, stage) {
+    if (!state.hasCategoryAttributes) return [];
+    const catalog = await runCode(tab, attributeCode(link));
+    if (!Array.isArray(catalog) || !catalog.length) throw Error("Category attribute controls unavailable " + stage);
+    return catalog;
+  }
   await fs.mkdir(lock);
   try {
     const { copy, dir } = await (hooks.registeredListing ?? registeredListing)(sourceId, draftId);
@@ -135,14 +157,16 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       throw Error("Draft differs from its source registration or requires seller verification");
     const prices = bindPrices(before.salesAndShipping, targets);
     const changes = prices.filter(row => row.currentMXN !== row.afterMXN);
+    if (changes.length) await inEditor("activate_tab", {});
+    before.attributeCatalog = await readAttributeSelections(before, "before editing");
     let saved = before, signal = null;
     if (changes.length) {
-      await inEditor("activate_tab", {});
       group.pendingForm = tab;
       for (const row of changes)
         await runCode(tab, verification + commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, row.afterMXN));
       const staged = await runCode(tab, snapshot);
-      if (!verifyPreserved(before, staged, prices)) throw Error("Draft prices differ before saving");
+      if (!verifyPreserved(before, staged, prices, "before saving")) throw Error("Draft prices differ before saving");
+      verifyAttributeSelections(before.attributeCatalog, await readAttributeSelections(staged, "before saving"), "before saving");
       signal = await runCode(tab, verification + saveDraftCode(link));
       if (/提交失败|保存失败/.test(signal?.message || "")) throw Error(signal.message);
       if (signal?.message?.includes("草稿保存成功") && /\/product\/edit-draft\//.test(signal.url || "") && signal.url !== link)
@@ -152,7 +176,10 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       for (const delay of [0, 1000, 4000]) {
         if (delay) await sleep(delay);
         saved = await readFreshDocument(link, inEditor, snapshot);
-        if (verifyPreserved(before, saved, prices)) break;
+        if (verifyPreserved(before, saved, prices, "after refresh")) {
+          saved.attributeCatalog = await readAttributeSelections(saved, "after refresh");
+          break;
+        }
       }
     }
     await ptcVerify(before, saved, prices);
