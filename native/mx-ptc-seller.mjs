@@ -244,7 +244,19 @@ async function optimizeProduct(send, { productId, editorUrl, beforeTitle, afterT
   if (!["active", "inactive"].includes(current.status) || (!current.editLinks.includes(editorUrl) && !current.canEdit))
     throw Error("Seller Center did not expose an edit control on the exact product row");
   return withSellerTab(send, editorUrl, async (call, keepOpen, tabId) => {
-    const before = await readFreshDocument(editorUrl, call);
+    async function settledSnapshot(inEditor, minGallery = 0, minDetails = 0) {
+      let prev = null;
+      for (let i = 0; i < 10; i++) {
+        const snap = (await inEditor("run_js", { code: snapshotCode(true, true, true, minDetails) })).result;
+        if (prev && snap.gallery === prev.gallery && snap.detailImages === prev.detailImages &&
+            snap.gallery >= minGallery && snap.detailImages >= minDetails) return snap;
+        prev = snap;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      return prev;
+    }
+    await readFreshDocument(editorUrl, call);
+    const before = await settledSnapshot(call);
     if (before.captcha || ![beforeTitle, afterTitle].includes(before.title)) throw Error("The saved product title or verification state changed");
     if (before.title === afterTitle) return { productId, title: afterTitle, verified: true, changed: false };
     async function selectedAttributes(form, inEditor = call, expectedJson = null) {
@@ -266,15 +278,18 @@ async function optimizeProduct(send, { productId, editorUrl, beforeTitle, afterT
     if (field.result !== 1) throw Error("The title input could not be located uniquely");
     const write = await call("trusted_type", { selector: titleSelector, value: afterTitle, clear: true });
     if (!write.ok) throw Error(write.error || "Title input was not written");
-    await call("press_keys", { keys: ["Tab"] });
-    const staged = (await call("run_js", { code: snapshotCode(true, true, true) })).result;
+    await call("press_keys", { selector: titleSelector, keys: ["Tab"] });
+    const staged = await settledSnapshot(call, before.gallery, before.detailImages);
+    const beforeComparable = comparable(before);
     const compare = async (form, inEditor) => {
-      if (form.url !== editorUrl || form.captcha || form.title !== afterTitle ||
-          JSON.stringify(comparable(before)) !== JSON.stringify(comparable(form)) ||
-          attributesJson !== JSON.stringify(await selectedAttributes(form, inEditor, attributesJson)))
-        throw Error("The exact title and other product fields did not match");
+      const formComparable = comparable(form);
+      const diffs = Object.keys(beforeComparable).filter(k => JSON.stringify(beforeComparable[k]) !== JSON.stringify(formComparable[k]));
+      const formAttrs = JSON.stringify(await selectedAttributes(form, inEditor, attributesJson));
+      if (form.url !== editorUrl || form.captcha || form.title !== afterTitle || diffs.length || attributesJson !== formAttrs)
+        throw Error("The exact title and other product fields did not match (" +
+          [form.title !== afterTitle && "title=" + form.title, ...diffs, attributesJson !== formAttrs && "attributes"].filter(Boolean).join(",") + ")");
     };
-    await ptcVerify(() => compare(staged));
+    await ptcVerify(() => compare(staged, call));
     let signal = (await call("run_js", { code: editorSubmitCode(editorUrl, ["更新", "保存", "提交审核"]) })).result;
     const advisories = [];
     const advisoryDialog = candidate => candidate?.dialog &&
@@ -309,7 +324,8 @@ async function optimizeProduct(send, { productId, editorUrl, beforeTitle, afterT
       const verifyEditor = async inEditor => {
         let saved;
         for (let attempt = 0; attempt < 3; attempt++) {
-          saved = await readFreshDocument(editorUrl, inEditor);
+          await readFreshDocument(editorUrl, inEditor);
+          saved = await settledSnapshot(inEditor, before.gallery, before.detailImages);
           if (saved.title === afterTitle) break;
           if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2000));
         }
