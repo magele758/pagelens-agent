@@ -574,33 +574,29 @@ export function mxEditor(bridge, runCode, skuWrites) {
           .split(/\n+/)
           .filter(Boolean)
           .map((t) => schema.nodes.paragraph.create(null, schema.text(t)));
+        view.focus();
         if (needImgSync) {
-          view.focus();
           tr.replaceWith(0, doc.content.size, [
             ...paragraphs,
             ...refImgs.map(n => schema.nodes.image.create(n.attrs)),
             schema.nodes.paragraph.create(),
           ]);
-          view.dispatch(tr);
-          e.blur();
-          getSelection?.()?.removeAllRanges?.();
-          return;
-        }
-        // Replace only paragraphs of prose. Images, including wrapped inline images, retain their original nodes.
-        const ranges = [];
-        doc.forEach((node, pos) => {
-          if (
-            node.type === schema.nodes.paragraph &&
-            [...node.content.content].every(
-              (n) => n.isText || n.type.name === "hardBreak",
+        } else {
+          // Replace only paragraphs of prose. Images, including wrapped inline images, retain their original nodes.
+          const ranges = [];
+          doc.forEach((node, pos) => {
+            if (
+              node.type === schema.nodes.paragraph &&
+              [...node.content.content].every(
+                (n) => n.isText || n.type.name === "hardBreak",
+              )
             )
-          )
-            ranges.push([pos, pos + node.nodeSize]);
-        });
-        view.focus();
-        for (const [from, to] of ranges.slice(1).reverse()) tr.delete(from, to);
-        const [from, to] = ranges[0] || [0, 0];
-        tr.replaceWith(from, to, paragraphs);
+              ranges.push([pos, pos + node.nodeSize]);
+          });
+          for (const [from, to] of ranges.slice(1).reverse()) tr.delete(from, to);
+          const [from, to] = ranges[0] || [0, 0];
+          tr.replaceWith(from, to, paragraphs);
+        }
         view.dispatch(tr);
         e.dispatchEvent(
           new InputEvent("input", { bubbles: true, inputType: "insertText" }),

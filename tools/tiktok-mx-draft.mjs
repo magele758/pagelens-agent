@@ -1484,6 +1484,7 @@ export async function save(
         mark("titleRepair");
         await draftButton(edit, true);
         edit = await group.reopenSavedDraft(edit, link);
+        await bridge("activate_tab", { tabId: edit });
         if (expectedEdit === link) editTabs.add(edit);
         state = await readSaved(edit, link, copy, plan);
       } else if (target && state.url === link && state.gallery === gallery.length &&
@@ -1494,6 +1495,7 @@ export async function save(
           await repairSavedCopy(edit, state, copy, details);
           await draftButton(edit, true);
           edit = await group.reopenSavedDraft(edit, link);
+          await bridge("activate_tab", { tabId: edit });
           if (expectedEdit === link) editTabs.add(edit);
           state = await readSaved(edit, link, copy, plan);
         }
