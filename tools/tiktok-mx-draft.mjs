@@ -518,21 +518,34 @@ async function createDraft(url, rate) {
           let selected = null;
           // Trigger Seller Center's own AI category suggestions (✨ 建议) from the title first.
           try {
-            const hasEn = await js(tab, () => Boolean(document.querySelector('[data-id="product.publish.title.input_lang"]')));
-            if (hasEn && gen.copy.enTitle) {
+            const titleReady = await js(tab, async (sel, enSel) => {
+              for (let i = 0; i < 20; i++) {
+                if (document.querySelector(sel)) return { title: true, en: Boolean(document.querySelector(enSel)) };
+                await new Promise(r => setTimeout(r, 100));
+              }
+              return { title: false, en: false };
+            }, titleSelector, '[data-id="product.publish.title.input_lang"]');
+            if (titleReady.en && gen.copy.enTitle) {
               await bridge("trusted_type", { tabId: tab, selector: '[data-id="product.publish.title.input_lang"]', clear: true, value: gen.copy.enTitle });
               await bridge("press_keys", { tabId: tab, selector: '[data-id="product.publish.title.input_lang"]', keys: ["Tab"] });
             }
-            if (gen.copy.title) {
+            if (titleReady.title && gen.copy.title) {
               await bridge("trusted_type", { tabId: tab, selector: titleSelector, clear: true, value: gen.copy.title });
               await bridge("press_keys", { tabId: tab, selector: titleSelector, keys: ["Tab"] });
             }
             const suggested = await js(tab, async expected => {
               for (let i = 0; i < 18; i++) {
                 if (location.href !== expected) throw Error("Draft changed during category suggestions");
-                const list = [...new Set([...document.querySelectorAll("button")].filter(b => b.innerText.trim() === "应用" &&
-                  !b.disabled && b.getClientRects().length).map(b => b.parentElement.parentElement.innerText.replace(/\s*应用\s*$/, "").trim())
-                  .filter(p => p.split(/\s+[>/-]\s+/).length >= 3))];
+                const rows = [];
+                for (const b of document.querySelectorAll("button")) {
+                  if (b.innerText.trim() !== "应用" || b.disabled || !b.getClientRects().length) continue;
+                  for (let el = b.parentElement, d = 0; el && d < 4; el = el.parentElement, d++) {
+                    if (el.querySelectorAll("button").length > 1) break;
+                    const text = el.innerText.replace(/\s*应用\s*$/g, "").trim();
+                    if (text.split(/\s*[>/-]\s*/).filter(Boolean).length >= 3) { rows.push(text); break; }
+                  }
+                }
+                const list = [...new Set(rows)];
                 if (list.length) return list;
                 await new Promise(r => setTimeout(r, 100));
               }

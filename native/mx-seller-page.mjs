@@ -205,20 +205,21 @@ export function editorSubmitCode(url, labels) {
     if (controls.length !== 1 || controls[0].disabled || controls[0].getAttribute("aria-disabled") === "true")
       throw Error("Seller submit control is missing, disabled or ambiguous");
     const previous = new Set(feedback().map(normalize));
+    const hadSuccess = /商品提交成功|更新成功|发布成功/.test(document.body?.innerText || "");
     controls[0].click();
-    for (let attempt = 0; attempt < 30; attempt++) {
+    for (let attempt = 0; attempt < 45; attempt++) {
       if (sellerVerification()) return { verificationRequired: true };
       const dialog = dialogs().map(normalize).join(" ").slice(0, 350);
       if (dialog) return { dialog };
       const messages = feedback().map(normalize).filter(message => message && !previous.has(message));
-      if (messages.length || location.href !== address) {
-        const productLinks = feedback().filter(element => /提交成功|发布成功/.test(normalize(element)))
+      const pageSuccess = !hadSuccess && /商品提交成功|更新成功|发布成功/.test(document.body?.innerText || "");
+      if (messages.length || location.href !== address || pageSuccess) {
+        const productLinks = [...feedback().filter(element => /提交成功|发布成功/.test(normalize(element))),
+          ...(pageSuccess ? [document.body] : [])]
           .flatMap(element => [...element.querySelectorAll("a[href]")])
           .map(link => link.href);
-        return { messages, url: location.href, productLinks };
+        return { messages: messages.length ? messages : (pageSuccess ? ["商品提交成功"] : []), url: location.href, productLinks };
       }
-      if (attempt >= 4 && !controls[0].isConnected && !dialogs().length)
-        return { messages: [], url: location.href, productLinks: [] };
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     return { messages: [], url: location.href };

@@ -86,6 +86,21 @@ const table = rows => `<h1>商品管理</h1><table><thead><tr><th>商品</th><th
   page.window.close();
 }
 {
+  const editUrl = "https://seller.tiktokshopglobalselling.com/product/edit/" + productId + "?shop_region=MX";
+  const page = sellerDocument("<button>更新</button>", editUrl);
+  const button = page.document.querySelector("button");
+  button.onclick = () => {
+    button.replaceWith(Object.assign(page.document.createElement("button"), { disabled: true, textContent: "更新" }));
+    setTimeout(() => {
+      page.document.body.innerHTML = '<div>商品提交成功\n更新成功.<a href="' + mxManageUrl + '">管理发品</a></div>';
+    }, 150);
+  };
+  const updated = await page.run(editorSubmitCode(editUrl, ["更新", "保存", "提交审核"]));
+  assert.equal(updated.messages.join(" "), "商品提交成功");
+  assert.equal(updated.url, editUrl);
+  page.window.close();
+}
+{
   const page = sellerDocument("<button>提交审核</button>", draft);
   page.document.body.insertAdjacentHTML("beforeend", '<div role="dialog">提交前请阅读并同意协议<button>同意</button></div>');
   await assert.rejects(page.run(editorAdvisoryConfirmCode(draft)), /not a confirmable advisory/);

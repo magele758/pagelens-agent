@@ -347,10 +347,15 @@ export function mxEditor(bridge, runCode, skuWrites) {
         };
         if (norm(selected()) === norm(label)) return readSelection();
         const recommendation = [...document.querySelectorAll("button")].find(
-          (b) =>
-            b.innerText.trim() === "应用" &&
-            norm(b.parentElement.parentElement.innerText.replace("应用", "")) ===
-              norm(label),
+          (b) => {
+            if (b.innerText.trim() !== "应用" || b.disabled) return false;
+            for (let el = b.parentElement, d = 0; el && d < 4; el = el.parentElement, d++) {
+              if (el.querySelectorAll("button").length > 1) break;
+              const text = el.innerText.replace(/\s*应用\s*$/g, "").trim();
+              if (norm(text) === norm(label)) return true;
+            }
+            return false;
+          },
         );
         if (recommendation && !recommendation.disabled) {
           recommendation.click();

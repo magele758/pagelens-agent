@@ -75,6 +75,9 @@ export async function sellerAttributes(expectedUrl, plan = null) {
         }
       }
       await open();
+      if (!plan && box()?.classList.contains("core-select-multiple") && box()?.querySelector(".core-tag")) {
+        for (let i = 0; i < 12 && !options().some(e => e.getAttribute("aria-selected") === "true"); i++) await pause(50);
+      }
       const choices = options();
       result.push({ name, multiple: box().classList.contains("core-select-multiple"), options: choices.map(e => e.innerText.trim()),
         selected: choices.filter(e => e.getAttribute("aria-selected") === "true").map(e => e.innerText.trim()) });
