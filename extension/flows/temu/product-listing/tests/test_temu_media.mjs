@@ -139,8 +139,20 @@ function fixture(html) {
       <input id="search" placeholder="请输入素材名称"><span id="count">已选 0 个，可选 10 个</span>
       ${libraryTile("original-shared", "123")}${libraryTile("another", "234")}
     </div>
-    <div class="MDL_inner_duplicate"><h2>素材中心已有如下素材，无需重复上传</h2>
-      <p id="duplicate-filename">other-image.jpg</p><button>在列表中查看</button><button>关闭</button>
+    <div data-testid="beast-core-modal-container">
+      <div class="MDL_inner_duplicate" data-testid="beast-core-modal-inner">
+        <div class="MDL_noHeader_test" data-testid="beast-core-modal-body">
+          <div class="index-module_container__test">
+            <div class="index-module_title__test"><svg aria-hidden="true"></svg>素材中心已有如下素材，无需重复上传</div>
+            <div class="index-module_materialContainer__test">
+              <div class="index-module_materialItem__test"><div class="index-module_materialName__test">
+                <span id="duplicate-filename">other-image.jpg</span>
+              </div></div>
+            </div>
+          </div>
+        </div>
+        <div class="MDL_bottom_test"><button>在列表中查看</button><button>关闭</button></div>
+      </div>
     </div>`);
   const duplicate = doc.querySelector(".MDL_inner_duplicate");
   const filter = doc.querySelector("#search");
@@ -149,7 +161,7 @@ function fixture(html) {
   const events = [];
   duplicate.querySelector("button").onclick = () => {
     events.push("list");
-    duplicate.hidden = true;
+    duplicate.closest('[data-testid="beast-core-modal-container"]').hidden = true;
     filter.placeholder = "请输入素材ID";
     filter.value = "123";
     distractor.hidden = true;
@@ -166,6 +178,12 @@ function fixture(html) {
   assert.equal((await media(settle)).code, "UPLOAD_UNVERIFIED");
   assert.deepEqual(events, []);
   doc.querySelector("#duplicate-filename").textContent = "renamed-copy.jpg";
+  const material = doc.querySelector('[class^="index-module_materialItem__"]');
+  const additional = material.cloneNode(true);
+  material.after(additional);
+  assert.equal((await media(settle)).code, "UPLOAD_UNVERIFIED");
+  additional.remove();
+  assert.deepEqual(events, []);
   const result = await media(settle);
   assert.equal(result.ok, true);
   assert.equal(result.duplicate, true);

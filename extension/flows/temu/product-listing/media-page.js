@@ -11,8 +11,8 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
   const unique = items => items.length === 1 ? items[0] : null;
   const hasTitle = (node, text) => [...node.querySelectorAll('h1,h2,h3,[role="heading"],span,div')]
     .some(heading => visible(heading) && heading.childElementCount === 0 && clean(heading.textContent) === text);
-  const withTitle = text => {
-    const matches = modals().filter(node => hasTitle(node, text));
+  const withTitle = (text, matchesTitle = hasTitle) => {
+    const matches = modals().filter(node => matchesTitle(node, text));
     return unique(matches.filter(node => !matches.some(other => node !== other && node.contains(other))));
   };
   const picker = () => withTitle("素材中心");
@@ -177,6 +177,25 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     current.dispatchEvent(new KeyboardEvent("keyup", enter));
   }
 
+  function duplicateTitles(modal, title) {
+    return [...modal.querySelectorAll(
+      '[data-testid="beast-core-modal-body"] > div[class*="index-module_container__"] > div[class*="index-module_title__"]',
+    )].filter(heading => visible(heading) && clean(heading.innerText || heading.textContent) === title);
+  }
+
+  function duplicateFilename(modal, title) {
+    const headings = duplicateTitles(modal, title);
+    if (!headings.length) return unique([...modal.querySelectorAll('span,div,p,[title]')]
+      .filter(node => visible(node) && !node.childElementCount)
+      .map(node => clean(node.getAttribute("title") || node.textContent)).filter(filename => /\.(?:jpe?g|png|webp)$/iu.test(filename)));
+    const heading = unique(headings);
+    const item = heading && unique([...heading.parentElement.querySelectorAll(
+      ':scope > div[class*="index-module_materialContainer__"] > div[class*="index-module_materialItem__"]',
+    )].filter(visible));
+    const filename = item && unique([...item.querySelectorAll(':scope > div[class*="index-module_materialName__"]')].filter(visible));
+    return clean(filename?.innerText || filename?.textContent);
+  }
+
   async function settleUpload() {
     if (!name || !filenames.includes(name) || localFilename && (
       !/\.(?:jpe?g|png|webp)$/iu.test(localFilename) || localFilename.replace(/\.(?:jpe?g|png|webp)$/iu, "") !== name)) {
@@ -202,14 +221,13 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       // Temu may place the crop dialog in a portal or nest it within the picker.
       const crop = withTitle("裁剪") || withTitle("图片裁剪");
       const upload = withTitle("本地上传") || withTitle("上传图片");
-      const duplicate = withTitle("素材中心已有如下素材，无需重复上传");
+      const duplicateTitle = "素材中心已有如下素材，无需重复上传";
+      const duplicate = withTitle(duplicateTitle, (modal, title) => hasTitle(modal, title) || duplicateTitles(modal, title).length);
       if (extra.some(node => ![crop, upload, duplicate].some(owned => owned && (node === owned || node.contains(owned))))) {
         return fail("MODAL_BLOCKED", "上传时出现了无法识别的 Temu 弹窗。");
       }
       if (duplicate && duplicate !== dialog && duplicate !== known && !duplicateViewed) {
-        const shownNames = [...duplicate.querySelectorAll('span,div,p,[title]')].filter(node => visible(node) && !node.childElementCount)
-          .map(node => clean(node.getAttribute("title") || node.textContent)).filter(filename => /\.(?:jpe?g|png|webp)$/iu.test(filename));
-        const filename = unique(shownNames);
+        const filename = duplicateFilename(duplicate, duplicateTitle);
         const sameFile = filename && (localFilename ? filename === localFilename : filename.replace(/\.(?:jpe?g|png|webp)$/iu, "") === name);
         const view = enabledButton(duplicate, "在列表中查看");
         if (!sameFile || !view || !Number.isInteger(initialCount) || selected(dialog)?.count !== initialCount) {
