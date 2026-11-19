@@ -460,6 +460,23 @@ export function mxEditor(bridge, runCode, skuWrites) {
       el.dispatchEvent(new Event("change", { bubbles: true }));
       el.blur();
     };
+    const pmView = (el) => {
+      if (el.pmViewDesc?.view) return el.pmViewDesc.view;
+      for (let cur = el, hop = 0; cur && hop < 3; cur = cur.parentElement, hop++) {
+        const fk = Object.keys(cur).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+        for (let f = fk && cur[fk], d = 0; f && d < 12; f = f.return, d++) {
+          const seen = new Set(), q = [f.memoizedState, f.memoizedProps, f.stateNode];
+          while (q.length) {
+            const x = q.pop();
+            if (!x || typeof x !== "object" || seen.has(x)) continue;
+            seen.add(x);
+            if (x.dom === el && x.state?.schema?.nodes?.paragraph && typeof x.dispatch === "function") return x;
+            if (seen.size < 120) for (const k of Object.keys(x).slice(0, 12)) if (!/^(return|alternate|child|sibling)$/.test(k)) q.push(x[k]);
+          }
+        }
+      }
+      return null;
+    };
     const desc = (id, val) => {
       const e = document.querySelector('[data-id="' + id + '"] .ProseMirror');
       if (!e) throw new Error("Missing description editor");
@@ -468,7 +485,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
         val.replace(/\s+/g, " ").trim()
       )
         return;
-      const view = e.pmViewDesc?.view;
+      const view = pmView(e);
       if (view?.state?.schema.nodes.paragraph && view.dispatch) {
         const { doc, schema, tr } = view.state;
         const paragraphs = val
