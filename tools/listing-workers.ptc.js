@@ -7,7 +7,7 @@ const work = [
 ];
 if (input.mode === "create") {
   work.push(fieldAgent("commerce",
-    "Prepare a Mexican listing plan. Return JSON with category {search,label}, attributes {}, and salesAndShipping {brand,axis,packagedWeightGrams,packageCm:{length,width,height},evidence:{brand,weight,box}}. Each evidence value is {kind,basis}: use source for documented data or estimated for an inference with a concrete reason. Use 无品牌 if the brand is unknown and mark it estimated. Use grams and cm and estimate padding where needed. Name the variant axis and options in Mexican Spanish. The host binds each SKU, stock and price to the source."
+    "Prepare a Mexican listing plan. Return JSON with category {search,label}, attributes {}, and salesAndShipping. category.search must be 2 to 8 Simplified Chinese characters naming the product type: the seller category box matches Chinese, not Spanish or English. category.label is only a best-effort path and the host replaces it with a path the seller page offers. {brand,axis,packagedWeightGrams,packageCm:{length,width,height},evidence:{brand,weight,box}}. Each evidence value is {kind,basis}: use source for documented data or estimated for an inference with a concrete reason. Use 无品牌 if the brand is unknown and mark it estimated. Use grams and cm and estimate padding where needed. Name the variant axis and options in Mexican Spanish. The host binds each SKU, stock and price to the source."
   ));
 }
 await Promise.all(work);

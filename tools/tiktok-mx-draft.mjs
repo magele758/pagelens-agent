@@ -5,7 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { commercialDifferences, commercialPlan } from "./tiktok-mx-commerce.mjs";
 export { normDraftTitle, draftTitleOf, draftIdOf, selectDraftRows, draftListReady } from "./tiktok-mx-editor.mjs";
-import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, normDraftTitle, readFreshDocument, saveDraftCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
+import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, normDraftTitle, readFreshDocument, saveDraftCode, sellerCategoryOptionsCode, sellerCategorySearchCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -709,16 +709,33 @@ async function readSaved(tab, link, copy, plan, attempts, repairProse = false) {
     });
   } });
 }
-async function resolveCategory(tab, url, source, copy, dir) {
-  const candidates = await js(tab, expected => {
+const categoryPath = value => String(value || "").trim().replace(/\s+/g, " ").replace(/\s*>\s*|\s+[-/]\s+/g, "/");
+
+export async function resolveCategory(tab, url, source, copy, dir) {
+  const suggestions = () => js(tab, expected => {
     if (location.href !== expected) throw Error("Draft changed during category selection");
     return [...new Set([...document.querySelectorAll("button")].filter(b => b.innerText.trim() === "应用" &&
       !b.disabled && b.getClientRects().length).map(b => b.parentElement.parentElement.innerText.replace(/\s*应用\s*$/, "").trim())
       .filter(path => path.split(/\s+[>/-]\s+/).length >= 3))];
   }, url);
-  const { chooseCategory } = await import("./tiktok-mx-ptc.mjs");
+  const { chooseCategory, categorySearchQuery } = await import("./tiktok-mx-ptc.mjs");
+  const planned = copy.category?.search?.trim();
+  const query = planned && /\p{Script=Han}/u.test(planned) && !/[A-Za-z0-9]/.test(planned)
+    ? planned : (await categorySearchQuery(source)).query;
+  const opened = await runCode(tab, sellerCategorySearchCode(url));
+  const typed = await bridge("trusted_type", { tabId: tab, selector: opened.selector, clear: true, value: query });
+  if (!typed?.ok) throw Error("Seller category search failed");
+  const menu = await runCode(tab, sellerCategoryOptionsCode(url));
+  const candidates = [...new Set([...(await suggestions()), ...(menu.choices || [])])];
+  if (!candidates.length) throw Error("Seller offered no category candidates");
   const { choice, ptc } = await chooseCategory(source, candidates);
-  const selected = await category(tab, choice);
+  choice.search = query;
+  const inMenu = (menu.choices || []).some(label => categoryPath(label) === categoryPath(choice.label));
+  const selected = inMenu
+    ? await runCode(tab, sellerCategoryOptionsCode(url, choice.label)).then(applied => ({
+        selected: categoryPath(applied.choice) === categoryPath(choice.label), label: choice.label, shown: applied.choice,
+      }))
+    : await category(tab, choice);
   if (!selected.selected) throw Error("Recommended category did not persist: " + choice.label);
   copy.category = choice;
   await write(path.join(dir, "listing.json"), copy);

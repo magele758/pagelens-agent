@@ -127,19 +127,19 @@ function repairCategoryInput(control) {
   return null;
 }
 
-function categoryRepairCode(url, operation, value = null) {
+function categoryRepairCode(url, operation, value = null, allowCreate = false) {
   const page = new URL(url);
+  const editor = /^\/product\/edit-draft\/\d{12,22}$/.test(page.pathname) ||
+    (allowCreate && page.pathname === "/product/create");
   if (page.origin !== "https://seller.tiktokshopglobalselling.com" ||
-      page.username || page.password || page.searchParams.get("shop_region") !== "MX" ||
-      !/^\/product\/edit-draft\/\d{12,22}$/.test(page.pathname))
-    throw Error("Expected an existing MX product draft");
+      page.username || page.password || page.searchParams.get("shop_region") !== "MX" || !editor)
+    throw Error(allowCreate ? "Expected an MX product editor" : "Expected an existing MX product draft");
   return sellerVerification.toString() + "\n" + repairCategoryInput.toString() +
     `\nconst guard = () => { if (location.href !== ${JSON.stringify(url)} || sellerVerification()) throw Error("Draft changed or seller verification is open"); };` +
     "\nreturn await (" + operation.toString() + ")(" + JSON.stringify(value) + ")";
 }
 
-export function repairCategorySearchCode(url) {
-  return categoryRepairCode(url, async () => {
+async function categorySearchOperation() {
     guard();
     const control = document.querySelector("#product-cascader-select-view");
     if (!control?.getClientRects().length) throw Error("Draft category selector unavailable");
@@ -155,11 +155,17 @@ export function repairCategorySearchCode(url) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     throw Error("Draft category search did not open");
-  });
 }
 
-export function repairCategoryOptionsCode(url, exactLabel = null) {
-  return categoryRepairCode(url, async (wanted) => {
+export function repairCategorySearchCode(url) {
+  return categoryRepairCode(url, categorySearchOperation);
+}
+
+export function sellerCategorySearchCode(url) {
+  return categoryRepairCode(url, categorySearchOperation, null, true);
+}
+
+async function categoryOptionsOperation(wanted) {
     const normalize = text => String(text || "").trim().replace(/\s+/g, " ").replace(/\s*>\s*|\s+[-/]\s+/g, "/");
     const fullPath = text => normalize(text).split("/").filter(Boolean).length >= 3;
     const shown = node => node?.getClientRects().length && getComputedStyle(node).visibility !== "hidden";
@@ -212,7 +218,14 @@ export function repairCategoryOptionsCode(url, exactLabel = null) {
       await pause();
     }
     throw Error("Exact category did not settle: " + wanted);
-  }, exactLabel);
+}
+
+export function repairCategoryOptionsCode(url, exactLabel = null) {
+  return categoryRepairCode(url, categoryOptionsOperation, exactLabel);
+}
+
+export function sellerCategoryOptionsCode(url, exactLabel = null) {
+  return categoryRepairCode(url, categoryOptionsOperation, exactLabel, true);
 }
 
 export function saveDraftCode(expectedUrl = null) {

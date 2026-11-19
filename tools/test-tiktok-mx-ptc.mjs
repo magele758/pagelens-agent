@@ -11,7 +11,7 @@ process.env.PAGELENS_MX_FLOW_DIR = flowDir;
 process.on("exit", () => rmSync(flowDir, { recursive: true, force: true }));
 import { commercialPlan, sourceVariants } from "./tiktok-mx-commerce.mjs";
 import { DraftTabs } from "./tiktok-mx-tabs.mjs";
-import { generateListing, matchingPlan, rememberPlan, chooseCategory, validateTranslatedTitle, selectDetails } from "./tiktok-mx-ptc.mjs";
+import { generateListing, matchingPlan, rememberPlan, chooseCategory, categorySearchQuery, validateTranslatedTitle, selectDetails } from "./tiktok-mx-ptc.mjs";
 const row = { sourceSkuId: "111", option: "M", stock: 5, priceMXN: 100 };
 const origins = Object.fromEntries(
   [
@@ -857,6 +857,9 @@ assert.notEqual(updated.ptc.revision, generated.ptc.revision);
 assert.equal(await fs.readFile(generated.ptc.snapshot, "utf8"), originalProgram);
 await fs.writeFile(file, "return [];");
 await assert.rejects(generateListing(source, previous, 0.1161, async () => "{}"), /omitted required/);
+const searched = await categorySearchQuery(source, async () => '{"query":"洗蛋刷"}');
+assert.equal(searched.query, "洗蛋刷");
+await assert.rejects(categorySearchQuery(source, async () => '{"query":"egg brush"}'), /Simplified Chinese/);
 const category = await chooseCategory(source, ["Cookware / Racks", "Electronics / Ovens"], async () => '{"index":0}');
 assert.equal(category.choice.label, "Cookware / Racks");
 await assert.rejects(chooseCategory(source, ["Ovens"], async () => '{"index":2}'), /No suitable/);
