@@ -660,6 +660,17 @@ export async function readDraftSkuCeiling(ui, resolve, option) {
   return null;
 }
 
+export async function readDraftSkuNumbers(ui, resolve, option) {
+  const row = resolve(ui, option);
+  return { priceMXN: ui.numeric(row.price), stock: ui.numeric(row.stock) };
+}
+
+// A one-row editor commits through the batch controls. Every other editor
+// commits through the row inputs, which ignore synthetic events.
+export async function draftSkuEditorMode(ui, singleBatch) {
+  return singleBatch(ui) ? "batch" : "row";
+}
+
 export async function sellerNumbers(ui, readState, mode, plan) {
   const {
     field,
@@ -734,10 +745,12 @@ export async function sellerNumbers(ui, readState, mode, plan) {
 export function commerceScript(fn, ...args) {
   const source = fn => fn.toString().replace(/^ *\/\/.*\n/gm, "");
   const skuSource = "(" + source(skuDom) + ")()";
-  const ceilingRead = fn === readDraftSkuCeiling;
+  const ceilingRead = fn === readDraftSkuCeiling || fn === readDraftSkuNumbers;
+  const modeRead = fn === draftSkuEditorMode;
   const draftMutation = fn === setDraftSkuPrice || fn === setDraftSkuStock;
-  const domSource = draftMutation || ceilingRead ? skuSource : "(" + source(commerceDom) + ")(" + skuSource + "," + localizedColor + ")";
-  const helpers = ceilingRead ? [resolveSkuRow] :
+  const domSource = draftMutation || ceilingRead || modeRead ? skuSource : "(" + source(commerceDom) + ")(" + skuSource + "," + localizedColor + ")";
+  const helpers = modeRead ? [singleSkuBatch] :
+    ceilingRead ? [resolveSkuRow] :
     draftMutation ? [resolveSkuRow, singleSkuBatch, validateInventory] :
     fn === sellerNumbers ? [sellerRead] : fn === locateSkuInput ? [resolveSkuRow] : [];
   let code =

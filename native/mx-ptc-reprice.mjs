@@ -6,7 +6,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { createPtcExecTool } from "@mage-ai-lab/agent-loop/ptc";
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
-import { commerceScript, readDraftSkuCeiling, setDraftSkuPrice, setDraftSkuStock } from "../tools/tiktok-mx-commerce.mjs";
+import {
+  commerceScript, draftSkuEditorMode, locateSkuInput, readDraftSkuCeiling, readDraftSkuNumbers,
+  setDraftSkuPrice, setDraftSkuStock,
+} from "../tools/tiktok-mx-commerce.mjs";
 import {
   attributeCode, matchAttributeValue, readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
@@ -223,8 +226,46 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     let saved = before, signal = null;
     if (changes.length) {
       group.pendingForm = tab;
+      const editorMode = await runCode(tab, verification + commerceScript(draftSkuEditorMode));
+      if (editorMode !== "batch" && editorMode !== "row") throw Error("Unexpected SKU editor");
+      async function commitField(label, field, value) {
+        const selector = await runCode(tab, verification + commerceScript(locateSkuInput, label, field, value, true));
+        if (!selector) return;
+        const typed = await inEditor("trusted_type", { selector, clear: true, value: String(value) });
+        if (!typed?.ok) throw Error("Trusted SKU input failed for " + label);
+        const committed = await inEditor("press_keys", { keys: ["Tab"] });
+        if (!committed?.ok) throw Error("SKU input could not commit for " + label);
+      }
       for (const row of changes) {
         const inventory = row.stock !== row.afterStock ? { before: row.stock, after: row.afterStock } : null;
+        if (editorMode === "row") {
+          const live = await runCode(tab, verification + commerceScript(readDraftSkuNumbers, row.label));
+          if (![row.beforeMXN, row.afterMXN].includes(live.priceMXN))
+            throw Error("SKU price changed before editing " + row.label);
+          let target = row.maxPriceMXN ?? row.requestedMXN;
+          if (multiplier === 100 && live.priceMXN !== target) {
+            const ceiling = await runCode(tab, verification + commerceScript(readDraftSkuCeiling, row.label));
+            if (ceiling !== null && ceiling >= row.beforeMXN && ceiling < row.requestedMXN) {
+              row.maxPriceMXN = validateCap(row, ceiling);
+              caps.set(row.planLabel, row.maxPriceMXN);
+              target = row.maxPriceMXN;
+            } else {
+              row.maxPriceMXN = undefined;
+              caps.delete(row.planLabel);
+              target = row.requestedMXN;
+            }
+          }
+          if (live.priceMXN !== target) await commitField(row.label, "price", target);
+          row.afterMXN = row.maxPriceMXN ?? row.requestedMXN;
+          const priced = await runCode(tab, verification + commerceScript(readDraftSkuNumbers, row.label));
+          if (priced.priceMXN !== row.afterMXN) throw Error("Seller price result differs for " + row.label);
+          if (inventory) {
+            if (priced.stock !== inventory.before && priced.stock !== inventory.after)
+              throw Error("Seller stock result differs for " + row.label);
+            if (priced.stock !== inventory.after) await commitField(row.label, "stock", row.afterStock);
+          }
+          continue;
+        }
         if (row.currentMXN === row.afterMXN) {
           await runCode(tab, verification + commerceScript(setDraftSkuStock, row.label, row.stock, row.afterStock));
           continue;
