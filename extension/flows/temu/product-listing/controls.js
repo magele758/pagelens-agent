@@ -109,8 +109,23 @@ export async function temuControls(request) {
     return { holder, selector, fieldKey, label, requiredHint: true };
   }
 
-  const readSelected = wrapper => [...wrapper.querySelectorAll('[class*="ST_selectValueSingle_"],[class*="ST_selectValueMultipleItem_"]')]
-    .filter(visible).map(node => clean(node.textContent)).filter(Boolean);
+  function materialLabelParts(node) {
+    const labels = [...node.querySelectorAll('[class^="name-label_name__"]')];
+    const label = labels.length === 1 ? labels[0] : null;
+    const primary = label && clean([...label.childNodes].filter(child => child.nodeType === 3)
+      .map(child => child.textContent).join(" "), 500);
+    const translation = label && clean(label.querySelector('[class^="name-label_enName__"]')?.textContent);
+    return { primary, translation };
+  }
+
+  const readSelected = wrapper => {
+    const selected = [...wrapper.querySelectorAll('[class*="ST_selectValueSingle_"],[class*="ST_selectValueMultipleItem_"]')]
+      .filter(visible).map(node => materialLabelParts(node).primary || clean(node.textContent)).filter(Boolean);
+    if (selected.length) return selected;
+    const fallback = wrapper.querySelector('[class*="ST_selectValue_"]');
+    const value = visible(fallback) && (materialLabelParts(fallback).primary || clean(fallback.textContent));
+    return value ? [value] : [];
+  };
   const labelItems = area => [...area?.querySelectorAll(LABEL) || []].filter(node => visible(node) &&
     !node.closest(WRAPPER) && !node.querySelector(FORM_CONTROLS));
   const requiredMarker = area => [...area?.querySelectorAll(REQUIRED) || []].some(node =>
@@ -121,13 +136,14 @@ export async function temuControls(request) {
     const labels = labelItems(area);
     const match = labels.filter(node => key(labelText(node)) === key(label));
     if (match.some(node => /^[*＊]/u.test(clean(node.textContent)) || node.matches(REQUIRED) || requiredMarker(node))) return true;
-    return Boolean(area && labels.length <= 1 && area.querySelectorAll(`${WRAPPER} ${HEAD} input`).length === 1 &&
+    const labelNames = new Set(labels.map(labelText).filter(Boolean).map(key));
+    return Boolean(area && labelNames.size <= 1 && area.querySelectorAll(`${WRAPPER} ${HEAD} input`).length === 1 &&
       requiredMarker(area));
   }
 
   function describe(input, wrapper, { holder: group, selector, fieldKey, label, requiredHint = false }) {
     const item = group.closest(FORM_ITEM) || input.closest(FORM_ITEM) || group;
-    const required = requiredHint || isRequired(input, item, label) ||
+    const required = requiredHint || isRequired(input, group, label) || (item !== group && isRequired(input, item, label)) ||
       /^(?:productOriginCode|manufacturingLocation|shipmentLimitSecond|freightTemplateId)$/u.test(group.id) ||
       /^productSkuMap\.[\w-]*\.sensitiveAttr$/u.test(group.id);
     const multiple = Boolean(wrapper.querySelector('[class*="ST_selectValueMultiple_"]') || input.getAttribute("aria-multiselectable") === "true");
@@ -336,13 +352,18 @@ export async function temuControls(request) {
     return !visible(menu);
   }
 
-  function choices(menu) {
+  function exactAliases(field, value) {
+    const groups = /^(?:季节(?:\s+season)?|season)$/iu.test(field.label) ? [
+      ["春", "春季", "Spring"], ["夏", "夏季", "Summer"], ["秋", "秋季", "Autumn", "Fall"], ["冬", "冬季", "Winter"],
+    ] : /^composition-material-\d+$/u.test(field.key) ? [
+      ["聚酯纤维", "涤纶", "Polyester"], ["氨纶", "Spandex", "Elastane"],
+    ] : [];
+    return groups.find(group => group.some(alias => key(alias) === key(value))) || [];
+  }
+
+  function choices(menu, field) {
     return [...menu.querySelectorAll(OPTION)].filter(element => visible(element) && !menu.contains(element.parentElement.closest(OPTION))).map(element => {
-      const descriptions = [...element.querySelectorAll('[class^="name-label_name__"]')];
-      const description = descriptions.length === 1 ? descriptions[0] : null;
-      const primary = description && clean([...description.childNodes].filter(node => node.nodeType === 3)
-        .map(node => node.textContent).join(" "), 500);
-      const translation = description && clean(description.querySelector('[class^="name-label_enName__"]')?.textContent);
+      const { primary, translation } = materialLabelParts(element);
       const label = primary || clean(element.textContent, 500);
       const value = clean(element.getAttribute("data-value") || element.getAttribute("value") || label, 1000);
       const normalized = label.normalize("NFKC");
@@ -350,8 +371,9 @@ export async function temuControls(request) {
       const qualified = /^([\p{Script=Han}\d\s]+?)\s*\([\p{Script=Han}\d\s]+\)$/u.exec(parts?.[1] || normalized);
       const childLabels = Array.from(element.querySelectorAll("span,[aria-label]"))
         .map((node) => clean(node.getAttribute("aria-label") || node.textContent));
-      const aliases = [...new Set([element.getAttribute("aria-label"), ...(parts?.slice(1) || []), qualified?.[1], translation, ...childLabels])]
-        .map(alias => clean(alias)).filter(alias => alias && key(alias) !== key(label)).slice(0, 12);
+      const names = [element.getAttribute("aria-label"), ...(parts?.slice(1) || []), qualified?.[1], translation, ...childLabels];
+      const aliases = [...new Set([...names, ...[label, ...names].flatMap(name => exactAliases(field, name))])]
+        .map(alias => clean(alias)).filter(alias => alias && key(alias) !== key(label)).slice(0, 16);
       const status = element.getAttribute("data-checked") ?? element.getAttribute("aria-selected");
       const disabled = element.matches('[data-disabled="true"],[aria-disabled="true"],[disabled],a[href]') ||
         Boolean(element.querySelector('a[href]'));
@@ -359,7 +381,7 @@ export async function temuControls(request) {
     }).filter((entry) => entry.label);
   }
 
-  function observed(control, menu, rows = choices(menu)) {
+  function observed(control, menu, rows = choices(menu, control.field)) {
     const multiple = control.field.constraints.multiple || menu.getAttribute("aria-multiselectable") === "true";
     return {
       ...control.field,
@@ -399,7 +421,7 @@ export async function temuControls(request) {
     const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
     if (!set) return null;
     const signature = (rows) => JSON.stringify(rows.map(({ label, value }) => [label, value]));
-    const before = signature(choices(menu));
+    const before = signature(choices(menu, control.field));
     input.focus({ preventScroll: true });
     set.call(input, query);
     input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
@@ -408,7 +430,7 @@ export async function temuControls(request) {
     const settled = await poll(() => {
       const current = active();
       if (!current) return null;
-      const rows = choices(current);
+      const rows = choices(current, control.field);
       if (expected !== undefined && pickOption(rows, expected)) return current;
       const next = signature(rows);
       if (previous !== next) {
@@ -435,7 +457,7 @@ export async function temuControls(request) {
       if (!validPage()) result = fail("PAGE_CHANGED", "当前 Temu 商品草稿已变化。");
       else if (blocked()) result = fail("MODAL_BLOCKED", "Temu 表单上有弹窗，请核对后继续。");
       else if (!result) {
-        const rows = choices(menu);
+        const rows = choices(menu, control.field);
         const field = observed(control, menu, rows);
         result = { ok: true, field, options: field.options, ...(term && { filtered: true }) };
       }
@@ -492,18 +514,23 @@ export async function temuControls(request) {
         menu = live && await open(live);
       }
       if (!menu) return null;
-      const direct = option(choices(menu));
+      const direct = option(choices(menu, field));
       if (direct) return direct;
       if (!query && !/^(?:productProperties\[\d+\]|composition-material-\d+)$/u.test(field.key)) return null;
-      const searched = await search(live, menu, clean(term, 120), value);
-      if (!searched) return null;
-      menu = searched;
-      return option(choices(menu));
+      const terms = new Set([term, ...exactAliases(field, value)].map(item => clean(item, 120)).filter(Boolean));
+      for (const candidate of terms) {
+        const searched = await search(live, menu, candidate, value);
+        if (!searched) return null;
+        menu = searched;
+        const match = option(choices(menu, field));
+        if (match) return match;
+      }
+      return null;
     }
 
     async function apply() {
       await poll(() => containsOptions(menu), 1400);
-      const rows = choices(menu);
+      const rows = choices(menu, control.field);
       const snapshot = observed(control, menu, rows);
       const checked = checkValues(snapshot, value);
       if (!checked.ok) return checked;
@@ -511,7 +538,7 @@ export async function temuControls(request) {
       for (const item of checked.values) {
         const choice = pickOption(rows, item) || await find(item, checked.multiple ? item : clean(query, 120) || item);
         if (!choice || desired.some(earlier => same(earlier, choice))) {
-          return fail("OPTION_MISSING", "下拉列表没有唯一匹配的可选值。请使用当前页面显示的完整选项名称。");
+          return fail("OPTION_MISSING", `当前下拉没有唯一匹配「${clean(query, 80) || clean(item, 80)}」的选项。`);
         }
         desired.push(choice);
       }
@@ -564,7 +591,7 @@ export async function temuControls(request) {
       }
       if (!visible(menu)) menu = await open(live);
       const verified = menu && await poll(() => {
-        const actual = selected(choices(menu));
+        const actual = selected(choices(menu, field));
         return actual.length === desired.length && desired.every((option) => actual.some((row) => same(option, row)));
       }, 900);
       if (!verified) return fail("READBACK_MISMATCH", "平台未确认目标选项，请检查下拉当前值。", changed);

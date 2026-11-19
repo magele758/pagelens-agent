@@ -7,6 +7,8 @@ import { suggestTemuCategory } from "../flows/temu/product-listing/category-sugg
 import { openTemuWorkflowTab } from "../flows/temu/workflow-tab.js";
 import { requireHostUrl } from "../lib/optional-permissions.js";
 import { bindTemuListingSelect } from "./temu-listing-select.js";
+import { prepareSizeChartInput, readProductImage } from "../flows/shopee/product-listing/sidepanel/product-directory.js";
+import { suggestTemuSizeChart } from "../flows/temu/product-listing/size-chart-suggestion.js";
 
 const startUrl = "https://agentseller.temu.com/goods/create/category";
 const sitePreference = "pagelens.temu.listingSite";
@@ -86,7 +88,7 @@ export function bindTemuListingPanel({
           <summary>补充资料</summary>
           <label for="temu-product-json">商品 JSON</label>
           <textarea id="temu-product-json" rows="4" spellcheck="false" placeholder='{"title":"商品名称"}'></textarea>
-          <label class="temu-listing-check"><input id="temu-listing-ai" type="checkbox" />让已配置的 AI 补齐第二步商品表单</label>
+          <label class="temu-listing-check"><input id="temu-listing-ai" type="checkbox" />让已配置的 AI 补齐商品表单和识别尺码图</label>
         </details>
       </fieldset>
       <div id="temu-listing-message" role="status" aria-live="polite"></div>
@@ -110,6 +112,7 @@ export function bindTemuListingPanel({
   const upload = find("listing-upload");
   const json = find("product-json");
   let products = [];
+  let directoryRoot;
   let productIndex = 0;
   let origins;
   let originsPending;
@@ -304,7 +307,7 @@ export function bindTemuListingPanel({
     }
     filled.attributes = { ...base?.attributes, ...normalized.attributes };
     filled.listingAttributes = { ...base?.listingAttributes, ...normalized.listingAttributes };
-    for (const key of ["mainImages", "detailImages", "variantImages", "sharedGalleryImages", "sizeChartImagePath", "sizeChart"]) {
+    for (const key of ["mainImages", "detailImages", "variantImages", "sharedGalleryImages", "sizeChartImagePath"]) {
       filled[key] = base?.[key] ?? normalized[key];
     }
     for (const key of ["skus", "variantGroups"]) filled[key] = base?.[key]?.length ? base[key] : normalized[key];
@@ -368,6 +371,7 @@ export function bindTemuListingPanel({
       const result = await chooseDirectory();
       if (!result || !pending.open || !dialog.open) return;
       products = result.products;
+      directoryRoot = result.root;
       productIndex = 0;
       find("product-item").hidden = products.length < 2;
       directorySummary.textContent = products.length === 1 ? products[0].title : `${result.directoryName} · ${products.length} 件商品`;
@@ -443,13 +447,25 @@ export function bindTemuListingPanel({
       const approved = upload.checked;
       input.uploadImages = approved;
       const useModel = find("listing-ai").checked;
+      const selectedProduct = products[productIndex];
+      const readSizeChart = useModel && selectedProduct && input.sizeChartImagePath
+        ? async () => (await prepareSizeChartInput({ ...selectedProduct, input }, {
+          root: directoryRoot, signal, getSettings: getSettings ? async () => getSettings() : undefined,
+        })).sizeChart
+        : undefined;
+      const suggestSizeChart = useModel ? async (product, { sizes, signal }) => suggestTemuSizeChart(product, {
+        sizes, signal, settings: await getSettings?.(),
+        readImage: selectedProduct && input.mainImages?.[0] ? () => readProductImage({
+          root: directoryRoot, folder: selectedProduct.folder, path: input.mainImages[0], asset: "main", signal,
+        }) : undefined,
+      }) : undefined;
       const imagePaths = new Set([...(input.mainImages || []), ...(input.detailImages || []), ...(input.variantImages || []), input.sizeChartImagePath]);
       const call = createTemuListingToolCaller({
         tabId: tab.id, url: tab.url, signal,
         confirmUpload: ({ paths }) => approved && paths.every(file => imagePaths.has(file)),
       });
       const result = await replay({
-        tabId: tab.id, input, call, signal,
+        tabId: tab.id, input, call, signal, readSizeChart, suggestSizeChart,
         shouldSuggestField: createTemuSuggestionFilter(input, { useModel }),
         suggestFields: (product, schema, { signal }) =>
           suggestTemuFields(product, schema, { signal, settings: getSettings?.(), useModel }),

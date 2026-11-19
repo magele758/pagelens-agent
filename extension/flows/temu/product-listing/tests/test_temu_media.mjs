@@ -136,7 +136,7 @@ function fixture(html) {
   }
   const { dom, doc, run } = fixture(`
     <div class="MDL_inner_picker"><h2>素材中心</h2><div class="UPD_outerWrapper_test"><input type="file"></div>
-      <input id="search" placeholder="请输入素材名称"><span id="count">已选 0 个，可选 10 个</span>
+      <span id="count">已选 0 个，可选 10 个</span>
       ${libraryTile("original-shared", "123")}${libraryTile("another", "234")}
     </div>
     <div data-testid="beast-core-modal-container">
@@ -151,28 +151,23 @@ function fixture(html) {
             </div>
           </div>
         </div>
-        <div class="MDL_bottom_test"><button>在列表中查看</button><button>关闭</button></div>
+        <div class="MDL_bottom_test"><button id="view-duplicate">在列表中查看</button><button id="close-duplicate">关闭</button></div>
       </div>
     </div>`);
   const duplicate = doc.querySelector(".MDL_inner_duplicate");
-  const filter = doc.querySelector("#search");
+  const modal = duplicate.closest('[data-testid="beast-core-modal-container"]');
   const count = doc.querySelector("#count");
-  const distractor = doc.querySelector("#material-234");
+  const candidate = doc.querySelector("#material-123");
   const events = [];
-  duplicate.querySelector("button").onclick = () => {
-    events.push("list");
-    duplicate.closest('[data-testid="beast-core-modal-container"]').hidden = true;
-    filter.placeholder = "请输入素材ID";
-    filter.value = "123";
-    distractor.hidden = true;
+  doc.querySelector("#view-duplicate").onclick = () => { events.push("list"); };
+  doc.querySelector("#close-duplicate").onclick = () => {
+    events.push("close");
+    modal.hidden = true;
+  };
+  candidate.querySelector("img").onclick = () => {
+    events.push("select");
     count.textContent = "已选 1 个，可选 9 个";
   };
-  filter.addEventListener("keydown", event => {
-    if (event.key === "Enter" && filter.value === "") {
-      events.push("clear-id");
-      distractor.hidden = false;
-    }
-  });
   const media = args => run(temuMediaPage, { key: "productSkcList[1].carouselImgsI18n.common", filenames: ["renamed-copy"], ...args });
   const settle = { kind: "settle-upload", name: "renamed-copy", localFilename: "renamed-copy.jpg", baseline: 0 };
   assert.equal((await media(settle)).code, "UPLOAD_UNVERIFIED");
@@ -184,17 +179,25 @@ function fixture(html) {
   assert.equal((await media(settle)).code, "UPLOAD_UNVERIFIED");
   additional.remove();
   assert.deepEqual(events, []);
+  assert.equal((await media(settle)).code, "UPLOAD_DUPLICATE_UNVERIFIED");
+  assert.deepEqual(events, ["close"]);
+  assert.equal(modal.hidden, true);
+  assert.equal((await media({ kind: "inspect" })).count, 0);
+  modal.hidden = false;
+  candidate.querySelector(".elli_outerWrapper_test").textContent = "renamed-copy";
   const result = await media(settle);
   assert.equal(result.ok, true);
   assert.equal(result.duplicate, true);
   assert.equal(result.card.filename, "renamed-copy");
-  assert.equal(result.card.libraryFilename, "original-shared");
+  assert.equal(result.card.libraryFilename, "renamed-copy");
   assert.equal(result.card.src, "https://img.kwcdn.com/product/fancy/123.jpg");
-  assert.equal(distractor.hidden, false);
-  assert.deepEqual(events, ["list", "clear-id"]);
+  assert.deepEqual(events, ["close", "close"]);
   const snapshot = await media({ kind: "inspect", expected: [result.card] });
-  assert.equal(snapshot.count, 1);
+  assert.equal(snapshot.count, 0);
   assert.equal(snapshot.knownMedia[0].identity, result.card.identity);
+  const select = await media({ kind: "select-new", baseline: 0, expected: [result.card] });
+  assert.equal(select.count, 1);
+  assert.deepEqual(events, ["close", "close", "select"]);
   dom.window.close();
 }
 

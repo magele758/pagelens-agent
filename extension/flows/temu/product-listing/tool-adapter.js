@@ -303,7 +303,7 @@ export function createTemuListingToolCaller({
           case "temu_stock":
             return await runInPage(temuStockPage, { href, kind: args.kind, key: args.key, value: args.value, rows: args.rows });
           case "temu_apparel":
-            if (!["inspect", "add-color", "set-color", "set-sizes", "select-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
+            if (!["inspect", "add-color", "set-color", "inspect-sizes", "set-sizes", "dismiss-size-tip", "select-size-chart", "create-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
               return failure("ACTION_UNSUPPORTED", "此操作不属于服装试填。");
             }
             return await apparel(args);

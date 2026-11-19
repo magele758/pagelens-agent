@@ -204,7 +204,7 @@ export function normalizeTemuListingInput(raw, { root, folder } = {}) {
     variantImages: imagePaths([...list(filesByRole.get("variant")), ...sharedGalleryImages,
       ...variants.variantGroups.flatMap(group => group.options.flatMap(option => [option.imagePath, ...list(option.galleryImages)])),
       ...variants.skus.map(row => row.imagePath)]),
-    sizeChart: raw.sizeChart,
+    sizeChart: target.sizeChart ?? raw.sizeChart,
     sizeChartImagePath: image(raw.sizeChartImagePath),
   };
 }
@@ -254,6 +254,10 @@ const ATTRIBUTE_EQUIVALENTS = [
   ["护理说明", "保养说明", "洗护", "Operation Instruction", "Care Instructions", "Product Care Instructions"],
   ["材质", "材料", "Material"],
   ["图案", "Pattern"],
+  ["季节", "适用季节", "Season"],
+  ["袖型", "袖子款式", "Sleeve Type"],
+  ["袖长", "袖子长度", "Sleeve Length"],
+  ["门襟类型", "闭合方式", "Placket Type", "Closure Type"],
 ];
 
 function attributeNames(label) {

@@ -33,7 +33,8 @@ const input = {
       calls.push([tool, args]);
       if (tool === "temu_category") return { ok: true, href: editor };
       if (tool === "temu_editor_state") return structuredClone(state);
-      if (tool === "temu_field_options") return { ok: true, options: [{ label: "不锈钢", value: "metal" }] };
+      if (tool === "temu_field_options") return { ok: true, options: [{ label: "不锈钢", value: args.forceLive ? "metal" : "old-metal" }] };
+      if (tool === "temu_select" && args.value === "old-metal") return { ok: false, code: "OPTION_MISSING" };
       if (tool === "temu_upload") return { ok: true, status: "verified" };
       if (/^temu_(write|select)$/u.test(tool)) {
         fields.find(field => field.key === args.key).value = args.value;
@@ -44,9 +45,9 @@ const input = {
     async suggestFields(product, schema) {
       assert.equal(product, input);
       assert.deepEqual(schema.fields.map(field => ({ key: field.key, options: field.options })), [
-        { key: material.key, options: [{ label: "不锈钢", value: "metal" }] },
+        { key: material.key, options: [{ label: "不锈钢", value: "old-metal" }] },
       ]);
-      return { values: { [material.key]: "metal", unexpected: "discard" } };
+      return { values: { [material.key]: "old-metal", unexpected: "discard" } };
     },
   });
   assert.equal(receipt.status, "ready-for-review");
@@ -54,6 +55,9 @@ const input = {
   assert.equal(receipt.draftUrl, editor);
   assert.deepEqual(calls.filter(([tool]) => tool === "temu_write").map(([, args]) => args.value), ["Water Bottle", "19.80"]);
   assert.deepEqual(calls.find(([tool]) => tool === "temu_upload")[1].paths, images);
+  assert.deepEqual(calls.filter(([tool]) => tool === "temu_select").map(([, args]) => [args.value, args.query]),
+    [["old-metal", "不锈钢"], ["metal", "不锈钢"]]);
+  assert.ok(calls.some(([tool, args]) => tool === "temu_field_options" && args.forceLive));
   assert.ok(!calls.some(([tool]) => /save|publish|submit/u.test(tool)));
 }
 

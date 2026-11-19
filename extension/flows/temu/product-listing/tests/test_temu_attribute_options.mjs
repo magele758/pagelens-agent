@@ -11,7 +11,7 @@ test("resolves bilingual attribute aliases and declared keys without using ambig
     manufacturerSuggestedRetailPrice: "25.75",
     packageContents: "1",
     sourcePrice: { amount: "9.49", currency: "USD" },
-    attributes: { "Fabric Type": "95% Polyester, 5% Spandex", 衣领: "圆领", 保养说明: "机洗" },
+    attributes: { "Fabric Type": "95% Polyester, 5% Spandex", 衣领: "圆领", 保养说明: "机洗", 袖子长度: "短袖" },
     temu: { attributes: { "productProperties[22]": "聚酯纤维", 品牌: "A brand", Brand: "Conflicting brand" } },
     skus: [{ id: "one", options: { Size: "S" }, packageContents: "2" }],
   });
@@ -20,6 +20,7 @@ test("resolves bilingual attribute aliases and declared keys without using ambig
   assert.equal(readTemuAttributeValue(product, collar), "圆领");
   assert.equal(readTemuAttributeValue(product, { key: "productProperties[22]", label: "材质 Material" }), "聚酯纤维");
   assert.equal(readTemuAttributeValue(product, { label: "护理说明 Operation Instruction" }), "机洗");
+  assert.equal(readTemuAttributeValue(product, { label: "袖长 Sleeve Length" }), "短袖");
   assert.equal(readTemuAttributeValue(product, { label: "品牌名 Brand" }), undefined);
   assert.equal(readTemuAttributeValue(product, { label: "印花类型 Printing Type" }), undefined);
   assert.deepEqual(product.composition, [{ material: "Polyester", percent: "95" }, { material: "Spandex", percent: "5" }]);
@@ -44,6 +45,24 @@ test("only retains directory-validated shared and per-variant gallery paths", ()
   assert.deepEqual(product.variantGroups[0].options[0].galleryImages, ["/items/shirt/material.jpg"]);
   assert.equal(product.variantGroups[0].options[1].galleryImages, undefined);
   assert.deepEqual(product.variantImages, ["/items/shirt/detail.jpg", "/items/shirt/blue.jpg", "/items/shirt/material.jpg", "/items/shirt/orange.jpg"]);
+});
+
+test("identifies required attributes from their own group inside a shared form item", async t => {
+  const href = "https://agentseller.temu.com/goods/edit?productDraftId=required";
+  const dom = new JSDOM(`<main id="page_container_id"><div data-testid="beast-core-form-item">
+    <div id="productProperties[25]"><div><span aria-hidden="true" class="Form_itemLabelRequired_test">*</span>
+    <span class="Form_itemLabelContent_test">细节 Details</span></div>
+    <div class="ST_outerWrapper_test"><div class="ST_head_test"><input readonly></div></div></div>
+    <div id="productProperties[28]"><span class="Form_itemLabelContent_test">袖型 Sleeve Type</span>
+    <div class="ST_outerWrapper_test"><div class="ST_head_test"><input readonly>
+    <span class="ST_selectValue_test">帽袖</span></div></div></div>
+    </div></main>`, { url: href, runScripts: "outside-only" });
+  t.after(() => dom.window.close());
+  dom.window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const run = request => dom.window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
+  const result = await run({ kind: "inspect" });
+  assert.deepEqual(JSON.parse(JSON.stringify(result.fields.map(({ label, required, value }) => [label, required, value]))),
+    [["细节 Details", true, ""], ["袖型 Sleeve Type", false, "帽袖"]]);
 });
 
 test("searches the active form control, waits for filtered options, and verifies the exact selection", async t => {
@@ -131,6 +150,48 @@ test("searches the active form control, waits for filtered options, and verifies
   assert.equal(overlay.hidden, false);
 });
 
+test("looks up Temu's local composition term for a sourced English fiber name", async t => {
+  const href = "https://agentseller.temu.com/goods/edit?productDraftId=fiber";
+  const dom = new JSDOM(`<main id="page_container_id"><div id="productProperties[15]"><table><tbody><tr><td>
+    <div class="ST_outerWrapper_test"><div class="ST_head_test"><input placeholder="请选择" aria-controls="fibers" readonly>
+    <span class="ST_selectValueSingle_test"></span></div></div></td><td><input placeholder="请输入"></td>
+    </tr></tbody></table></div></main><div class="ST_dropdown_test" hidden>
+    <input type="search"><div role="listbox" id="fibers"></div></div>`, { url: href, runScripts: "outside-only" });
+  t.after(() => dom.window.close());
+  const { window } = dom;
+  window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const { document } = window;
+  const menu = document.getElementById("fibers");
+  const dropdown = menu.parentElement;
+  const search = dropdown.querySelector("input");
+  const selection = document.querySelector('[class^="ST_selectValueSingle_"]');
+  const queries = [];
+  const clicks = [];
+  document.querySelector('input[readonly]').addEventListener("focus", () => {
+    dropdown.hidden = false;
+    menu.innerHTML = '<div role="option" data-value="cotton">棉 Cotton</div>';
+  });
+  search.addEventListener("input", () => {
+    queries.push(search.value);
+    window.setTimeout(() => {
+      menu.innerHTML = search.value === "氨纶" ?
+        '<div role="option" data-value="fiber-4"><span class="name-label_name__test">氨纶<span class="name-label_enName__test">Spandex</span></span></div>' : "";
+    }, 30);
+  });
+  menu.addEventListener("click", event => {
+    clicks.push(event.target.dataset.value);
+    selection.innerHTML = event.target.innerHTML;
+    dropdown.hidden = true;
+  });
+  const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
+  const [field] = (await run({ kind: "inspect" })).fields;
+  assert.equal(field.key, "composition-material-0");
+  assert.equal((await run({ kind: "select", value: "Elastane", field })).status, "filled");
+  assert.deepEqual(queries, ["Elastane", "氨纶"]);
+  assert.deepEqual(clicks, ["fiber-4"]);
+  assert.equal((await run({ kind: "inspect" })).fields[0].value, "氨纶");
+});
+
 test("resolves a full multiselect request before changing choices and verifies the selected chips", async t => {
   const href = "https://agentseller.temu.com/goods/edit?productDraftId=multiple";
   const dom = new JSDOM(`<main id="page_container_id"><div id="productProperties[51]">
@@ -147,7 +208,7 @@ test("resolves a full multiselect request before changing choices and verifies t
   const menu = document.querySelector('[role="listbox"]');
   const portal = menu.parentElement;
   const chips = document.querySelector('[class^="ST_selectValueMultiple_"]');
-  const names = new Map([["spring", "春季 Spring"], ["summer", "夏季 Summer"], ["winter", "冬季 Winter"]]);
+  const names = new Map([["spring", "春"], ["summer", "夏"], ["winter", "冬"]]);
   const selected = new Set(["spring"]);
   let clicks = 0;
   function show(query) {
@@ -178,7 +239,7 @@ test("resolves a full multiselect request before changing choices and verifies t
   const [field] = (await run({ kind: "inspect" })).fields;
   assert.equal((await run({ kind: "select", value: ["Summer", "Unlisted"], field })).code, "OPTION_MISSING");
   assert.equal(clicks, 0);
-  assert.equal((await run({ kind: "select", value: ["Winter", "Summer"], field })).status, "filled");
+  assert.equal((await run({ kind: "select", value: ["Winter", "夏季"], field })).status, "filled");
   assert.equal(clicks, 3);
   assert.deepEqual([...selected], ["winter", "summer"]);
   assert.equal(portal.hidden, true);

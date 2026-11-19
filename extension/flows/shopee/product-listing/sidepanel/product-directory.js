@@ -53,7 +53,7 @@ export function validateProductDirectory(loaded) {
   return { root, products, issues };
 }
 
-async function readProductImage({ root, folder, path, asset, signal, send = readChartChunk }) {
+export async function readProductImage({ root, folder, path, asset, signal, send = readChartChunk }) {
   const label = asset === "main" ? "商品主图" : "尺码图";
   if (!isAbsolutePath(root) || typeof folder !== "string" || !folder ||
       /^\.{1,2}$/u.test(folder) || /[/\\\0]/u.test(folder) || !withinFolder(path, root, folder)) {

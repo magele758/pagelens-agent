@@ -276,7 +276,10 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
       rows.set(field.skuGroup, [...new Set([...prior, ...field.rowLabels])]);
     }
     const skuRows = rows.size ? [...rows].map(([id, labels]) => ({ id, labels })) : null;
-    return { ok: true, fields: list.slice(0, 400), skuRows, uploads: uploads(), issues: issues(), truncated: list.length > 400 };
+    const hasApparelSizes = [...root.querySelectorAll('button,[role="button"]')].some(button =>
+      visible(button) && /^\+?\s*添加尺码表$/u.test(clean(button.textContent)));
+    return { ok: true, fields: list.slice(0, 400), skuRows, uploads: uploads(), issues: issues(), hasApparelSizes,
+      truncated: list.length > 400 };
   }
   if (kind === "upload-target") {
     const matches = uploads().filter(item => item.role === role && item.key === key && (identifier == null || item.variant === identifier));

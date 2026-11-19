@@ -161,22 +161,6 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     return true;
   }
 
-  function materialFilter(dialog, placeholder = "请输入素材ID") {
-    return unique([...dialog.querySelectorAll("input[placeholder]")].filter(input => input.placeholder === placeholder &&
-      visible(input) && !input.disabled && !input.readOnly));
-  }
-
-  function clearMaterialFilter(dialog, input) {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "");
-    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-    const current = materialFilter(dialog) || materialFilter(dialog, "请输入素材名称");
-    if (!current || current.value) return;
-    current.dispatchEvent(new Event("change", { bubbles: true }));
-    const enter = { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true };
-    current.dispatchEvent(new KeyboardEvent("keydown", enter));
-    current.dispatchEvent(new KeyboardEvent("keyup", enter));
-  }
-
   function duplicateTitles(modal, title) {
     return [...modal.querySelectorAll(
       '[data-testid="beast-core-modal-body"] > div[class*="index-module_container__"] > div[class*="index-module_title__"]',
@@ -192,8 +176,8 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     const item = heading && unique([...heading.parentElement.querySelectorAll(
       ':scope > div[class*="index-module_materialContainer__"] > div[class*="index-module_materialItem__"]',
     )].filter(visible));
-    const filename = item && unique([...item.querySelectorAll(':scope > div[class*="index-module_materialName__"]')].filter(visible));
-    return clean(filename?.innerText || filename?.textContent);
+    const label = item && unique([...item.querySelectorAll(':scope > div[class*="index-module_materialName__"]')].filter(visible));
+    return clean(label?.innerText || label?.textContent);
   }
 
   async function settleUpload() {
@@ -203,14 +187,14 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     }
     const existing = new Set(previous.map(card => card.identity));
     const initialCount = Number.isInteger(baseline) ? baseline : selected(dialog)?.count;
-    const initialLibraryCount = materialLibraryCards(dialog).length;
     let cropped = false;
     let savedAt = 0;
     let refreshed = false;
     let closingList;
     let lastCard;
-    let duplicateViewed = false;
-    let duplicateCard;
+    let duplicateDismissed = false;
+    let duplicateLibraryReadyAt = 0;
+    const unverifiedDuplicate = () => fail("UPLOAD_DUPLICATE_UNVERIFIED", "已关闭重复上传提示，素材中心没有可唯一核对的同款图片。");
     const outcome = await waitFor(() => {
       if (picker() !== dialog) return fail("MODAL_BLOCKED", "处理上传时素材中心已切换。");
       const alert = [...document.querySelectorAll('[role="alert"],[data-testid*="toast" i],[class*="Toast_content"]')]
@@ -226,19 +210,20 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       if (extra.some(node => ![crop, upload, duplicate].some(owned => owned && (node === owned || node.contains(owned))))) {
         return fail("MODAL_BLOCKED", "上传时出现了无法识别的 Temu 弹窗。");
       }
-      if (duplicate && duplicate !== dialog && duplicate !== known && !duplicateViewed) {
+      if (duplicate && duplicate !== dialog && duplicate !== known && !duplicateDismissed) {
         const filename = duplicateFilename(duplicate, duplicateTitle);
         const sameFile = filename && (localFilename ? filename === localFilename : filename.replace(/\.(?:jpe?g|png|webp)$/iu, "") === name);
-        const view = enabledButton(duplicate, "在列表中查看");
-        if (!sameFile || !view || !Number.isInteger(initialCount) || selected(dialog)?.count !== initialCount) {
+        const footer = unique([...duplicate.querySelectorAll(':scope > div[class*="MDL_bottom_"]')].filter(visible));
+        const close = footer && enabledButton(footer, "关闭");
+        if (!sameFile || !close || !Number.isInteger(initialCount) || selected(dialog)?.count !== initialCount) {
           return fail("UPLOAD_UNVERIFIED", "Temu 的重复素材提示与本次上传的文件不一致。");
         }
-        duplicateViewed = true;
+        duplicateDismissed = true;
         lastCard = null;
-        view.click();
+        close.click();
         return null;
       }
-      if (crop && crop !== dialog && crop !== known && !cropped) {
+      if (crop && crop !== dialog && crop !== known && !cropped && !duplicateDismissed) {
         const confirm = enabledButton(crop, "确认裁剪");
         if (confirm) {
           cropped = true;
@@ -247,7 +232,7 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
         return null;
       }
       const saveArea = crop || upload;
-      if (saveArea && saveArea !== dialog && saveArea !== known && !savedAt) {
+      if (saveArea && saveArea !== dialog && saveArea !== known && !savedAt && !duplicateDismissed) {
         const save = enabledButton(saveArea, "保存");
         if (save) {
           savedAt = Date.now();
@@ -265,25 +250,19 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
         lastCard = null;
         return null;
       }
-      if (duplicateViewed) {
-        const filter = materialFilter(dialog);
-        const count = selected(dialog)?.count;
-        if (count > initialCount + 1) return fail("UPLOAD_UNVERIFIED", "重复素材导致选择数变化，无法核对图片槽位。");
-        if (count !== initialCount + 1) return null;
-        if (duplicateCard) {
-          const clearedFilter = filter || materialFilter(dialog, "请输入素材名称");
-          if (!clearedFilter || clearedFilter.value || initialLibraryCount > 1 && materialLibraryCards(dialog).length < 2) return null;
-          return { ok: true, duplicate: true, card: duplicateCard };
+      if (duplicateDismissed) {
+        duplicateLibraryReadyAt ||= Date.now();
+        const timedOut = Date.now() - duplicateLibraryReadyAt >= 1200;
+        if (selected(dialog)?.count !== initialCount) {
+          lastCard = null;
+          return timedOut ? fail("UPLOAD_UNVERIFIED", "关闭重复素材提示后，无法核对原有图片选择。") : null;
         }
-        const id = clean(filter?.value);
-        if (!/^\d{1,25}$/u.test(id) || materialLibraryCards(dialog).length !== 1) return null;
-        const card = unique(mediaCards(dialog, true));
-        if (card && lastCard?.materialId === id && lastCard.identity === card.identity && lastCard.src === card.src) {
-          duplicateCard = receipt({ ...card, filename: name });
-          clearMaterialFilter(dialog, filter);
+        const card = unique(mediaCards(dialog, true).filter(card => card.libraryFilename === name));
+        if (card && card.identity === lastCard?.identity && card.src === lastCard?.src) {
+          return { ok: true, duplicate: true, card: receipt(card) };
         }
-        lastCard = card && { ...card, materialId: id };
-        return null;
+        lastCard = card;
+        return timedOut ? unverifiedDuplicate() : null;
       }
       const matches = mediaCards(dialog).filter(card => card.filename === name && !existing.has(card.identity) &&
         (card.libraryFilename === name || cropped && savedAt));
@@ -302,7 +281,7 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       }
       return null;
     }, 18000);
-    return outcome || fail("UPLOAD_PENDING", duplicateViewed ? "尚未核对重复素材的 ID、选中结果或搜索恢复。" :
+    return outcome || fail("UPLOAD_PENDING", duplicateDismissed ? "Temu 的重复素材提示或上传列表尚未关闭。" :
       closingList && isActiveUploadList(closingList) ? "素材中心的上传列表尚未关闭。" : "尚未核对到本次文件在素材中心生成的新图片。");
   }
 
