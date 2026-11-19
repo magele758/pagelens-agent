@@ -154,7 +154,7 @@ export function commercialPlan(copy, source) {
 const localizedColor = /^颜色$/;
 
 // Serialized by PageLens and executed in the seller editor.
-function commerceDom(localizedColor) {
+function skuDom() {
   const all = (selector, root = document) =>
     Array.from(root.querySelectorAll(selector));
   const field = (name) =>
@@ -200,24 +200,10 @@ function commerceDom(localizedColor) {
   }
   const numeric = (e) =>
     e?.value?.trim() ? Number(e.value.replaceAll(",", "")) : null;
-  const numberInput = (e) =>
-    e?.querySelector(
-      'input[role=spinbutton],input[placeholder]:not([placeholder=""])',
-    );
-  const names = () => byPrefix("sale_property.name");
   const options = () => byPrefix("sale_property.value.name");
   const optionLabels = (e) => [
     ...new Set(all(".pulse-input-tag-item", e).map(text).filter(Boolean)),
   ];
-  const axisLabels = e => {
-    const value = e.querySelector(".core-cascader-view-value,.pulse-overflow-text") || e;
-    const labels = all("span", value).filter(s => !s.children.length).map(text).filter(Boolean);
-    return labels.length ? labels : [text(value)];
-  };
-  const axisKey = label => norm(label).replace(localizedColor, "color");
-  const axisMatches = (e, axis) => axisLabels(e).some(label => axisKey(label) === axisKey(axis));
-  const brandValue = () =>
-    text(field("brand")?.querySelector(".core-select-view-value"));
   const rows = () =>
     byPrefix("skus.stock").map((e) => {
       const id = e.dataset.id.slice("product.publish.skus.stock.".length);
@@ -231,14 +217,25 @@ function commerceDom(localizedColor) {
         price: field("skus.sale_price." + id)?.querySelector("input"),
       };
     });
-  const skuRow = option => {
-    const tags = options().map(optionLabels).filter(labels => labels.some(label => norm(label) === norm(option)));
-    if (tags.length !== 1) throw Error("Cannot identify variant " + option);
-    const aliases = tags[0].map(norm);
-    const matches = rows().filter(row => aliases.includes(norm(row.label)));
-    if (matches.length !== 1) throw Error("Cannot identify SKU row " + option);
-    return matches[0];
+  return { all, field, byPrefix, text, norm, visible, wait, sleep, set, numeric, options, optionLabels, rows };
+}
+
+function commerceDom(ui, localizedColor) {
+  const { all, field, byPrefix, text, norm } = ui;
+  const numberInput = (e) =>
+    e?.querySelector(
+      'input[role=spinbutton],input[placeholder]:not([placeholder=""])',
+    );
+  const names = () => byPrefix("sale_property.name");
+  const axisLabels = e => {
+    const value = e.querySelector(".core-cascader-view-value,.pulse-overflow-text") || e;
+    const labels = all("span", value).filter(s => !s.children.length).map(text).filter(Boolean);
+    return labels.length ? labels : [text(value)];
   };
+  const axisKey = label => norm(label).replace(localizedColor, "color");
+  const axisMatches = (e, axis) => axisLabels(e).some(label => axisKey(label) === axisKey(axis));
+  const brandValue = () =>
+    text(field("brand")?.querySelector(".core-select-view-value"));
   const units = () =>
     text(field("package_weight")?.querySelector("[role=combobox]"));
   const lengthUnit = () =>
@@ -266,32 +263,7 @@ function commerceDom(localizedColor) {
     if (!field("brand") || !field("package_weight"))
       throw new Error("Select an available product category first");
   }
-  return {
-    all,
-    field,
-    text,
-    norm,
-    visible,
-    wait,
-    sleep,
-    set,
-    numeric,
-    numberInput,
-    names,
-    options,
-    optionLabels,
-    axisLabels,
-    axisMatches,
-    axisKey,
-    brandValue,
-    rows,
-    skuRow,
-    units,
-    lengthUnit,
-    weightFactor,
-    toGrams,
-    verifyEditor,
-  };
+  return { ...ui, numberInput, names, axisLabels, axisMatches, axisKey, brandValue, units, lengthUnit, weightFactor, toGrams, verifyEditor };
 }
 
 export async function sellerBrand(ui, brand) {
@@ -506,10 +478,17 @@ export function sellerRead(ui) {
   };
 }
 
-// Resolve the current row immediately before each trusted edit. Seller Center
-// may replace its numeric SKU IDs when an earlier input commits.
-export function locateSkuInput(ui, option, field, value, force = false) {
-  const input = ui.skuRow(option)[field === "stock" ? "stock" : "price"];
+// Seller Center can change numeric SKU IDs when an earlier input commits.
+function resolveSkuRow(ui, option) {
+  const { norm, options, optionLabels, rows } = ui;
+  const tags = options().map(optionLabels).map(labels => labels.map(norm)).filter(labels => labels.includes(norm(option)));
+  const matches = tags.length === 1 ? rows().filter(row => tags[0].includes(norm(row.label))) : [];
+  if (matches.length !== 1) throw Error("Cannot identify SKU row " + option);
+  return matches[0];
+}
+
+export function locateSkuInput(ui, resolve, option, field, value, force = false) {
+  const input = resolve(ui, option)[field === "stock" ? "stock" : "price"];
   if (!input || input.disabled || input.readOnly) throw Error("Cannot edit " + option + " " + field);
   if (!force && ui.numeric(input) === value) return null;
   input.scrollIntoView({ block: "center", inline: "center" });
@@ -538,22 +517,131 @@ export function locateSkuInput(ui, option, field, value, force = false) {
   return selector;
 }
 
-export async function setDraftSkuPrice(ui, option, baseline, target) {
-  const input = ui.skuRow(option).price;
-  if (!/^product\.publish\.skus\.sale_price\.[\w-]+$/.test(input?.closest("[data-id]")?.dataset.id))
-    throw Error("Unexpected SKU price control for " + option);
+function singleSkuBatch(ui) {
+  if (ui.rows().length !== 1) return null;
+  const selector = '[data-id="product.publish.skus.batch_edit';
+  const batches = ui.all(selector + '"]').filter(ui.visible);
+  if (batches.length !== 1 || !/^ *全部 *$/m.test(ui.text(batches[0]))) return null;
+  const [batch] = batches;
+  const prices = ui.all(selector + '.price"] input', batch);
+  const stocks = ui.all(selector + '.stock"] input', batch);
+  const buttons = ui.all("button", batch).filter(e => ui.visible(e) && ui.text(e) === "应用");
+  if (prices.length !== 1 || stocks.length !== 1 || buttons.length !== 1 || !ui.visible(prices[0])) return null;
+  return { price: prices[0], stock: stocks[0], apply: buttons[0] };
+}
+
+function validateInventory(before, after, current) {
+  if (![before, after].every(Number.isInteger) || after < 0 || after > Math.min(10, before)) throw Error("Invalid stock reduction");
+  if (current !== before && current !== after) throw Error("SKU stock changed before editing");
+}
+
+export async function setDraftSkuPrice(ui, resolve, singleBatch, validateStock, option, baseline, target, allowCap = false, inventory = null) {
+  const skuPrice = () => resolve(ui, option).price;
+  const stock = () => ui.numeric(resolve(ui, option).stock);
+  const checkStock = () => inventory && validateStock(inventory.before, inventory.after, stock());
+  const priceMatches = price => [baseline, target, price].includes(ui.numeric(skuPrice()));
+  const input = skuPrice();
+  if (!input) throw Error("Missing SKU price control");
+  checkStock();
+  const result = (priceMXN, maxPriceMXN) => ({ priceMXN, ...(maxPriceMXN && { maxPriceMXN }), ...(inventory && { stock: stock() }) });
   const current = ui.numeric(input);
-  if (current === target) return false;
+  if (current === target) return result(target);
   if (current !== baseline) throw Error("SKU price changed before editing " + option);
-  ui.set(input, target);
+  const batchControls = () => {
+    const controls = singleBatch(ui);
+    if (controls?.stock.value.trim() && ui.numeric(controls.stock) !== inventory?.after)
+      throw Error("Batch SKU stock must be empty or match requested stock");
+    return controls;
+  };
+  async function applyBatch(price) {
+    const controls = batchControls();
+    if (!controls) throw Error("Single-SKU batch controls changed");
+    if (inventory && ui.numeric(controls.stock) !== inventory.after) ui.set(controls.stock, inventory.after);
+    ui.set(batchControls()?.price, price);
+    const apply = await ui.wait(() => {
+      const controls = batchControls();
+      const button = controls?.apply;
+      return button && !button.disabled && button.getAttribute("aria-disabled") !== "true" &&
+        (!inventory || ui.numeric(controls.stock) === inventory.after) &&
+        ui.numeric(controls.price) === price && button;
+    }, "single SKU batch price", 6);
+    if (!priceMatches(price)) throw Error("SKU price changed before applying");
+    checkStock();
+    apply.click();
+  }
+  function maximum(priceInput) {
+    const pattern = /^价格不能超过\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)$/;
+    const limits = ui.all("span.text-critical-on-surface", priceInput.closest('[data-id^="product.publish.skus.sale_price."]'))
+      .filter(ui.visible).map(node => ui.text(node).match(pattern)).filter(Boolean);
+    if (limits.length > 1) throw Error("Ambiguous seller price maximum for " + option);
+    return limits.length ? Number(limits[0][1].replaceAll(",", "")) : null;
+  }
+  function observePrice(price, detectMaximum = false) {
+    const earliest = Date.now() + (detectMaximum ? 800 : 0);
+    let previousMatch = false;
+    return ui.wait(() => {
+      const field = skuPrice();
+      const limit = maximum(field);
+      if (detectMaximum && limit !== null) return { maxPriceMXN: limit };
+      const match = limit === null && ui.numeric(field) === price && (!inventory || !batch || stock() === inventory.after);
+      const settled = match && previousMatch && Date.now() >= earliest;
+      previousMatch = match;
+      return settled;
+    }, "price commit for " + option, 8);
+  }
+  const batch = batchControls();
+  if (batch) await applyBatch(target);
+  else ui.set(input, target);
+  const observed = await observePrice(target, allowCap);
+  const cap = observed.maxPriceMXN;
+  if (cap === undefined) return result(target);
+  if (!(cap >= baseline && cap < target) || maximum(skuPrice()) !== cap || !priceMatches(cap))
+    throw Error("Seller price maximum cannot be confirmed");
+  if (batch) await applyBatch(cap);
+  else ui.set(skuPrice(), cap);
+  await observePrice(cap);
+  return result(cap, cap);
+}
+
+export async function setDraftSkuStock(ui, resolve, singleBatch, validateStock, option, before, target) {
+  const row = () => resolve(ui, option);
+  const { price, stock } = row();
+  const originalPrice = ui.numeric(price);
+  const current = ui.numeric(stock);
+  validateStock(before, target, current);
+  if (current === target) return { stock: target };
+  if (!/^product\.publish\.skus\.stock\.[\w-]+$/.test(stock?.closest("[data-id]")?.dataset.id) ||
+      !Number.isFinite(originalPrice) || originalPrice <= 0) throw Error("Unexpected SKU stock or price control for " + option);
+  const batchControls = () => {
+    const controls = singleBatch(ui);
+    if (controls?.price.value.trim()) throw Error("Batch SKU price must be empty before applying stock");
+    if (controls?.stock.value.trim() && ui.numeric(controls.stock) !== target)
+      throw Error("Batch SKU stock differs from requested stock");
+    return controls;
+  };
+  const batch = batchControls();
+  ui.set(batch?.stock ?? stock, target);
+  if (batch) {
+    const apply = await ui.wait(() => {
+      const controls = batchControls();
+      const button = controls?.apply;
+      return button && !button.disabled && button.getAttribute("aria-disabled") !== "true" &&
+        ui.numeric(controls.stock) === target && button;
+    }, "single SKU batch stock", 6);
+    validateStock(before, target, ui.numeric(row().stock));
+    if (ui.numeric(row().price) !== originalPrice) throw Error("SKU price changed before applying stock");
+    apply.click();
+  }
   let previousMatch = false;
   await ui.wait(() => {
-    const match = ui.numeric(ui.skuRow(option).price) === target;
+    const { price, stock } = row();
+    if (ui.numeric(price) !== originalPrice) throw Error("Unexpected SKU price change while editing stock");
+    const match = ui.numeric(stock) === target;
     const settled = match && previousMatch;
     previousMatch = match;
     return settled;
-  }, "price commit for " + option, 6);
-  return true;
+  }, "stock commit for " + option, 8);
+  return { stock: target };
 }
 
 export async function sellerNumbers(ui, readState, mode, plan) {
@@ -628,18 +716,21 @@ export async function sellerNumbers(ui, readState, mode, plan) {
 // Each submission stays within PageLens's run_js source limit. Send only the
 // current batch of SKUs; provenance belongs in the local receipt.
 export function commerceScript(fn, ...args) {
-  const domSource = commerceDom.toString().replace(/^ *\/\/.*\n/gm, "");
+  const source = fn => fn.toString().replace(/^ *\/\/.*\n/gm, "");
+  const skuSource = "(" + source(skuDom) + ")()";
+  const draftMutation = fn === setDraftSkuPrice || fn === setDraftSkuStock;
+  const domSource = draftMutation ? skuSource : "(" + source(commerceDom) + ")(" + skuSource + "," + localizedColor + ")";
+  const helpers = draftMutation ? [resolveSkuRow, singleSkuBatch, validateInventory] :
+    fn === sellerNumbers ? [sellerRead] : fn === locateSkuInput ? [resolveSkuRow] : [];
   let code =
     "return await (" +
     fn.toString() +
-    ")((" +
-    domSource +
-    ")(" + localizedColor + ")," +
-    (fn === sellerNumbers ? "(" + sellerRead.toString() + ")," : "") +
+    ")(" + domSource + "," +
+    helpers.map(helper => "(" + source(helper) + "),").join("") +
     "..." +
     JSON.stringify(args) +
     ")";
-  if (code.length > 7700)
+  if (draftMutation || code.length > 7700)
     code = code
       .split("\n")
       .map((line) => line.trimStart())

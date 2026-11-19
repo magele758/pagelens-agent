@@ -79,6 +79,8 @@ const table = rows => `<h1>商品管理</h1><table><thead><tr><th>商品</th><th
   const request = { mode: "reprice_draft", sourceId: "1733781903228241493", draftId: productId,
     multiplier: 100, baselinePricesMXN: [{ label: "Silver / 1 piece", priceMXN: 120 }] };
   assert.deepEqual(mxSellerRequest(request), request);
+  assert.deepEqual(mxSellerRequest({ ...request, maxTotalStock: 10 }), { ...request, maxTotalStock: 10 });
+  assert.throws(() => mxSellerRequest({ ...request, maxTotalStock: 11 }), /stock limit/);
   assert.throws(() => mxSellerRequest({ ...request, multiplier: 1000 }), /multiplier/);
 }
 

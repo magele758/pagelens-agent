@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { JSDOM } from "jsdom";
 import { runMxDraftReprice } from "../native/mx-ptc-reprice.mjs";
+import { commerceScript, setDraftSkuPrice } from "./tiktok-mx-commerce.mjs";
+import { sellerVerification } from "./tiktok-mx-editor.mjs";
 
 const sourceId = "1738630710999877195";
 const draftId = "1738630710999877196";
@@ -11,6 +13,10 @@ const link = `https://seller.tiktokshopglobalselling.com/product/edit-draft/${dr
 const title = "Cuchilla para pan";
 const baselinePricesMXN = [{ label: "Silver / 1 piece", priceMXN: 120 }, { label: "Dorado", priceMXN: 9.99 }];
 const args = { sourceId, draftId, baselinePricesMXN, multiplier: 100 };
+const longPriceScript = commerceScript(setDraftSkuPrice, "A".repeat(80), 120, 12000, true, { before: 75, after: 10 });
+const guardLength = (`if(location.href!==${JSON.stringify(link)})throw Error('Wrong draft editor');` +
+  sellerVerification.toString() + "\nif(sellerVerification())throw Error('Seller verification is required');").length;
+assert.ok(guardLength + longPriceScript.length < 8000, "Long SKU labels must fit the guarded PageLens script");
 const original = [
   { label: "Silver / 1 piece", option: "Plata / 1 pza", stock: 0, priceMXN: 120 },
   { label: "Gold", option: "Dorado", stock: 3, priceMXN: 9.99 },
@@ -27,6 +33,12 @@ await fs.writeFile(listingFile, JSON.stringify(listing));
 function buildEditor(rows, documentEpoch) {
   const input = value => `<input role="spinbutton" value="${value}">`;
   const field = (id, value) => `<div data-id="product.publish.${id}">${value}</div>`;
+  const attribute = (name, id, options) => `<section>${name}\n<div><div><div>
+    <div role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="${id}">
+    <button class="core-select-view">${name}</button></div></div></div></div></section>
+    <ul id="${id}" hidden>${options.map(([label, selected]) =>
+      `<li role="option" aria-selected="${selected}">${label}</li>`).join("")}</ul>`;
+  const metal = documentEpoch % 2 ? "Stainless steel\nAcero inoxidable" : "Acero inoxidable\nStainless steel";
   const dom = new JSDOM(`<body>
     <input data-id="product.publish.product_name" value="${title}">
     <input data-id="product.publish.title.input_lang" value="Bread lame">
@@ -34,9 +46,15 @@ function buildEditor(rows, documentEpoch) {
     ${field("description.local_lang", '<div class="ProseMirror">Cuchilla</div>')}
     <div data-id="product.widget.main_image.0"><img src="/test.jpg"></div>
     ${field("brand", '<span class="core-select-view-value">Marca</span>')}
+    <div id="focus-status" role="combobox" aria-haspopup="dialog">Cargando ${documentEpoch}</div>
+    ${attribute("Material", "material", [[metal, true], ["Plastic\nPlástico", false]])}
+    ${attribute("Función", "function", [["Reusable\nReutilizable", persistedFunction]])}
     ${field("sale_property.name.1", '<span class="core-cascader-view-value">Color</span>')}
     ${rows.map(({ label, option }, id) => field("sale_property.value.name." + id,
       `<span class="pulse-input-tag-item">${label}</span><span class="pulse-input-tag-item">${option}</span>`)).join("")}
+    ${showBatch ? field("skus.batch_edit", `全部\n${field("skus.batch_edit.price", input(""))}
+      ${field("skus.batch_edit.stock", input(batchStock))}<button disabled>应用</button>`) : ""}
+    <span class="text-critical-on-surface">价格不能超过1</span>
     <table>${rows.toReversed().map(({ label, stock, priceMXN }, id) => `<tr data-label="${label}"><td>${label}</td>
       <td>${field("skus.stock." + id, input(stock))}</td><td>${field("skus.sale_price." + id, input(priceMXN))}</td></tr>`).join("")}</table>
     <button id="draft">另存为草稿</button><button id="publish">提交</button></body>`, { url: link, runScripts: "outside-only" });
@@ -44,43 +62,89 @@ function buildEditor(rows, documentEpoch) {
   Object.defineProperty(win.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
   Object.defineProperty(win.performance, "timeOrigin", { value: documentEpoch });
   win.HTMLElement.prototype.scrollIntoView = () => {};
+  win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
+  win.HTMLElement.prototype.getBoundingClientRect = function () { return { width: this.closest("[hidden]") ? 0 : 100 }; };
   return dom;
 }
 
 let persisted = structuredClone(original), dom, epoch = 0, open = false, clicks = 0, reloads = 0;
-let corruptStock = false, priceChangedAfterRead = false;
-const writes = [];
+let corruptStock = false, priceChangedAfterRead = false, changeFunctionBeforeSave = false;
+let persistedFunction = false, changeFunctionAfterSave = false;
+let showBatch = false, batchStock = "";
+const writes = [], batchApplies = [], batchStockApplies = [];
 function render() {
   dom?.window.close();
   dom = buildEditor(persisted, ++epoch);
   const doc = dom.window.document;
-  const priceInput = '[data-id*=".skus.sale_price."] input';
+  for (const box of doc.querySelectorAll('[role="combobox"][aria-haspopup="listbox"]')) {
+    const menu = doc.getElementById(box.getAttribute("aria-controls"));
+    box.querySelector("button").onclick = () => {
+      box.setAttribute("aria-expanded", String(menu.hidden));
+      menu.hidden = !menu.hidden;
+    };
+    for (const option of menu.querySelectorAll('[role="option"]'))
+      option.onclick = () => assert.fail("The repricing workflow must only read category options");
+  }
+  const batch = doc.querySelector('[data-id="product.publish.skus.batch_edit"]');
+  const batchPrice = batch?.querySelector('[data-id$=".batch_edit.price"] input');
+  const batchStockInput = batch?.querySelector('[data-id$=".batch_edit.stock"] input');
+  const apply = batch?.querySelector("button");
+  const skuInput = '[data-id*=".skus.sale_price."] input,[data-id*=".skus.stock."] input,[data-id*=".skus.batch_edit."] input';
+  let appliedPrice, appliedStock;
+  if (batch) apply.onclick = () => {
+    assert.equal(persisted.length, 1, "Batch mutation must never run on multiple SKUs");
+    if (batchStockInput.value !== "") {
+      appliedStock = Number(batchStockInput.value);
+      assert.ok(appliedStock <= persisted[0].stock, "Batch stock must never increase");
+      doc.querySelector('[data-id*=".skus.stock."] input').value = appliedStock;
+      batchStockApplies.push(appliedStock);
+    }
+    if (!batchPrice.value) return;
+    const input = doc.querySelector('[data-id*=".skus.sale_price."] input');
+    const price = Number(batchPrice.value.replaceAll(",", ""));
+    input.value = price.toLocaleString("en-US");
+    batchApplies.push(price);
+    const priceField = input.closest("[data-id]");
+    priceField.querySelector(".text-critical-on-surface")?.remove();
+    if (price > 4672.5) {
+      dom.window.setTimeout(() => priceField.insertAdjacentHTML("beforeend",
+        '<span class="break-normal text-critical-on-surface">价格不能超过\n4,672.5</span>'), 300);
+    } else appliedPrice = price;
+  };
   doc.addEventListener("input", event => {
-    assert.ok(event.target.matches(priceInput), "Only SKU price inputs may be edited");
+    assert.ok(event.target.matches(skuInput), "Only SKU price or stock inputs may be edited");
     event.target.dataset.proposed = event.target.value;
   });
   doc.addEventListener("keyup", event => {
-    if (event.target.matches(priceInput) && event.key === "Enter") event.target.dataset.commitKey = "Enter";
+    if (event.target.matches(skuInput) && event.key === "Enter") event.target.dataset.commitKey = "Enter";
   });
   doc.addEventListener("change", event => {
-    if (event.target.matches(priceInput)) event.target.dataset.changed = "true";
+    if (event.target.matches(skuInput)) event.target.dataset.changed = "true";
   });
   doc.addEventListener("blur", event => {
     const input = event.target;
-    if (!input.matches(priceInput) || !input.dataset.proposed) return;
+    if (!input.matches(skuInput) || !input.dataset.proposed) return;
     assert.equal(input.dataset.commitKey, "Enter");
     assert.equal(input.dataset.changed, "true");
     const price = input.dataset.proposed;
+    if (input === batchPrice || input === batchStockInput) {
+      input.value = Number(price).toLocaleString("en-US");
+      apply.disabled = false;
+      return;
+    }
     const label = input.closest("tr").dataset.label;
+    const field = input.closest("[data-id]").dataset.id.includes(".stock.") ? "stock" : "priceMXN";
     const replacement = input.cloneNode();
     replacement.removeAttribute("data-proposed");
-    replacement.value = persisted.find(row => row.label === label).priceMXN;
+    replacement.value = persisted.find(row => row.label === label)[field];
     input.replaceWith(replacement);
     // Restore the pre-edit value while seller state catches up with blur.
     dom.window.setTimeout(() => {
       replacement.value = price;
+      doc.querySelector("#focus-status").textContent = "Editando precio";
+      if (changeFunctionBeforeSave) doc.querySelector('#function [role="option"]').setAttribute("aria-selected", "true");
       for (const field of doc.querySelectorAll('[data-id*=".skus."]')) field.dataset.id += "-r";
-      writes.push({ label, price });
+      if (field === "priceMXN") writes.push({ label, price });
     }, 300);
   }, true);
   doc.querySelector("#publish").onclick = () => assert.fail("Repricing must never publish");
@@ -88,9 +152,17 @@ function render() {
     clicks++;
     for (const tr of doc.querySelectorAll("tbody tr")) {
       const row = persisted.find(row => row.label === tr.dataset.label);
-      row.priceMXN = Number(tr.querySelector('[data-id*="sale_price"] input').value);
+      if (batch && persisted.length === 1) {
+        // Direct row input appears changed, but only explicit batch Apply commits this flow.
+        if (appliedPrice !== undefined) row.priceMXN = appliedPrice;
+        if (appliedStock !== undefined) row.stock = appliedStock;
+      } else {
+        row.priceMXN = Number(tr.querySelector('[data-id*="sale_price"] input').value);
+        row.stock = Number(tr.querySelector('[data-id*=".skus.stock."] input').value);
+      }
     }
     if (corruptStock) persisted[0].stock++;
+    if (changeFunctionAfterSave) persistedFunction = true;
     doc.body.insertAdjacentHTML("beforeend", `<p role="alert">草稿保存成功<a href="${link}"></a></p>`);
   };
 }
@@ -157,10 +229,61 @@ try {
   assert.deepEqual([clicks, writes.length], [1, 2]);
 
   persisted = structuredClone(original);
+  changeFunctionBeforeSave = true;
+  await assert.rejects(runMxDraftReprice(args, hooks), /Category attribute Función changed before saving/);
+  assert.equal(clicks, 1);
+  changeFunctionBeforeSave = false;
+
+  changeFunctionAfterSave = true;
+  await assert.rejects(runMxDraftReprice(args, hooks), /Category attribute Función changed after refresh/);
+  assert.equal(clicks, 2);
+  changeFunctionAfterSave = false;
+  persistedFunction = false;
+
+  persisted = structuredClone(original);
   corruptStock = true;
   await assert.rejects(runMxDraftReprice(args, hooks), /Unexpected stock change/);
-  assert.equal(clicks, 2);
+  assert.equal(clicks, 3);
   assert.deepEqual(await readJson(listingFile), updated);
+
+  corruptStock = false;
+  showBatch = true;
+  persisted = [{ ...original[0], stock: 75 }];
+  const single = { ...args, baselinePricesMXN: baselinePricesMXN.slice(0, 1) };
+  const rowWrites = writes.length;
+  batchStock = "0";
+  await assert.rejects(runMxDraftReprice(single, hooks), /Batch SKU stock must be empty/);
+  assert.deepEqual(batchApplies, []);
+  assert.equal(clicks, 3);
+  batchStock = "";
+  const capped = await runMxDraftReprice(single, hooks);
+  assert.equal(capped.verified, true);
+  assert.equal(capped.prices[0].afterMXN, 4672.5);
+  assert.deepEqual(batchApplies, [12000, 4672.5]);
+  assert.equal(writes.length, rowWrites);
+  assert.deepEqual([persisted[0].priceMXN, persisted[0].stock, clicks], [4672.5, 75, 4]);
+
+  const cappedStock = await runMxDraftReprice({ ...single, maxTotalStock: 10 }, hooks);
+  assert.equal(cappedStock.savedTotalStock, 10);
+  assert.deepEqual(batchApplies, [12000, 4672.5]);
+  assert.deepEqual(batchStockApplies, [10]);
+  assert.deepEqual([persisted[0].priceMXN, persisted[0].stock], [4672.5, 10]);
+
+  persisted = [{ ...original[0], stock: 75 }];
+  const combined = await runMxDraftReprice({ ...single, maxTotalStock: 10 }, hooks);
+  assert.equal(combined.savedTotalStock, 10);
+  assert.deepEqual(batchApplies, [12000, 4672.5, 12000, 4672.5]);
+  assert.deepEqual(batchStockApplies, [10, 10, 10]);
+  assert.deepEqual([persisted[0].priceMXN, persisted[0].stock], [4672.5, 10]);
+
+  const savedStocks = [81, 19];
+  persisted = original.map((row, index) => ({ ...row, priceMXN: [12000, 999][index], stock: savedStocks[index] }));
+  const multiple = await runMxDraftReprice({ ...args, maxTotalStock: 10 }, hooks);
+  assert.equal(multiple.savedTotalStock, 10);
+  assert.deepEqual(persisted.map(row => row.stock), [8, 2]);
+  assert.ok(persisted.every((row, index) => row.stock <= savedStocks[index]));
+  assert.deepEqual(persisted.map(row => row.priceMXN), [12000, 999]);
+  assert.deepEqual(batchStockApplies, [10, 10, 10]);
   assert.ok(!(await fs.readdir(tmp)).some(name => name.endsWith(".lock")));
   console.log("MX draft repricing verified only exact SKU targets, readback, and idempotent retries");
 } finally {
