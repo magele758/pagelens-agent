@@ -153,3 +153,24 @@ test("leaves a changed or blocked page untouched", async t => {
   assert.equal((await run({ kind: "fill", input: { englishTitle: "Do not write" } })).code, "MODAL_BLOCKED");
   assert.deepEqual(received, []);
 });
+
+test("waits for linked controls, accepts visually hidden checkboxes and closes only the listing tip", async t => {
+  const { run, document, received } = fixture(t);
+  const sites = document.querySelector(".publish_site");
+  sites.hidden = true;
+  assert.equal((await run({ kind: "fill", input: { englishTitle: "Pending" } })).code, "EDITOR_NOT_READY");
+  assert.deepEqual(received, []);
+  sites.hidden = false;
+  sites.querySelector("input").hidden = true;
+  const tip = document.createElement("div");
+  tip.innerHTML = '<div>建议完善尺码数据</div><button>关闭</button>';
+  const unrelated = document.createElement("button");
+  unrelated.textContent = "关闭";
+  document.querySelector("main").append(tip, unrelated);
+  let dismissed = 0;
+  tip.querySelector("button").onclick = () => { dismissed++; tip.remove(); };
+  unrelated.onclick = () => { dismissed += 10; };
+  assert.equal((await run({ kind: "fill", input: { englishTitle: "Ready" } })).ok, true);
+  assert.equal(dismissed, 1);
+  assert.deepEqual(received, ["Ready"]);
+});

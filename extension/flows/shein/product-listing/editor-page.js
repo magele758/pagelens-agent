@@ -28,7 +28,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
   const pageMarkers = () => query(document, 'button,[role="button"]').some(node => text(node) === "发布商品") &&
     query(document, 'button,[role="button"]').some(node => text(node) === "保存草稿");
   const fullEditor = () => query(document, '[class*="specContentRow--"]').length > 0 &&
-    query(document, '.so-form-item.publish_site input[type="checkbox"]').length > 0;
+    query(document, '.so-form-item.publish_site').some(area => area.querySelector('input[type="checkbox"]'));
   const blocked = () => query(document, modal).length > 0;
   const categorySelector = '[class*="spmp_style__commodityCategoryItem--"] [class*="spmp_style__categoryInfo--"]';
   const readCategoryPath = () => text(one(query(document, categorySelector))).split(/\s*>\s*/u).filter(Boolean);
