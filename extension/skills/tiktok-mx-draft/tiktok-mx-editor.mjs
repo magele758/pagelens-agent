@@ -142,6 +142,7 @@ async function categorySearchOperation() {
     const control = document.querySelector("#product-cascader-select-view");
     if (!control?.getClientRects().length) throw Error("Draft category selector unavailable");
     const current = control.innerText.trim();
+    control.scrollIntoView?.({ block: "nearest" });
     if (!repairCategoryInput(control)) control.click();
     for (let i = 0; i < 25; i++) {
       guard();

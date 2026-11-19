@@ -110,10 +110,16 @@ export async function repairHostedDraft(parameters, request, planners = {}) {
       if (!terms.length) throw Error("A category search term is required");
       const paths = new Map();
       async function search(term) {
-        await browser(repairCategorySearchCode(link));
-        const reply = await inEditor("trusted_type", { value: term });
-        if (!reply?.ok) throw Error(reply?.error || "Seller category search failed");
-        return (await browser("await new Promise(resolve=>setTimeout(resolve,100));\n" + repairCategoryOptionsCode(link))).choices;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await browser(repairCategorySearchCode(link));
+          const reply = await inEditor("trusted_type", { value: term });
+          if (!reply?.ok) throw Error(reply?.error || "Seller category search failed");
+          try {
+            return (await browser("await new Promise(resolve=>setTimeout(resolve,100));\n" + repairCategoryOptionsCode(link))).choices;
+          } catch (error) {
+            if (attempt === 1 || !/Search the current draft category before reading choices/.test(error.message)) throw error;
+          }
+        }
       }
       for (const term of terms)
         for (const label of await search(term)) if (!paths.has(label)) paths.set(label, term);

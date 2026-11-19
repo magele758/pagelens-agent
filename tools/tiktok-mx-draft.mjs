@@ -481,15 +481,8 @@ async function createDraft(url, rate) {
     const preselectPromise = (!previous && !controls?.category?.label && pendingPreflight)
       ? (async () => {
           const [tab, searchRes] = await Promise.all([pendingPreflight, categorySearchQuery(facts)]);
-          let tempCopy = { category: { searches: [searchRes.query], search: searchRes.query } };
-          let selected;
-          try {
-            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
-          } catch (error) {
-            if (/verification|验证/i.test(error.message) || searchRes.queries.length < 2) throw error;
-            tempCopy = { category: { searches: searchRes.queries.slice(1), search: searchRes.queries[1] } };
-            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
-          }
+          const tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
+          const selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
           let catalog = null;
           let attrDecision = Promise.resolve(null);
           try {
@@ -774,14 +767,25 @@ export async function resolveCategory(tab, url, source, copy, dir, persistListin
   const searched = [];
   let lastTerm = null;
   let lastChoices = [];
+  const searchOnce = async term => {
+    await runCode(tab, sellerCategorySearchCode(url));
+    const typed = await bridge("trusted_type", { tabId: tab, value: term });
+    if (!typed?.ok) throw Error("Seller category search failed");
+    return runCode(tab, sellerCategoryOptionsCode(url));
+  };
+  const searchAndRead = async term => {
+    try {
+      return await searchOnce(term);
+    } catch (error) {
+      if (!/Search the current draft category before reading choices/.test(error.message)) throw error;
+      return searchOnce(term);
+    }
+  };
   const searchTerms = async list => {
     for (const term of list) {
       if (searched.includes(term)) continue;
       searched.push(term);
-      await runCode(tab, sellerCategorySearchCode(url));
-      const typed = await bridge("trusted_type", { tabId: tab, value: term });
-      if (!typed?.ok) throw Error("Seller category search failed");
-      const menu = await runCode(tab, sellerCategoryOptionsCode(url));
+      const menu = await searchAndRead(term);
       lastTerm = term;
       lastChoices = menu.choices || [];
       for (const label of lastChoices) {
@@ -801,12 +805,21 @@ export async function resolveCategory(tab, url, source, copy, dir, persistListin
   const hit = paths.get(categoryPath(choice.label));
   let selected;
   if (hit) {
-    if (lastTerm !== hit.term || !lastChoices.some(label => categoryPath(label) === categoryPath(choice.label))) {
-      await runCode(tab, sellerCategorySearchCode(url));
-      const typed = await bridge("trusted_type", { tabId: tab, value: hit.term });
-      if (!typed?.ok) throw Error("Seller category search failed");
+    const applyChoice = async forceReopen => {
+      if (forceReopen || lastTerm !== hit.term || !lastChoices.some(label => categoryPath(label) === categoryPath(choice.label))) {
+        await runCode(tab, sellerCategorySearchCode(url));
+        const typed = await bridge("trusted_type", { tabId: tab, value: hit.term });
+        if (!typed?.ok) throw Error("Seller category search failed");
+      }
+      return runCode(tab, sellerCategoryOptionsCode(url, choice.label));
+    };
+    let applied;
+    try {
+      applied = await applyChoice(false);
+    } catch (error) {
+      if (!/Search the current draft category before reading choices/.test(error.message)) throw error;
+      applied = await applyChoice(true);
     }
-    const applied = await runCode(tab, sellerCategoryOptionsCode(url, choice.label));
     selected = {
       selected: categoryPath(applied.choice) === categoryPath(choice.label),
       label: choice.label,

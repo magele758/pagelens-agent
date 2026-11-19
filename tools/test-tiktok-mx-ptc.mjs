@@ -910,6 +910,32 @@ await assert.rejects(categorySearchQuery(source, async () => '{"query":"egg brus
     assert.equal(resolved.selected, true);
     assert.equal(mockCopy.category.search, "蛋");
     assert.deepEqual(typedCalls.map(c => c.value), ["蛋", "厨具", "蛋"]);
+
+    // Transient popup blur on initial CDP attach should retry once cleanly.
+    let blurReads = 0;
+    const retryCopy = { category: { searches: ["蛋"] } };
+    draft.setDraftBridgeForTests(async (tool, args) => {
+      if (tool === "trusted_type") {
+        activeTerm = args.value;
+        return { ok: true };
+      }
+      if (tool === "run_js") {
+        if (args.code.includes("应用")) return { ok: true, result: [] };
+        if (args.code.includes("Draft category search did not open")) return { ok: true, result: { selector: "focused" } };
+        if (args.code.includes("Expected a full category path")) {
+          if (args.code.endsWith('("厨具 - 厨房用具与小工具 - 蛋类料理工具")'))
+            return { ok: true, result: { choice: "厨具 - 厨房用具与小工具 - 蛋类料理工具" } };
+          if (blurReads++ === 0) throw Error("Search the current draft category before reading choices");
+          return { ok: true, result: { choices: menuByTerm[activeTerm] || [] } };
+        }
+      }
+      throw Error("Unexpected bridge tool in resolveCategory retry test: " + tool);
+    });
+    const retried = await draft.resolveCategory(9, createUrl, source, retryCopy, catDir, false, {
+      chooseCategory: async (_s, candidates) => ({ choice: { label: candidates[0] }, ptc: { ok: true } }),
+    });
+    assert.equal(retried.selected, true);
+    assert.equal(blurReads, 2);
   } finally {
     draft.setDraftBridgeForTests(null);
   }
@@ -930,6 +956,8 @@ const material = [{ name: "材质", options: ["Glass\nVidrio", "Metal"] }, { nam
 const select = fields => chooseAttributes({ title: "Glass jar" }, material, async () => JSON.stringify({ fields }));
 const picked = await select([{ index: 0, evidence: "Glass" }, { index: null, evidence: null }]);
 assert.deepEqual(picked.values, { 材质: ["Glass\nVidrio"], 风格: [] });
+const pickedArrayEvidence = await select([{ index: 0, evidence: ["Glass"] }, { index: null, evidence: null }]);
+assert.deepEqual(pickedArrayEvidence.values, { 材质: ["Glass\nVidrio"], 风格: [] });
 await assert.rejects(select([{ index: 1, evidence: "Steel" }, {index:null}]), /Unsupported attribute/);
 await assert.rejects(select([{ index: 5, evidence: "Glass" }, {index:null}]), /Unsupported attribute/);
 await assert.rejects(select([]), /Incomplete attribute/);
