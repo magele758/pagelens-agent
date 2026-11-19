@@ -30,6 +30,7 @@ const tests = [
   "tools/test-tiktok-mx-reprice.mjs",
   "tools/test-tiktok-mx-orders.mjs",
   "tools/test-tiktok-mx-seller.mjs",
+  "tools/test-tiktok-mx-seller-delist.mjs",
 ];
 const help = `Usage:
   node tools/pagelens-dev-update.mjs test

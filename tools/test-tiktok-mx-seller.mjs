@@ -83,5 +83,17 @@ const table = rows => `<h1>商品管理</h1><table><thead><tr><th>商品</th><th
   assert.throws(() => mxSellerRequest({ ...request, maxTotalStock: 11 }), /stock limit/);
   assert.throws(() => mxSellerRequest({ ...request, multiplier: 1000 }), /multiplier/);
 }
+{
+  const base = "https://seller.tiktokshopglobalselling.com/product/edit/" + productId;
+  const editorUrl = base + "?__next_global_seller__=7494613388458952268&category_id=993800&field=undefined" +
+    "&global_seller_id=7494613388458952268&online=1&root_category_id=600024&seller_id=7494613388458952268&shop_region=MX&tab=5";
+  const request = { mode: "optimize_listing", productId, editorUrl, beforeTitle: "Título anterior", afterTitle: "Título nuevo" };
+  assert.deepEqual(mxSellerRequest(request), request);
+  assert.equal(mxSellerUrlAllowed(request, editorUrl), true);
+  for (const address of [editorUrl.replace(productId, otherId), editorUrl + "&shop_region=MX",
+    editorUrl + "&redirect=external", editorUrl.replace("shop_region=MX", "shop_region=JP")]) {
+    assert.throws(() => mxSellerRequest({ ...request, editorUrl: address }), /edit link/);
+  }
+}
 
 console.log("PASS exact product row, one-click submission, offer data and seller scope");
