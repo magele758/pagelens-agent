@@ -614,8 +614,14 @@ export function mxEditor(bridge, runCode, skuWrites) {
       await bridge("upload_file", { tabId: tab, selector, paths: details.slice(i, i + step) });
   }
   async function restoreDetails(tab, state, copy, details) {
-    if (state.captcha || !details.length || state.detailImages !== 0 || state.gallery !== copy.gallery.length)
+    if (state.captcha || !details.length || state.detailImages >= details.length || state.gallery !== copy.gallery.length)
       return state;
+    if (state.detailImages > 0) {
+      state = await runCode(tab, "for(let i=0;i<15;i++){const s=(" + formState.toString() +
+        ")(); if(s.detailImages >= " + details.length + " || s.detailImages === 0) return s; await new Promise(r=>setTimeout(r,200))} return (" + formState.toString() + ")()");
+      if (state.detailImages >= details.length) return state;
+    }
+    if (state.detailImages !== 0) return state;
     // Seller Center can replace the local description (including all its images)
     // when it translates the English text. Only restore a completely empty gallery.
     await uploadDetails(tab, copy, details);
