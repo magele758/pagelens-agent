@@ -419,8 +419,8 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
     name: "image-" + String(i + 1).padStart(2, "0") + ".jpg", url, reused: false,
   }));
   const downloadImages = async () => {
-    for (let i = 0; i < assets.length; i += 5) {
-      await Promise.all(assets.slice(i, i + 5).map(async asset => {
+    for (let i = 0; i < assets.length; i += 9) {
+      await Promise.all(assets.slice(i, i + 9).map(async asset => {
         const file = path.join(dir, asset.name);
         const cacheFile = path.join(cacheDir, assetKey(asset.url) + ".jpg");
         const previous = priorSource?.assets.find(a => a.url === asset.url);
@@ -467,15 +467,43 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
 
 async function createDraft(url, rate) {
   await assertSourceCanBeCreated(sourceId(url));
-  const { generateListing, matchingPlan } = await import("./tiktok-mx-ptc.mjs");
-  let generated, initialList;
+  const { generateListing, matchingPlan, categorySearchQuery, chooseAttributes } = await import("./tiktok-mx-ptc.mjs");
+  const { confirmedControls } = await import("./tiktok-mx-flows.mjs");
+  let generated, initialList, preselected;
   const dir = await prepare(url, false, tab => {
     pendingPreflight = openCreateForm(tab);
     pendingPreflight.catch(() => {});
   }, async (facts, dir) => {
     const previous = await matchingPlan(facts);
+    const controls = previous ? null : await confirmedControls(facts);
     mark("generationStarted");
-    generated = await generateListing(facts, previous, rate, undefined, Boolean(previous));
+    const listingPromise = generateListing(facts, previous, rate, undefined, Boolean(previous));
+    const preselectPromise = (!previous && !controls?.category?.label && pendingPreflight)
+      ? (async () => {
+          const [tab, searchRes] = await Promise.all([pendingPreflight, categorySearchQuery(facts)]);
+          const tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
+          const selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+          let catalog = null;
+          let attrDecision = Promise.resolve(null);
+          try {
+            await supplement(tab, { attributes: {} });
+            catalog = await runCode(tab, attributeCode(createUrl));
+            if (catalog.length) {
+              attrDecision = chooseAttributes(facts, catalog, undefined, {});
+              attrDecision.catch(() => {});
+            }
+          } catch (error) {
+            console.error("Preselect attributes fallback: " + error.message);
+          }
+          mark("preselectReady");
+          return { selected, category: tempCopy.category, catalog, attrDecision };
+        })().catch(error => {
+          console.error("Preselect fallback: " + error.message);
+          return null;
+        })
+      : Promise.resolve(null);
+    [generated, preselected] = await Promise.all([listingPromise, preselectPromise]);
+    if (preselected?.category?.label) generated.copy.category = preselected.category;
     mark("generationReady");
     initialList = listDrafts(group.tabs.get(drafts), generated.copy.title, null);
     initialList.catch(() => {});
@@ -486,7 +514,7 @@ async function createDraft(url, rate) {
   commercialPlan(generated.copy, data);
   await write(path.join(dir, "listing.json"), generated.copy);
   mark("planReady");
-  await save(dir, false, false, null, null, null, tab, false, initialList);
+  await save(dir, false, false, null, null, null, tab, false, initialList, preselected);
   return dir;
 }
 
@@ -711,34 +739,76 @@ async function readSaved(tab, link, copy, plan, attempts, repairProse = false) {
 }
 const categoryPath = value => String(value || "").trim().replace(/\s+/g, " ").replace(/\s*>\s*|\s+[-/]\s+/g, "/");
 
-export async function resolveCategory(tab, url, source, copy, dir) {
+export async function resolveCategory(tab, url, source, copy, dir, persistListing = true, planners = {}) {
   const suggestions = () => js(tab, expected => {
     if (location.href !== expected) throw Error("Draft changed during category selection");
     return [...new Set([...document.querySelectorAll("button")].filter(b => b.innerText.trim() === "应用" &&
       !b.disabled && b.getClientRects().length).map(b => b.parentElement.parentElement.innerText.replace(/\s*应用\s*$/, "").trim())
       .filter(path => path.split(/\s+[>/-]\s+/).length >= 3))];
   }, url);
-  const { chooseCategory, categorySearchQuery } = await import("./tiktok-mx-ptc.mjs");
-  const planned = copy.category?.search?.trim();
-  const query = planned && [...planned].length === 1 && /\p{Script=Han}/u.test(planned)
-    ? planned : (await categorySearchQuery(source)).query;
-  const opened = await runCode(tab, sellerCategorySearchCode(url));
-  const typed = await bridge("trusted_type", { tabId: tab, selector: opened.selector, clear: true, value: query });
-  if (!typed?.ok) throw Error("Seller category search failed");
-  const menu = await runCode(tab, sellerCategoryOptionsCode(url));
-  const candidates = [...new Set([...(await suggestions()), ...(menu.choices || [])])];
-  if (!candidates.length) throw Error("Seller offered no category candidates for " + query);
-  const { choice, ptc } = await chooseCategory(source, candidates);
-  choice.search = query;
-  const inMenu = (menu.choices || []).some(label => categoryPath(label) === categoryPath(choice.label));
-  const selected = inMenu
-    ? await runCode(tab, sellerCategoryOptionsCode(url, choice.label)).then(applied => ({
-        selected: categoryPath(applied.choice) === categoryPath(choice.label), label: choice.label, shown: applied.choice,
-      }))
-    : await category(tab, choice);
+  const { chooseCategory, categorySearchQuery, hanCategoryTerm } = await import("./tiktok-mx-ptc.mjs");
+  const choose = planners.chooseCategory ?? chooseCategory;
+  const queryWorker = planners.categorySearchQuery ?? categorySearchQuery;
+  const candidateTerms = list => [...new Set((Array.isArray(list) ? list : [])
+    .map(term => (typeof term === "string" ? term.trim() : ""))
+    .filter(term => hanCategoryTerm.test(term)))].slice(0, 3);
+  const planned = candidateTerms(copy.category?.searches?.length ? copy.category.searches : [copy.category?.search]);
+  let usedQueryWorker = Boolean(copy.category?.searches?.length && planned.length);
+  let terms = planned;
+  if (!terms.length) {
+    terms = (await queryWorker(source)).queries;
+    usedQueryWorker = true;
+  }
+  const paths = new Map();
+  const searched = [];
+  let lastTerm = null;
+  let lastChoices = [];
+  const searchTerms = async list => {
+    for (const term of list) {
+      if (searched.includes(term)) continue;
+      searched.push(term);
+      await runCode(tab, sellerCategorySearchCode(url));
+      const typed = await bridge("trusted_type", { tabId: tab, value: term });
+      if (!typed?.ok) throw Error("Seller category search failed");
+      const menu = await runCode(tab, sellerCategoryOptionsCode(url));
+      lastTerm = term;
+      lastChoices = menu.choices || [];
+      for (const label of lastChoices) {
+        const key = categoryPath(label);
+        if (!paths.has(key)) paths.set(key, { label, term });
+      }
+    }
+  };
+  await searchTerms(terms.slice(0, 3));
+  if (!paths.size && !usedQueryWorker) {
+    const fallback = await queryWorker(source);
+    await searchTerms(fallback.queries);
+  }
+  const candidates = [...new Set([...(await suggestions()), ...[...paths.values()].map(entry => entry.label)])];
+  if (!candidates.length) throw Error("Seller offered no category candidates for " + searched.join(", "));
+  const { choice, ptc } = await choose(source, candidates);
+  const hit = paths.get(categoryPath(choice.label));
+  let selected;
+  if (hit) {
+    if (lastTerm !== hit.term || !lastChoices.some(label => categoryPath(label) === categoryPath(choice.label))) {
+      await runCode(tab, sellerCategorySearchCode(url));
+      const typed = await bridge("trusted_type", { tabId: tab, value: hit.term });
+      if (!typed?.ok) throw Error("Seller category search failed");
+    }
+    const applied = await runCode(tab, sellerCategoryOptionsCode(url, choice.label));
+    selected = {
+      selected: categoryPath(applied.choice) === categoryPath(choice.label),
+      label: choice.label,
+      shown: applied.choice,
+    };
+    choice.search = hit.term;
+  } else {
+    choice.search = searched[0] || terms[0];
+    selected = await category(tab, choice);
+  }
   if (!selected.selected) throw Error("Recommended category did not persist: " + choice.label);
   copy.category = choice;
-  await write(path.join(dir, "listing.json"), copy);
+  if (persistListing) await write(path.join(dir, "listing.json"), copy);
   await write(path.join(dir, "category-generation.json"), ptc);
   return selected;
 }
@@ -811,6 +881,7 @@ export async function save(
   preparedForm = null,
   replaceClosed = false,
   initialList = null,
+  preselected = null,
 ) {
   const data = fresh || (await read(path.join(dir, "source.json"))),
     copy = revised || (await read(path.join(dir, "listing.json")));
@@ -969,6 +1040,7 @@ export async function save(
         await write(path.join(dir, "gallery-checkpoint.json"), galleryCheckpoint);
         return current;
       };
+      let verifiedCreateCatalog = null;
       if (!checkpoint?.gallery && !checkpoint?.detailImages) {
         try {
           const result = await fillPage(tab, createUrl, copy, plan, gallery, details);
@@ -979,7 +1051,26 @@ export async function save(
             await commercialState(tab, plan, true);
             result.state = await js(tab, formState);
           }
-          if (cat?.selected) await ensureAttributes(tab, createUrl, result.state, data, copy, dir);
+          if (cat?.selected && preselected?.catalog &&
+              categoryPath(preselected.category?.label) === categoryPath(cat.shown)) {
+            result.state.attributeCatalog = preselected.catalog;
+            const decided = await preselected.attrDecision?.catch?.(() => null);
+            if (decided && !copy.attributePlan && compatibleAttributePlan({
+              category: result.state.category || cat.shown,
+              values: decided.values,
+            }, result.state.category || cat.shown, preselected.catalog)) {
+              copy.attributePlan = {
+                category: result.state.category || cat.shown,
+                values: decided.values,
+              };
+              await write(path.join(dir, "attribute-generation.json"), decided.ptc);
+              await write(path.join(dir, "listing.json"), copy);
+            }
+          }
+          if (cat?.selected) {
+            await ensureAttributes(tab, createUrl, result.state, data, copy, dir);
+            verifiedCreateCatalog = result.state.attributeCatalog ?? null;
+          }
           checkpoint = null;
         } catch (error) {
           if (error.message.includes("Seller readback differs") && (checkpoint = await recordGalleryPrefix())) {
@@ -1019,6 +1110,7 @@ export async function save(
           await supplement(tab, { attributes: {} });
           await commercialState(tab, plan, true);
           await ensureAttributes(tab, createUrl, checkpoint, data, copy, dir);
+          verifiedCreateCatalog = checkpoint.attributeCatalog ?? null;
         }
       }
       try {
@@ -1031,7 +1123,7 @@ export async function save(
         const differences = commercialDifferences(ready.salesAndShipping, plan);
         if (differences.length) throw Error("Commercial fields differ before saving: " + differences.join(", "));
         if (ready.hasCategoryAttributes || copy.attributePlan)
-          ready.attributeCatalog = await runCode(tab, attributeCode(createUrl));
+          ready.attributeCatalog = verifiedCreateCatalog ?? await runCode(tab, attributeCode(createUrl));
         checkDraftAttributes(copy, ready, { exact: true });
       } catch (error) {
         await write(resultFile, { ...pending, fillError: error.message });

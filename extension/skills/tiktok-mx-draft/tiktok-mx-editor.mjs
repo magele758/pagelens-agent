@@ -143,18 +143,24 @@ async function categorySearchOperation() {
     if (!control?.getClientRects().length) throw Error("Draft category selector unavailable");
     const current = control.innerText.trim();
     if (!repairCategoryInput(control)) control.click();
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 25; i++) {
       guard();
       const field = repairCategoryInput(control);
       if (field) {
         field.input.focus({ preventScroll: true });
         if (document.activeElement === field.input) {
+          if (field.input.value) {
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field.input, "");
+            field.input.dispatchEvent(new Event("input", { bubbles: true }));
+            field.input.focus({ preventScroll: true });
+            field.input.select();
+          }
           document.querySelectorAll("[data-pagelens-category-search]").forEach(node => node.removeAttribute("data-pagelens-category-search"));
           field.input.setAttribute("data-pagelens-category-search", "1");
           return { selector: '[data-pagelens-category-search="1"]', current };
         }
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 80));
     }
     throw Error("Draft category search did not open");
 }
@@ -183,17 +189,21 @@ async function categoryOptionsOperation(wanted) {
         throw Error("Search the current draft category before reading choices");
       const owner = field.input.closest('[role="combobox"]');
       const controlId = field.input.getAttribute("aria-controls") || owner?.getAttribute("aria-controls");
-      const panel = controlId && document.getElementById(controlId);
-      return [...(panel || document).querySelectorAll(".core-cascader-list-search-item")]
+      const panel = (controlId && document.getElementById(controlId)) ||
+        [...document.querySelectorAll(".core-cascader-panel,.arco-cascader-list")].find(shown);
+      const entries = [...(panel || document).querySelectorAll(".core-cascader-list-search-item")]
         .filter(shown).map(row => ({ row, label: label(row), disabled: Boolean(disabled(row)) }))
         .filter(entry => entry.label);
+      const empty = Boolean(panel && /暂无数据|无匹配|No results|Sin resultados/i.test(panel.innerText || ""));
+      return { entries, empty };
     };
     if (wanted !== null && !fullPath(wanted)) throw Error("Expected a full category path");
     let entries = [];
-    const pause = () => new Promise(resolve => setTimeout(resolve, 150));
-    for (let i = 0; i < 24; i++) {
-      entries = search();
-      if (wanted === null ? entries.length : entries.some(entry => normalize(entry.label) === normalize(wanted))) break;
+    const pause = () => new Promise(resolve => setTimeout(resolve, 60));
+    for (let i = 0; i < 40; i++) {
+      const scan = search();
+      entries = scan.entries;
+      if (wanted === null ? (entries.length || (i >= 4 && scan.empty)) : entries.some(entry => normalize(entry.label) === normalize(wanted))) break;
       await pause();
     }
     const choices = [...new Set(entries.filter(entry => !entry.disabled).map(entry => entry.label))];
@@ -206,7 +216,7 @@ async function categoryOptionsOperation(wanted) {
     guard();
     match.row.click();
     let confirmed = false;
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 50; i++) {
       guard();
       const dialog = [...document.querySelectorAll('[role="dialog"]')].find(node =>
         shown(node) && node.innerText.includes("更改商品类目") && node.innerText.includes("属性信息将被清除"));
@@ -247,8 +257,8 @@ export function saveDraftCode(expectedUrl = null) {
     observer.observe(document.body, { childList: true, subtree: true });
     try {
       button.click();
-      for (let i = 0; i < 18 && !message; i++)
-        await new Promise(resolve => setTimeout(resolve, 150));
+      for (let i = 0; i < 45 && !message; i++)
+        await new Promise(resolve => setTimeout(resolve, 60));
       return { message, url: savedLink || location.href };
     } finally {
       observer.disconnect();
@@ -347,7 +357,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
           return readSelection();
         }
         control.click();
-        await pause(300);
+        await pause(120);
         const input = document.querySelector("input.core-cascader-view-input");
         if (!input)
           return { selected: false, reason: "Category search unavailable" };
@@ -356,8 +366,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
           "value",
         ).set.call(input, search);
         input.dispatchEvent(new Event("input", { bubbles: true }));
-        for (let i = 0; i < 18; i++) {
-          await pause(250);
+        for (let i = 0; i < 8; i++) {
+          await pause(120);
           const items = [...document.querySelectorAll("li[role=menuitem]")];
           const option = items.find(
             (e) => norm(e.title || e.innerText) === norm(label),
@@ -517,7 +527,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (src && copy.enTitle) {
       set(src, copy.enTitle);
       desc("product.publish.description.input_lang", copy.enDescription);
-      await pause(1600);
+      await pause(600);
     }
     set(
       document.querySelector('[data-id="product.publish.product_name"]'),

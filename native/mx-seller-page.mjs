@@ -206,7 +206,7 @@ export function editorSubmitCode(url, labels) {
       throw Error("Seller submit control is missing, disabled or ambiguous");
     const previous = new Set(feedback().map(normalize));
     controls[0].click();
-    for (let attempt = 0; attempt < 24; attempt++) {
+    for (let attempt = 0; attempt < 30; attempt++) {
       if (sellerVerification()) return { verificationRequired: true };
       const dialog = dialogs().map(normalize).join(" ").slice(0, 350);
       if (dialog) return { dialog };
@@ -217,7 +217,9 @@ export function editorSubmitCode(url, labels) {
           .map(link => link.href);
         return { messages, url: location.href, productLinks };
       }
-      await new Promise(resolve => setTimeout(resolve, 200));
+      if (attempt >= 4 && !controls[0].isConnected && !dialogs().length)
+        return { messages: [], url: location.href, productLinks: [] };
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
     return { messages: [], url: location.href };
   };

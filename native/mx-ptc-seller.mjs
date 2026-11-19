@@ -90,13 +90,23 @@ function returnedProductId(signal, draftId) {
 }
 
 async function waitForListing(send, productId) {
-  let current;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    current = await refreshedProduct(send, productId).catch(error => ({ error: error.message }));
-    if (releasedStatus(current.status)) break;
-    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1500));
-  }
-  return current;
+  const url = mxManageUrl + "&tab=all";
+  const readCode = sellerListCode(url, productId);
+  return withSellerTab(send, url, async call => {
+    let current;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        current = attempt === 0
+          ? (await call("run_js", { code: readCode })).result
+          : await readFreshDocument(url, call, readCode);
+      } catch (error) {
+        current = { error: error.message };
+      }
+      if (releasedStatus(current?.status)) break;
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return current;
+  }).catch(error => ({ error: error.message }));
 }
 
 async function publishDraft(send, { sourceId, draftId, offer }) {
