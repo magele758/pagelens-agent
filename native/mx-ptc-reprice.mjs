@@ -214,7 +214,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       const maxPriceMXN = caps.get(row.label);
       return { ...row, planLabel: row.label, requestedMXN: row.afterMXN, afterMXN: maxPriceMXN ?? row.afterMXN, maxPriceMXN };
     });
-    tab = await group.open(link, [], false);
+    tab = await group.open(link, [], true);
     await group.waitForUrl(tab, link);
     const before = await readFreshDocument(link, inEditor, snapshot);
     if (before.url !== link || before.captcha || before.title !== copy.title)

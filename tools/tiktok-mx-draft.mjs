@@ -53,12 +53,15 @@ async function bridge(tool, args) {
   if (bridgeOverride) return bridgeOverride(tool, args);
   return inbox(tool, { action: "bridge_call", request: { tool, args } });
 }
-async function fillPage(tabId, url, copy, plan, gallery, details, force = false) {
+async function fillPage(tabId, url, copy, plan, gallery, details, force = false, preuploaded = 0) {
   const { title, description, enTitle, enDescription, category } = copy;
   const content = { title, description, enTitle, enDescription, category, gallery: copy.gallery, details: copy.details };
   const { brand, axis, skus, packagedWeightGrams, packageCm } = plan;
   const commerce = { brand, axis, skus, packagedWeightGrams, packageCm };
-  const job = { action: "fill_mx_draft", tabId, url, copy: content, plan: commerce, gallery, details, force };
+  const job = {
+    action: "fill_mx_draft", tabId, url, copy: content, plan: commerce, gallery, details, force,
+    ...(preuploaded > 0 && { preuploadedGallery: preuploaded }),
+  };
   let result;
   try {
     result = await inbox("fill_mx_draft", job, 600000);
@@ -66,7 +69,7 @@ async function fillPage(tabId, url, copy, plan, gallery, details, force = false)
     // An older running extension rejected the job before executing any steps.
     if (!String(error.message).includes("unknown action: fill_mx_draft")) throw error;
     console.error("PageLens needs an extension reload for single-request filling; using the installed bridge");
-    const legacy = await editor.fillPage(tabId, url, content, commerce, gallery, details, force);
+    const legacy = await editor.fillPage(tabId, url, content, commerce, gallery, details, force, preuploaded);
     formRuns.push({ url, transport: "per-step", phases: legacy.phases });
     return legacy;
   }
@@ -442,7 +445,8 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
     }
     mark("mediaReady");
   };
-  await Promise.all([downloadImages(), onFactsReady?.({ ...data, assets }, dir)]);
+  const mediaDone = downloadImages();
+  await Promise.all([mediaDone, onFactsReady?.({ ...data, assets }, dir, mediaDone)]);
   await write(path.join(dir, "source.json"), {
     ...data,
     url,
@@ -468,22 +472,54 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
 
 async function createDraft(url, rate) {
   await assertSourceCanBeCreated(sourceId(url));
-  const { generateListing, matchingPlan, categorySearchQuery, chooseAttributes } = await import("./tiktok-mx-ptc.mjs");
+  const { generateListing, matchingPlan, categorySearchQuery, chooseAttributes, hanCategoryTerm } = await import("./tiktok-mx-ptc.mjs");
   const { confirmedControls } = await import("./tiktok-mx-flows.mjs");
-  let generated, initialList, preselected;
+  let generated, initialList, preselected, confirmedInitialList = false, preuploadedCount = 0;
   const dir = await prepare(url, false, tab => {
     pendingPreflight = openCreateForm(tab);
     pendingPreflight.catch(() => {});
-  }, async (facts, dir) => {
+  }, async (facts, dir, mediaDone) => {
     const previous = await matchingPlan(facts);
     const controls = previous ? null : await confirmedControls(facts);
     mark("generationStarted");
-    const listingPromise = generateListing(facts, previous, rate, undefined, Boolean(previous));
+    const listingPromise = generateListing(facts, previous, rate, undefined, Boolean(previous)).then(res => {
+      const listTab = group.tabs.get(drafts);
+      if (listTab) {
+        confirmedInitialList = true;
+        initialList = listDrafts(listTab, res.copy.title, null)
+          .then(snap => confirmCreateList(snap, () => refreshDraftList(listTab, res.copy.title)));
+        initialList.catch(() => {});
+      }
+      return res;
+    });
+    let earlyGalleryPromise = Promise.resolve(0);
+    const startEarlyGallery = formTab => {
+      earlyGalleryPromise = Promise.all([listingPromise, mediaDone]).then(async ([gen]) => {
+        const names = gen.copy.gallery || [];
+        if (names.length < 2) return 0;
+        const paths = await Promise.all(names.slice(0, 3).map(n => listingImage(dir, n, facts.assets)));
+        const canMulti = await js(formTab, sel => document.querySelector(sel)?.multiple === true, 'input[type=file][accept=".jpg,.png,.jpeg"]');
+        const batch = canMulti ? paths : paths.slice(0, 1);
+        await bridge("upload_file", { tabId: formTab, selector: 'input[type=file][accept=".jpg,.png,.jpeg"]', paths: batch });
+        return batch.length;
+      }).catch(() => 0);
+    };
     const preselectPromise = (!previous && !controls?.category?.label && pendingPreflight)
       ? (async () => {
           const [tab, searchRes] = await Promise.all([pendingPreflight, categorySearchQuery(facts)]);
-          const tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
-          const selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+          let tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
+          let selected;
+          try {
+            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+          } catch (error) {
+            if (/verification|验证/i.test(error.message) || !/No suitable seller category|offered no category candidates/.test(error.message)) throw error;
+            const gen = await listingPromise;
+            const alt = gen?.copy?.category?.search?.trim();
+            if (!alt || !hanCategoryTerm.test(alt) || searchRes.queries.includes(alt)) throw error;
+            tempCopy = { category: { searches: [alt], search: alt } };
+            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+          }
+          startEarlyGallery(tab);
           let catalog = null;
           let attrDecision = Promise.resolve(null);
           try {
@@ -508,10 +544,13 @@ async function createDraft(url, rate) {
         })
       : Promise.resolve(null);
     [generated, preselected] = await Promise.all([listingPromise, preselectPromise]);
+    preuploadedCount = await earlyGalleryPromise;
     if (preselected?.category?.label) generated.copy.category = preselected.category;
     mark("generationReady");
-    initialList = listDrafts(group.tabs.get(drafts), generated.copy.title, null);
-    initialList.catch(() => {});
+    if (!initialList) {
+      initialList = listDrafts(group.tabs.get(drafts), generated.copy.title, null);
+      initialList.catch(() => {});
+    }
     await write(path.join(dir, "generation.json"), generated.ptc);
   }, true);
   const data = await read(path.join(dir, "source.json"));
@@ -519,7 +558,7 @@ async function createDraft(url, rate) {
   commercialPlan(generated.copy, data);
   await write(path.join(dir, "listing.json"), generated.copy);
   mark("planReady");
-  await save(dir, false, false, null, null, null, tab, false, initialList, preselected);
+  await save(dir, false, false, null, null, null, tab, false, initialList, preselected, confirmedInitialList, preuploadedCount);
   return dir;
 }
 
@@ -907,6 +946,8 @@ export async function save(
   replaceClosed = false,
   initialList = null,
   preselected = null,
+  confirmedInitialList = false,
+  preuploadedCount = 0,
 ) {
   const data = fresh || (await read(path.join(dir, "source.json"))),
     copy = revised || (await read(path.join(dir, "listing.json")));
@@ -970,7 +1011,7 @@ export async function save(
     }
     const list = skipList ? null : await sellerTab(drafts, preparedForm == null && !freshCreate);
     let listState = skipList ? { matches: [], ids: [] } : await (initialList && !knownId ? initialList : listDrafts(list, copy.title, knownId));
-    if (freshCreate)
+    if (freshCreate && !confirmedInitialList)
       listState = await confirmCreateList(listState, () => refreshDraftList(list, copy.title));
     const seenIds = [...new Set((listState.ids || []).map(String))];
     if (!skipList) mark("listRead");
@@ -1068,7 +1109,7 @@ export async function save(
       let verifiedCreateCatalog = null;
       if (!checkpoint?.gallery && !checkpoint?.detailImages) {
         try {
-          const result = await fillPage(tab, createUrl, copy, plan, gallery, details);
+          const result = await fillPage(tab, createUrl, copy, plan, gallery, details, false, preuploadedCount);
           cat = result.category;
           if (!cat?.selected && copy.category) {
             cat = await resolveCategory(tab, createUrl, data, copy, dir);
@@ -1166,7 +1207,7 @@ export async function save(
       // than waiting on a list document that cannot see the new row yet.
       const identifyUntil = Date.now() + 60000;
       for (let i = 0; i < 24 && Date.now() < identifyUntil && !id; i++) {
-        const saved = await refreshDraftList(list, copy.title, i >= 2);
+        const saved = await refreshDraftList(list, copy.title, true);
         const fresh = (saved.matches || []).filter((row) => row.id && !seenIds.includes(String(row.id)));
         if (fresh.length > 1) throw new Error("Ambiguous draft match");
         if (fresh.length === 1) id = fresh[0].id;

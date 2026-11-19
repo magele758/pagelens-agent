@@ -133,7 +133,7 @@ async function publishDraft(send, { sourceId, draftId, offer }) {
       if (previous.submitted || !previous.signal?.dialog)
         return { ...previous, status: "submission_unconfirmed", verified: false, changed: false };
     }
-    const tab = await tabs.open(link, [], false);
+    const tab = await tabs.open(link, [], true);
     await tabs.waitForUrl(tab, link);
     const call = (tool, args) => send(tool, { tabId: tab, ...args });
     const inspected = await inspectWithPtc({ sourceId, draftId }, async () => {

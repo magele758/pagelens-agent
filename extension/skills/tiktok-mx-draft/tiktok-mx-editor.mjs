@@ -80,9 +80,9 @@ export function snapshotCode(withCommerce, allowEmptyDescription, settle = false
   return `let seen=0;for(let i=0;i<100;i++){
     if(document.querySelector('${titleSelector}')?.value && (document.querySelector('${localDesc} .ProseMirror')?.textContent.trim() || (${allowEmptyDescription} && i>=12 && document.querySelector('${localDesc} .ProseMirror')))){
       const state=(${formState.toString()})();state.salesAndShipping=await ${numbers};
-      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=16)return state;
+      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=8)return state;
     }
-    await new Promise(r=>setTimeout(r,150));
+    await new Promise(r=>setTimeout(r,80));
   }throw Error("Draft editor did not load")`.split("\n").map(line => line.trimStart()).join("\n");
 }
 
@@ -255,6 +255,10 @@ export function saveDraftCode(expectedUrl = null) {
       button.click();
       for (let i = 0; i < 45 && !message; i++)
         await new Promise(resolve => setTimeout(resolve, 60));
+      if (message.includes("草稿保存成功")) {
+        for (let i = 0; i < 6 && !savedLink && !/^\/product\/edit-draft\/\d+$/.test(location.pathname); i++)
+          await new Promise(resolve => setTimeout(resolve, 60));
+      }
       return { message, url: savedLink || location.href };
     } finally {
       observer.disconnect();
@@ -277,7 +281,7 @@ export async function readFreshDocument(url, call, snapshot = snapshotCode(true,
     } catch (error) {
       if (!/frame (?:was removed|with ID 0 (?:was removed|does not exist))|execution context was destroyed|document unloaded/i.test(error.message)) throw error;
     }
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await new Promise(resolve => setTimeout(resolve, 75));
   } while (Date.now() < deadline);
   throw Error("Fresh draft document did not load");
 }
@@ -649,13 +653,26 @@ export function mxEditor(bridge, runCode, skuWrites) {
         const attempts = [];
         for (let attempt = 0; attempt < 2; attempt++) {
           if (creating && !force && attempt === 0) {
-            await runCode(tab, commerceScript((ui, sku) => {
+            await runCode(tab, commerceScript(async (ui, sku) => {
               const labels = ui.options().map(ui.optionLabels).filter(aliases => aliases.includes(sku.option));
               if (labels.length !== 1) throw Error("Ambiguous option " + sku.option);
+              const touched = [];
               for (const [field, value] of [["stock", sku.stock], ["price", sku.priceMXN]]) {
                 const rows = ui.rows().filter(r => labels[0].includes(r.label));
                 if (rows.length !== 1) throw Error("Cannot identify SKU row " + sku.option);
-                if (ui.numeric(rows[0][field]) !== value) ui.set(rows[0][field], value);
+                if (ui.numeric(rows[0][field]) !== value) {
+                  ui.set(rows[0][field], value);
+                  touched.push(rows[0][field]);
+                }
+              }
+              if (touched.length) {
+                await ui.sleep(45);
+                for (const el of touched) if (el?.isConnected) {
+                  el.focus();
+                  el.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+                  el.dispatchEvent(new Event("change", { bubbles: true }));
+                  el.blur();
+                }
               }
               return true;
             }, { option: sku.option, stock: sku.stock, priceMXN: sku.priceMXN }));
@@ -719,7 +736,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
   }
 
 
-  async function fillPage(tab, url, copy, plan, gallery, details, force) {
+  async function fillPage(tab, url, copy, plan, gallery, details, force, preuploaded = 0) {
     const phases = { start: Date.now() };
     let state = await js(tab, formState);
     if (state.url !== url || state.captcha) throw Error("Unexpected draft editor or verification");
@@ -734,7 +751,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
       const uploadBatch = offset => bridge("upload_file", {
         tabId: tab, selector: gallerySelector, paths: gallery.slice(offset, offset + batchSize),
       });
-      await uploadBatch(0);
+      const startOffset = preuploaded > 0 ? Math.min(preuploaded, gallery.length) : batchSize;
+      if (preuploaded <= 0) await uploadBatch(0);
       const { title, description, enTitle, enDescription } = copy;
       if (enTitle && state.enTitle !== enTitle) {
         const selector = '[data-id="product.publish.title.input_lang"]';
@@ -754,13 +772,13 @@ export function mxEditor(bridge, runCode, skuWrites) {
       phases.copyRead = Date.now();
       const finishGallery = async () => {
         if (phases.gallerySubmitted) return;
-        for (let offset = batchSize; offset < gallery.length; offset += batchSize) {
+        for (let offset = startOffset; offset < gallery.length; offset += batchSize) {
           await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
             ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + offset +
             ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Previous gallery batch still uploading')");
           await uploadBatch(offset);
         }
-        if (!detailsSubmitted) {
+        if (!detailsSubmitted || preuploaded >= gallery.length) {
           await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
             ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + gallery.length +
             ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Gallery upload still pending')");
@@ -863,7 +881,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
 // Runs inside the extension. Each browser operation still uses the ordinary
 // bridge, with its existing origin, scope, upload and input checks.
 export async function runMxDraftJob(job, dispatch, tabUrl) {
-  const { tabId, url, copy, plan, gallery, details, force } = job;
+  const { tabId, url, copy, plan, gallery, details, force, preuploadedGallery = 0 } = job;
   const page = new URL(url);
   if (page.origin !== "https://seller.tiktokshopglobalselling.com" ||
       page.searchParams.get("shop_region") !== "MX" ||
@@ -895,6 +913,6 @@ export async function runMxDraftJob(job, dispatch, tabUrl) {
     if (!result?.ok) throw Error("Seller page script did not complete");
     return result.result;
   }
-  const result = await mxEditor(call, runCode, skuWrites).fillPage(tabId, url, copy, plan, gallery, details, force);
+  const result = await mxEditor(call, runCode, skuWrites).fillPage(tabId, url, copy, plan, gallery, details, force, preuploadedGallery);
   return { ...result, skuWrites, steps };
 }
