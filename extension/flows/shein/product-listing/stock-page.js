@@ -170,8 +170,9 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
         const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
         if (!setValue) return fail("STOCK_CONTROL_MISSING", "无法写入 SHEIN 库存输入框。");
         input.focus({ preventScroll: true });
-        setValue.call(input, String(request.quantity));
-        input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+        const value = String(request.quantity);
+        setValue.call(input, value);
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: value, inputType: "insertText" }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
         if (input.isConnected) input.blur();
         let stableSince = 0;
@@ -181,7 +182,7 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
             return false;
           }
           stableSince ||= Date.now();
-          return Date.now() - stableSince >= 100;
+          return Date.now() - stableSince >= 300;
         })) {
           return fail("STOCK_READBACK_MISMATCH", "SHEIN 没有保留所填库存，已停止本次编辑。");
         }
@@ -196,8 +197,11 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
         return fail("STOCK_SAVE_UNVERIFIED", "确认后无法重新打开库存维护核对数量。");
       }
     }
-    const verified = resolveInputs();
-    if (!onPage() || !verified || !requests.every((request, index) => matchesQuantity(verified.controls[index], request.quantity))) {
+    const verified = await waited(() => {
+      const modal = resolveInputs();
+      return modal && requests.every((request, index) => matchesQuantity(modal.controls[index], request.quantity)) ? modal : null;
+    }, 2600);
+    if (!verified) {
       return fail("STOCK_SAVE_UNVERIFIED", "重新读取的库存与试填数量不一致。");
     }
     for (const [index, request] of requests.entries()) {
