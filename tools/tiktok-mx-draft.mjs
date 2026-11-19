@@ -1141,8 +1141,8 @@ export async function save(
         const ready = await readyForm(tab, true);
         if (ready.url !== createUrl) throw Error("Unexpected create form URL before saving");
         check(ready, copy);
-        const categoryPath = value => value?.trim().replace(/\s*[-/>]\s*/g, "/");
-        if (!ready.category || categoryPath(ready.category) !== categoryPath(copy.category?.label))
+        const trimCategoryPath = value => value?.trim().replace(/\s*[-/>]\s*/g, "/");
+        if (!ready.category || trimCategoryPath(ready.category) !== trimCategoryPath(copy.category?.label))
           throw Error("Category did not match before saving");
         const differences = commercialDifferences(ready.salesAndShipping, plan);
         if (differences.length) throw Error("Commercial fields differ before saving: " + differences.join(", "));
@@ -1280,7 +1280,6 @@ export async function save(
     check(state, copy);
     const categoryShown = state.category || cat.shown;
     const expectedCategory = copy.category?.label;
-    const categoryPath = (s) => s?.trim().replace(/\s+(?:-|>|\/)\s+/g, "/");
     if (
       expectedCategory &&
       categoryPath(categoryShown) !== categoryPath(expectedCategory)
