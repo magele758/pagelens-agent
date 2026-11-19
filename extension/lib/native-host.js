@@ -52,6 +52,44 @@ export async function pingNativeHost(options) {
   return { ...res, ms: Date.now() - started };
 }
 
+let directorySelection;
+
+export function chooseNativeProductDirectory() {
+  directorySelection ??= requestDirectorySelection().finally(() => { directorySelection = undefined; });
+  return directorySelection;
+}
+
+async function requestDirectorySelection() {
+  const denied = await requireOptionalFeature("nativeMessaging", { interactive: false });
+  if (denied) return { ok: false, error: denied };
+  try {
+    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    return await new Promise(resolve => {
+      const timer = setTimeout(() => finish({ ok: false, error: "目录选择已超时，请重新选择。" }), 125_000);
+      let completed = false;
+      function finish(result) {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timer);
+        resolve(result);
+        port.disconnect();
+      }
+      port.onMessage.addListener(finish);
+      port.onDisconnect.addListener(() => finish({
+        ok: false,
+        error: describeNativeError(chrome.runtime.lastError, chrome.runtime.id),
+      }));
+      try {
+        port.postMessage({ op: "chooseProductDirectory" });
+      } catch (error) {
+        finish({ ok: false, error: describeNativeError(error, chrome.runtime.id) });
+      }
+    });
+  } catch (error) {
+    return { ok: false, error: describeNativeError(error, chrome.runtime.id) };
+  }
+}
+
 export async function execNativeShell({ command, cwd, timeoutMs } = {}) {
   const requested = Number(timeoutMs);
   const commandMs = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), 300_000) : 60_000;

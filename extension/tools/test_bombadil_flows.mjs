@@ -171,7 +171,8 @@ for (const width of [400, 900]) {
     await until(() => !shortcuts.hidden && shortcuts.querySelector('[data-workflow="product-capture"]'), 'Amazon detail shortcut');
     assert.deepEqual([...shortcuts.querySelectorAll('[data-workflow]')].map(button => button.dataset.workflow), ['product-capture']);
     activate(21);
-    await until(() => shortcuts.hidden, 'hide unsupported Temu seller shortcuts');
+    await until(() => shortcuts.querySelector('[data-workflow="temu-product-listing"]'), 'show Temu seller listing shortcut');
+    assert.equal(shortcuts.querySelector('[data-workflow="product-capture"]'), null, 'keep seller and retail entries separate');
     activate(22);
     await until(() => shortcuts.querySelector('[data-workflow="identify-tab"]'), 'show address permission action');
     shortcuts.querySelector('[data-workflow="identify-tab"]').click();

@@ -12,7 +12,8 @@ export function renderWorkflowShortcuts(tab) {
   const canIdentify = Number.isInteger(tab?.id) && !tab.url &&
     chrome.runtime.getManifest?.().optional_permissions?.includes("tabs");
   const visible = features.length > 0 || canIdentify;
-  const key = canIdentify ? `${tab.id}:${IDENTIFY_TAB}` : visible ? `${tab.id}:${page.platform}:${page.productId || page.surface}` : "";
+  const key = canIdentify ? `${tab.id}:${IDENTIFY_TAB}` : visible
+    ? `${tab.id}:${page.platform}:${page.productId || page.surface}:${features.map(item => item.id).join(",")}` : "";
   if (root.dataset.target === key) return;
   root.dataset.target = key;
   root.hidden = !visible;

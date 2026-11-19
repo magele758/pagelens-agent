@@ -1,4 +1,5 @@
 import { workflowPlatforms } from "./catalog.js";
+import { isTemuEnrollmentPage, temuSellerDataPage, TEMU_SELLER_OPERATIONS } from "./temu/seller-operations/routes.js";
 
 const AMAZON_STOREFRONTS = new Set([
   "amazon.com", "amazon.ca", "amazon.co.uk", "amazon.de", "amazon.fr", "amazon.it",
@@ -19,6 +20,7 @@ export function identifyWorkflowPage(raw) {
   const context = (platform, surface, productId, sourceUrl) => ({ platform, surface, productId, sourceUrl });
   if (hostname === "seller.shopee.cn") return context("shopee", "seller");
   if (origin === "https://sellerhub.shein.com") return context("shein", "seller");
+  if (temuSellerDataPage(url.href)) return context("temu", "seller");
   if (/^agentseller(?:-[a-z0-9]+)?\.temu\.com$/u.test(hostname)) return context("temu", "seller");
   if (site === "temu.com") {
     const id = pathname.match(/-g-(\d+)\.html$/u)?.[1] ||
@@ -43,8 +45,15 @@ export function identifyWorkflowPage(raw) {
 export function shortcutsForPage(url) {
   const page = identifyWorkflowPage(url);
   const platform = workflowPlatforms.find(item => item.id === page?.platform);
-  const features = platform?.features.filter(feature => feature.id === "product-capture"
-    ? Boolean(page.productId)
-    : page.surface === "seller") ?? [];
+  const sellerPage = page?.platform === "temu" && page.surface === "seller" ? temuSellerDataPage(url) : null;
+  const canStartTemuListing = /^https:\/\/agentseller\.temu\.com\/(?:goods\/(?:list|create\/category)\/?(?:[?#]|$)|[?#]|$)/u.test(url || "");
+  const features = platform?.features.filter(feature => {
+    if (feature.id === "product-capture") return Boolean(page.productId);
+    if (page.surface !== "seller") return false;
+    if (platform.id !== "temu") return true;
+    if (feature.id === "temu-product-listing") return canStartTemuListing;
+    if (feature.id === "temu-campaign-draft") return isTemuEnrollmentPage(url);
+    return Boolean(sellerPage && TEMU_SELLER_OPERATIONS[feature.id]?.kind === sellerPage.kind);
+  }) ?? [];
   return { page, platform, features };
 }
