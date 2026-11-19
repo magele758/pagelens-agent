@@ -290,15 +290,34 @@ async function optimizeProduct(send, { productId, editorUrl, beforeTitle, afterT
       const review = await refreshedProduct(send, productId, "reviewing", true);
       if (review.title === afterTitle && review.status === "under_review")
         return { productId, title: afterTitle, status: "optimization_under_review", submitted: true, verified: false, signal, review };
+      const allUrl = mxManageUrl + "&tab=all";
+      const readAll = sellerListCode(allUrl, productId);
+      const listing = await withSellerTab(send, allUrl, async inList => {
+        let observed;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          observed = attempt === 0
+            ? (await inList("run_js", { code: readAll })).result
+            : await readFreshDocument(allUrl, inList, readAll);
+          if (observed.title === afterTitle || observed.title !== beforeTitle) break;
+          if (attempt < 9) await new Promise(resolve => setTimeout(resolve, 2500));
+        }
+        return observed;
+      }, true);
+      if (listing.title === beforeTitle && !listing.canEdit && signal.messages?.some(m => /提交成功|更新成功|发布成功/.test(m)))
+        return { productId, title: afterTitle, status: "optimization_under_review", submitted: true, verified: false, signal, review: listing };
+      if (listing.title !== afterTitle) throw Error("The updated title did not appear on the exact listing");
       const verifyEditor = async inEditor => {
-        const saved = await readFreshDocument(editorUrl, inEditor);
+        let saved;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          saved = await readFreshDocument(editorUrl, inEditor);
+          if (saved.title === afterTitle) break;
+          if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2000));
+        }
         return ptcVerify(() => compare(saved, inEditor));
       };
       const tabs = await send("list_tabs", {});
       const executor = tabs.some(tab => tab.id === tabId && tab.url === editorUrl) ? await verifyEditor(call) :
         await withSellerTab(send, editorUrl, verifyEditor, true);
-      const listing = await refreshedProduct(send, productId, "all", true);
-      if (listing.title !== afterTitle) throw Error("The updated title did not appear on the exact listing");
       return { productId, title: afterTitle, status: listing.status, verified: true, changed: true, executor, signal };
     } catch (error) {
       return { productId, status: "optimization_unconfirmed", verified: false, tabId: keepOpen(), signal, error: error.message };
