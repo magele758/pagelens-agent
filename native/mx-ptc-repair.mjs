@@ -7,7 +7,7 @@ import { repairDraftRequest } from "../extension/skills/tiktok-mx-draft/tiktok-m
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
 import {
   attributeCode, matchAttributeValue, readFreshDocument, repairCategoryOptionsCode,
-  repairCategorySearchCode, saveDraftCode, sellerVerification, snapshotCode,
+  repairCategorySearchCode, saveDraftCode, sellerVerification, shopAllowedCategoriesCode, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
 import { chooseAttributes, chooseCategory } from "../tools/tiktok-mx-ptc.mjs";
 import { registeredListing } from "./mx-ptc-inspect.mjs";
@@ -124,7 +124,17 @@ export async function repairHostedDraft(parameters, request, planners = {}) {
       for (const term of terms)
         for (const label of await search(term)) if (!paths.has(label)) paths.set(label, term);
       candidates = [...paths.keys()];
-      const { choice } = await (planners.chooseCategory ?? chooseCategory)(source, candidates);
+      let flexible = false;
+      if (!candidates.length) {
+        const scope = await browser(shopAllowedCategoriesCode(link)).catch(() => ({ leaves: [] }));
+        for (const label of scope?.leaves || []) {
+          const leafTerm = label.split(/\s+[>/-]\s+/).at(-1);
+          paths.set(label, leafTerm);
+        }
+        candidates = [...paths.keys()];
+        flexible = Boolean(candidates.length);
+      }
+      const { choice } = await (planners.chooseCategory ?? chooseCategory)(source, candidates, undefined, { flexibleScope: flexible });
       const term = paths.get(choice.label);
       if (!term) throw Error("PTC selected a category outside the enabled seller results");
       expectedCategory = choice.label;

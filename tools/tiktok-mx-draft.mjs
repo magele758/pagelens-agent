@@ -5,7 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { commercialDifferences, commercialPlan } from "./tiktok-mx-commerce.mjs";
 export { normDraftTitle, draftTitleOf, draftIdOf, selectDraftRows, draftListReady } from "./tiktok-mx-editor.mjs";
-import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, normDraftTitle, readFreshDocument, saveDraftCode, sellerCategoryOptionsCode, sellerCategorySearchCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
+import { attributeCode, checkAttributes, checkDraftAttributes, matchAttributeValue, draftListCode, mxEditor, formState, normDraftTitle, readFreshDocument, saveDraftCode, sellerCategoryOptionsCode, sellerCategorySearchCode, shopAllowedCategoriesCode, snapshotCode, sameText, check, checkCopy, titleSelector } from "./tiktok-mx-editor.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -534,15 +534,35 @@ async function createDraft(url, rate) {
               await bridge("press_keys", { tabId: tab, selector: titleSelector, keys: ["Tab"] });
             }
             const suggested = await js(tab, async expected => {
+              const readAllowedRoots = () => {
+                const el = document.querySelector("#product-cascader-select-view");
+                const fk = el && Object.keys(el).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+                for (let f = fk && el[fk], d = 0; f && d < 14; f = f.return, d++) {
+                  const opts = f.memoizedProps?.options;
+                  if (Array.isArray(opts) && opts.length > 3) {
+                    return opts.filter(o => o && !o.disabled && !o.showDisabledStyle && !o.disabledReason && !o.category?.unauthorized)
+                      .map(o => String(o.label || "").trim()).filter(Boolean);
+                  }
+                }
+                return [];
+              };
+              const roots = readAllowedRoots();
               for (let i = 0; i < 18; i++) {
                 if (location.href !== expected) throw Error("Draft changed during category suggestions");
+                const collapsed = [...document.querySelectorAll("span,div,button")].find(e =>
+                  !e.children.length && /^\d+\s*条建议$/.test((e.textContent || "").trim()) && e.getClientRects().length);
+                if (collapsed && i === 2) collapsed.click();
                 const rows = [];
                 for (const b of document.querySelectorAll("button")) {
                   if (b.innerText.trim() !== "应用" || b.disabled || !b.getClientRects().length) continue;
                   for (let el = b.parentElement, d = 0; el && d < 4; el = el.parentElement, d++) {
                     if (el.querySelectorAll("button").length > 1) break;
                     const text = el.innerText.replace(/\s*应用\s*$/g, "").trim();
-                    if (text.split(/\s*[>/-]\s*/).filter(Boolean).length >= 3) { rows.push(text); break; }
+                    const parts = text.split(/\s*[>/-]\s*/).filter(Boolean);
+                    if (parts.length >= 3) {
+                      if (!roots.length || roots.includes(parts[0])) rows.push(text);
+                      break;
+                    }
                   }
                 }
                 const list = [...new Set(rows)];
@@ -641,13 +661,14 @@ export async function createHostedDraft(sourceId, rate, dispatch) {
 async function rerun(url, yenToPeso) {
   const registered = await lookup(sourceRecord(sourceId(url)));
   if (!registered?.id) throw Error("No registered draft to rerun");
+  const copy = await read(path.join(registered.dir, "listing.json"));
   expectedEdit =
     seller + "/product/edit-draft/" + registered.id + "?shop_region=MX";
   let preflight;
   const dir = await prepare(url, true, () => {
     preflight = (async () => {
       const edit = await open(expectedEdit);
-      const original = await readyForm(edit, true);
+      const original = await runCode(edit, snapshotCode(true, false, true, copy.details?.length || 0));
       if (original.url !== expectedEdit || original.title !== registered.title)
         throw Error("Registered draft ID or title differs in the editor");
       // A real focus event lets the bilingual editor commit its controlled fields.
@@ -690,7 +711,6 @@ async function rerun(url, yenToPeso) {
         dir +
         " before resaving the original draft.",
     );
-  const copy = await read(path.join(registered.dir, "listing.json"));
   const { generateListing } = await import("./tiktok-mx-ptc.mjs");
   const [prepared, target] = await Promise.all([
     generateListing(fresh, copy, yenToPeso),
@@ -902,35 +922,63 @@ export async function resolveCategory(tab, url, source, copy, dir, persistListin
     await searchTerms(fallback.queries);
   }
   const candidates = [...new Set([...(await suggestions()), ...[...paths.values()].map(entry => entry.label)])];
-  if (!candidates.length) throw Error("Seller offered no category candidates for " + searched.join(", "));
-  const { choice, ptc } = await choose(source, candidates);
-  const hit = paths.get(categoryPath(choice.label));
-  let selected;
-  if (hit) {
-    const applyChoice = async forceReopen => {
-      if (forceReopen || lastTerm !== hit.term || !lastChoices.some(label => categoryPath(label) === categoryPath(choice.label))) {
-        await runCode(tab, sellerCategorySearchCode(url));
-        const typed = await bridge("trusted_type", { tabId: tab, value: hit.term });
-        if (!typed?.ok) throw Error("Seller category search failed");
-      }
-      return runCode(tab, sellerCategoryOptionsCode(url, choice.label));
-    };
-    let applied;
-    try {
-      applied = await applyChoice(false);
-    } catch (error) {
-      if (!/Search the current draft category before reading choices/.test(error.message)) throw error;
-      applied = await applyChoice(true);
-    }
-    selected = {
-      selected: categoryPath(applied.choice) === categoryPath(choice.label),
-      label: choice.label,
-      shown: applied.choice,
-    };
-    choice.search = hit.term;
+  let choice, ptc, selected;
+  const fallbackToAllowedScope = async () => {
+    const scope = await runCode(tab, shopAllowedCategoriesCode(url)).catch(() => ({ roots: [], leaves: [] }));
+    if (!scope?.leaves?.length) return null;
+    const flex = await choose(source, scope.leaves, undefined, { flexibleScope: true });
+    const leafTerm = flex.choice.label.split(/\s+[>/-]\s+/).at(-1);
+    const flexChoice = { label: flex.choice.label, search: leafTerm };
+    const applied = await category(tab, flexChoice);
+    if (!applied?.selected) return null;
+    return { choice: flexChoice, ptc: flex.ptc, selected: applied };
+  };
+  if (!candidates.length) {
+    const flexDone = await fallbackToAllowedScope();
+    if (!flexDone) throw Error("Seller offered no category candidates for " + searched.join(", "));
+    ({ choice, ptc, selected } = flexDone);
   } else {
-    choice.search = searched[0] || terms[0];
-    selected = await category(tab, choice);
+    try {
+      ({ choice, ptc } = await choose(source, candidates));
+    } catch (error) {
+      if (!/No suitable seller category/.test(error.message)) throw error;
+      const flexDone = await fallbackToAllowedScope();
+      if (!flexDone) throw error;
+      ({ choice, ptc, selected } = flexDone);
+    }
+    if (!selected) {
+      const hit = paths.get(categoryPath(choice.label));
+      if (hit) {
+        const applyChoice = async forceReopen => {
+          if (forceReopen || lastTerm !== hit.term || !lastChoices.some(label => categoryPath(label) === categoryPath(choice.label))) {
+            await runCode(tab, sellerCategorySearchCode(url));
+            const typed = await bridge("trusted_type", { tabId: tab, value: hit.term });
+            if (!typed?.ok) throw Error("Seller category search failed");
+          }
+          return runCode(tab, sellerCategoryOptionsCode(url, choice.label));
+        };
+        let applied;
+        try {
+          applied = await applyChoice(false);
+        } catch (error) {
+          if (!/Search the current draft category before reading choices/.test(error.message)) throw error;
+          applied = await applyChoice(true);
+        }
+        selected = {
+          selected: categoryPath(applied.choice) === categoryPath(choice.label),
+          label: choice.label,
+          shown: applied.choice,
+        };
+        choice.search = hit.term;
+      } else {
+        choice.search = searched[0] || terms[0];
+        selected = await category(tab, choice);
+      }
+      if (!selected.selected && selected.reason === "Category outside shop business scope") {
+        const flexDone = await fallbackToAllowedScope();
+        if (flexDone) ({ choice, ptc, selected } = flexDone);
+      }
+    }
   }
   if (!selected.selected) throw Error("Recommended category did not persist: " + choice.label);
   copy.category = choice;

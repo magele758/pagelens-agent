@@ -86,7 +86,7 @@ export function snapshotCode(withCommerce, allowEmptyDescription, settle = false
   return `let seen=0;for(let i=0;i<100;i++){
     if(document.querySelector('${titleSelector}')?.value && (document.querySelector('${localDesc} .ProseMirror')?.textContent.trim() || (${allowEmptyDescription} && i>=12 && document.querySelector('${localDesc} .ProseMirror')))){
       const state=(${readForm})();state.salesAndShipping=await ${numbers};
-      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=(${expectedDetails}>0?35:10))return state;
+      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=(${expectedDetails}>0?65:10))return state;
     }
     await new Promise(r=>setTimeout(r,80));
   }throw Error("Draft editor did not load")`.split("\n").map(line => line.trimStart()).join("\n");
@@ -242,6 +242,39 @@ export function sellerCategoryOptionsCode(url, exactLabel = null) {
   return categoryRepairCode(url, categoryOptionsOperation, exactLabel, true);
 }
 
+export function shopAllowedCategoriesCode(expectedUrl = null) {
+  const read = url => {
+    if (url && location.href !== url) throw Error("Wrong draft document");
+    const el = document.querySelector("#product-cascader-select-view");
+    if (!el) return { roots: [], leaves: [] };
+    const fk = Object.keys(el).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+    let opts = null;
+    for (let f = fk && el[fk], d = 0; f && d < 14; f = f.return, d++) {
+      if (Array.isArray(f.memoizedProps?.options) && f.memoizedProps.options.length > 3) {
+        opts = f.memoizedProps.options;
+        break;
+      }
+    }
+    if (!opts) return { roots: [], leaves: [] };
+    const ok = o => o && !o.disabled && !o.showDisabledStyle && !o.disabledReason && !o.category?.unauthorized;
+    const roots = [];
+    const leaves = [];
+    const walk = (nodes, prefix) => {
+      for (const n of nodes || []) {
+        if (!ok(n)) continue;
+        const next = [...prefix, String(n.label || "").trim()].filter(Boolean);
+        if (prefix.length === 0 && next[0]) roots.push(next[0]);
+        if (n.isLeaf || !n.children?.length) {
+          if (next.length >= 2) leaves.push(next.join(" / "));
+        } else walk(n.children, next);
+      }
+    };
+    walk(opts, []);
+    return { roots: [...new Set(roots)], leaves: [...new Set(leaves)] };
+  };
+  return "return (" + read.toString() + ")(" + JSON.stringify(expectedUrl) + ")";
+}
+
 export function saveDraftCode(expectedUrl = null) {
   const click = async (url) => {
     if (url && location.href !== url) throw Error("Draft editor changed before saving");
@@ -337,6 +370,10 @@ export function mxEditor(bridge, runCode, skuWrites) {
         const changeDialog = () => [...document.querySelectorAll('[role="dialog"]')].find(e =>
           e.getClientRects().length && e.innerText.includes("更改商品类目") && e.innerText.includes("属性信息将被清除"));
         if (changeDialog()) throw Error("A prior category change is awaiting confirmation");
+        const scopeBlocked = () => {
+          const wrap = document.querySelector('[data-id="product.publish.category"]')?.parentElement?.parentElement?.parentElement?.parentElement;
+          return wrap ? /非店铺允许经营|不在允许经营|超出.*经营范围|不支持销售|无销售权限|定邀类目|限售类目|禁售类目|无法在此类目/.test(wrap.innerText || "") : false;
+        };
         const readSelection = async () => {
           let confirmed = false;
           for (let i = 0; i < 40; i++) {
@@ -345,7 +382,11 @@ export function mxEditor(bridge, runCode, skuWrites) {
               const confirm = [...dialog.querySelectorAll("button")].find(b => !b.disabled && b.innerText.trim() === "继续");
               if (confirm && !confirmed) { confirm.click(); confirmed = true; }
             }
-            if (norm(selected()) === norm(label) && !dialog) return { selected: true, label, shown: selected() };
+            if (norm(selected()) === norm(label) && !dialog) {
+              if (document.querySelector('[data-id="product.publish.category"]')) await pause(120);
+              if (scopeBlocked()) return { selected: false, reason: "Category outside shop business scope", label, shown: selected() };
+              return { selected: true, label, shown: selected() };
+            }
             await pause(80);
           }
           const shown = selected();
@@ -394,6 +435,25 @@ export function mxEditor(bridge, runCode, skuWrites) {
           }
           option.click();
           return readSelection();
+        }
+        // Fallback: click L1 -> L2 -> L3 directly in cascader columns if search input missed
+        const segs = norm(label).split("/").map(s => s.trim()).filter(Boolean);
+        if (segs.length >= 2) {
+          control.click();
+          await pause(100);
+          control.click();
+          await pause(150);
+          let matchedAll = true;
+          for (const seg of segs) {
+            const colItem = [...document.querySelectorAll(".core-cascader-list-item")].find(
+              e => e.getClientRects().length && e.getAttribute("aria-disabled") !== "true" &&
+                !e.className.includes("disabled") && e.innerText.trim() === seg,
+            );
+            if (!colItem) { matchedAll = false; break; }
+            colItem.click();
+            await pause(140);
+          }
+          if (matchedAll) return readSelection();
         }
         control.click();
         return { selected: false, reason: "Exact category not offered", label };
@@ -918,6 +978,10 @@ export function mxEditor(bridge, runCode, skuWrites) {
       }
       return { category: cat, state, commerce, phases };
 
+    }
+    if (details.length > 0 && state.detailImages < details.length) {
+      state = await runCode(tab, "const read=" + formState.toString().replace(/\n\s+/g, "\n") +
+        ";for(let i=0;i<20;i++){const s=read();if(s.detailImages>=" + details.length + ")return s;await new Promise(r=>setTimeout(r,200))}return read()");
     }
     if (!state.category || (copy.category?.label && !sameCategory(state.category, copy.category.label)) ||
         state.gallery !== gallery.length || (state.detailImages && state.detailImages < details.length))

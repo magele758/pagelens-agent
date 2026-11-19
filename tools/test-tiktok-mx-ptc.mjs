@@ -942,6 +942,13 @@ await assert.rejects(categorySearchQuery(source, async () => '{"query":"egg brus
 }
 const category = await chooseCategory(source, ["Cookware / Racks", "Electronics / Ovens"], async () => '{"index":0}');
 assert.equal(category.choice.label, "Cookware / Racks");
+let sawFlexibleScopePrompt = false;
+const flexCategory = await chooseCategory(source, ["厨具 / 厨房用具与小工具 / 烹饪器具"], async prompt => {
+  sawFlexibleScopePrompt = /permitted to sell/.test(prompt);
+  return '{"index":0}';
+}, { flexibleScope: true });
+assert.equal(sawFlexibleScopePrompt, true);
+assert.equal(flexCategory.choice.label, "厨具 / 厨房用具与小工具 / 烹饪器具");
 await assert.rejects(chooseCategory(source, ["Ovens"], async () => '{"index":2}'), /No suitable/);
 await assert.rejects(validateTranslatedTitle(updated.copy, "Something else", async () => '{"valid":false}'), /translation differs/);
 const sample = { ...source, id: "1729600000000000005", gallery: [], detail: [], skus: [{...source.skus[0],stock:4}] };
@@ -958,6 +965,8 @@ const picked = await select([{ index: 0, evidence: "Glass" }, { index: null, evi
 assert.deepEqual(picked.values, { 材质: ["Glass\nVidrio"], 风格: [] });
 const pickedArrayEvidence = await select([{ index: 0, evidence: ["Glass"] }, { index: null, evidence: null }]);
 assert.deepEqual(pickedArrayEvidence.values, { 材质: ["Glass\nVidrio"], 风格: [] });
+const singleClamp = await select([[{ index: 0, evidence: "Glass" }, { index: 1, evidence: "Glass" }], [{ index: null, evidence: null }]]);
+assert.deepEqual(singleClamp.values, { 材质: ["Glass\nVidrio"], 风格: [] });
 await assert.rejects(select([{ index: 1, evidence: "Steel" }, {index:null}]), /Unsupported attribute/);
 await assert.rejects(select([{ index: 5, evidence: "Glass" }, {index:null}]), /Unsupported attribute/);
 await assert.rejects(select([]), /Incomplete attribute/);
