@@ -43,11 +43,16 @@ export function formState() {
       ?.innerText.trim(),
     gallery,
     detailImages: editor
-      ? new Set(
-          [...editor.querySelectorAll("img")]
+      ? (() => {
+          const urls = [...editor.querySelectorAll("img")]
             .filter(i => realImage(i) && /^https?:/.test(i.src))
-            .map((i) => i.src.split("?")[0]),
-        ).size
+            .map(i => i.src.split("?")[0]);
+          editor.pmViewDesc?.node?.forEach?.(n => {
+            const s = n.type?.name === "image" && n.attrs?.src;
+            if (s && /^https?:/.test(s) && !/placeholder/.test(s)) urls.push(s.split("?")[0]);
+          });
+          return new Set(urls).size;
+        })()
       : 0,
     category:
       (document.querySelector("#product-cascader-select-view")?.innerText || "").split("\n")[0].trim(),
@@ -480,18 +485,38 @@ export function mxEditor(bridge, runCode, skuWrites) {
     const desc = (id, val) => {
       const e = document.querySelector('[data-id="' + id + '"] .ProseMirror');
       if (!e) throw new Error("Missing description editor");
+      const view = pmView(e);
+      const enEd = copy.preserveImages && id.endsWith(".local_lang")
+        ? document.querySelector('[data-id="product.publish.description.input_lang"] .ProseMirror')
+        : null;
+      const imgsOf = doc => { const a = []; doc?.forEach?.(n => { if (n.type?.name === "image") a.push(n); }); return a; };
+      const enImgs = imgsOf(enEd?.pmViewDesc?.node);
+      const curImgs = imgsOf(view?.state?.doc);
+      const needImgSync = Boolean(view?.state?.schema.nodes.image && enImgs.length > curImgs.length);
       if (
+        !needImgSync &&
         e.innerText.replace(/\s+/g, " ").trim() ===
         val.replace(/\s+/g, " ").trim()
       )
         return;
-      const view = pmView(e);
       if (view?.state?.schema.nodes.paragraph && view.dispatch) {
         const { doc, schema, tr } = view.state;
         const paragraphs = val
           .split(/\n+/)
           .filter(Boolean)
           .map((t) => schema.nodes.paragraph.create(null, schema.text(t)));
+        if (needImgSync) {
+          view.focus();
+          tr.replaceWith(0, doc.content.size, [
+            ...paragraphs,
+            ...enImgs.map(n => schema.nodes.image.create(n.attrs)),
+            schema.nodes.paragraph.create(),
+          ]);
+          view.dispatch(tr);
+          e.blur();
+          getSelection?.()?.removeAllRanges?.();
+          return;
+        }
         // Replace only paragraphs of prose. Images, including wrapped inline images, retain their original nodes.
         const ranges = [];
         doc.forEach((node, pos) => {
@@ -617,6 +642,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (state.captcha || !details.length || state.detailImages >= details.length || state.gallery !== copy.gallery.length)
       return state;
     if (state.detailImages > 0) {
+      if (copy.description) state = await setCopy(tab, { title: copy.title, description: copy.description, preserveImages: true });
+      if (state.detailImages >= details.length) return state;
       state = await runCode(tab, "const ed=document.querySelector('" + localDesc + " .ProseMirror');for(let i=0;i<15;i++){if(ed){const ch=[...ed.children];if(ch.length)ch[(i*3)%ch.length].scrollIntoView?.({block:'center'});for(const n of ch)n.scrollIntoView?.({block:'nearest'});}const s=(" + formState.toString() +
         ")(); if(s.detailImages >= " + details.length + " || s.detailImages === 0) return s; await new Promise(r=>setTimeout(r,200))} return (" + formState.toString() + ")()");
       if (state.detailImages >= details.length) return state;
