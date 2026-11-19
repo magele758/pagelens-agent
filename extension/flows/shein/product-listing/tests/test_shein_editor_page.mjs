@@ -38,16 +38,58 @@ function fixture(t) {
   let saves = 0;
   let selectClicks = 0;
   const received = [];
+  const searchQueries = [];
   document.querySelector("#publish").onclick = () => publications++;
   document.querySelector("#save").onclick = () => saves++;
   document.querySelector(".main_name input").oninput = ev => received.push(ev.target.value);
-  function setOptions(names, { commit = true } = {}) {
+  function setOptions(names, { commit = true, searchResults, debounce = 250 } = {}) {
     const select = document.querySelector("#features");
     const opener = select.querySelector(".soui-select-result-wrapper");
     const display = select.querySelector(".soui-select-result");
+    const search = display.querySelector("input");
     let menu;
+    let searchTimer;
+    function render(visibleNames) {
+      if (!menu?.isConnected) return;
+      menu.querySelector("ul").replaceChildren(...visibleNames.map(name => {
+        const row = Object.assign(document.createElement("li"), { className: "soui-select-option" });
+        row.innerHTML = '<div class="soui-select-option-inner"><div class="attrValRenderItem--test"></div></div>';
+        const title = row.querySelector('[class*="attrValRenderItem--"]');
+        const bilingual = /^(.*\p{Script=Han})(\s+[A-Za-z].*)$/u.exec(name);
+        title.textContent = bilingual?.[1] ?? name;
+        if (bilingual) title.append(Object.assign(document.createElement('span'), {
+          className: "attrValRenderItemEnText--test", textContent: bilingual[2],
+        }));
+        row.onclick = () => {
+          selectClicks++;
+          if (!commit) return;
+          const chip = document.createElement("span");
+          chip.className = "soui-select-multiple-result-item";
+          chip.textContent = name;
+          display.prepend(chip);
+          select.classList.remove("soui-select-wrapper-empty");
+          if (searchResults) {
+            clearTimeout(searchTimer);
+            search.value = "";
+            render(names);
+          }
+        };
+        return row;
+      }));
+    }
+    if (searchResults) search.oninput = () => {
+      const term = search.value;
+      searchQueries.push(term);
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => render(term ? searchResults[term] ?? [] : names), debounce);
+    };
     opener.onclick = () => {
-      if (menu?.isConnected) { menu.remove(); return; }
+      if (menu?.isConnected) {
+        clearTimeout(searchTimer);
+        search.value = "";
+        menu.remove();
+        return;
+      }
       menu = document.createElement("div");
       menu.className = "soui-select-picker-wrapper merchant-ui-select-options";
       menu.style.opacity = "0";
@@ -55,27 +97,7 @@ function fixture(t) {
       document.body.append(menu);
       setTimeout(() => {
         menu.style.opacity = "1";
-        menu.querySelector("ul").replaceChildren(...names.map(name => {
-          const row = Object.assign(document.createElement("li"), { className: "soui-select-option" });
-          row.innerHTML = '<div class="soui-select-option-inner"><div class="attrValRenderItem--test"></div></div>';
-          const title = row.querySelector('[class*="attrValRenderItem--"]');
-          const bilingual = /^(.*\p{Script=Han})(\s+[A-Za-z].*)$/u.exec(name);
-          title.textContent = bilingual?.[1] ?? name;
-          if (bilingual) title.append(Object.assign(document.createElement('span'), {
-            className: "attrValRenderItemEnText--test", textContent: bilingual[2],
-          }));
-          row.onclick = () => {
-            selectClicks++;
-            if (commit) {
-              const chip = document.createElement("span");
-              chip.className = "soui-select-multiple-result-item";
-              chip.textContent = name;
-              display.prepend(chip);
-              select.classList.remove("soui-select-wrapper-empty");
-            }
-          };
-          return row;
-        }));
+        render(names);
       }, 70);
     };
   }
@@ -84,7 +106,7 @@ function fixture(t) {
       input: { categoryPath, ...args?.input } })})`);
     return JSON.parse(JSON.stringify(result));
   };
-  return { run, document, setOptions, received, publications: () => publications, saves: () => saves, selectClicks: () => selectClicks };
+  return { run, document, setOptions, received, searchQueries, publications: () => publications, saves: () => saves, selectClicks: () => selectClicks };
 }
 
 test("fills English copy and live bilingual attributes and verifies selected chips", async t => {
@@ -130,6 +152,48 @@ test("resolves separately rendered English labels when the localized label start
   const result = await run({ kind: "fill", input: { attributes: { 产品功能: "WiFi Function" } } });
   assert.deepEqual(result.fields.at(-1).value, ["Wi-Fi 功能 WiFi Function"]);
   assert.equal(selectClicks(), 1);
+});
+
+test("searches the bound food-contact attribute for a delayed exact result outside the initial menu", async t => {
+  const { run, document, setOptions, searchQueries, selectClicks, publications, saves } = fixture(t);
+  const select = document.querySelector("#features");
+  select.closest(".soui-form-item-wrapper").querySelector(".soui-form-item-label-wrapper").innerHTML =
+    "食品接触面材质 <span>Food Contact Materials</span>";
+  select.querySelector("input").removeAttribute("type");
+  const siteSearch = document.querySelector('input[placeholder="请输入关键字"]');
+  siteSearch.value = "保留全站搜索内容";
+  setOptions(["塑料 Plastic"], { searchResults: {
+    "纯金属": ["纯金属复合材料 Metal Composite", "纯金属 Pure Metal"],
+  } });
+
+  const result = await run({ kind: "fill", input: { attributes: { 食品接触面材质: ["纯金属"] } } });
+  assert.deepEqual(result.fields.at(-1).value, ["纯金属 Pure Metal"]);
+  assert.ok(result.items.some(item => item.label === "食品接触面材质 Food Contact Materials"));
+  assert.ok(searchQueries.includes("纯金属"));
+  assert.equal(siteSearch.value, "保留全站搜索内容");
+  assert.equal(selectClicks(), 1);
+  assert.equal(publications() + saves(), 0);
+});
+
+test("preflights searchable multiselect values before clicking and retains chips when results reset", async t => {
+  const { run, setOptions, searchQueries, selectClicks } = fixture(t);
+  setOptions(["塑料 Plastic"], { searchResults: {
+    "纯金属": ["纯金属 Pure Metal"],
+    "陶瓷": ["陶瓷 Ceramic"],
+  } });
+  const fill = values => run({ kind: "fill", input: { attributes: { 产品功能: values } } });
+  assert.deepEqual((await fill(["塑料"])).fields.at(-1).value, ["塑料 Plastic"]);
+  assert.equal(selectClicks(), 1);
+
+  const failed = await fill(["塑料", "纯金属", "不存在"]);
+  assert.ok(failed.issues.some(issue => issue.code === "OPTION_MISSING"));
+  assert.deepEqual(failed.fields.at(-1).value, ["塑料 Plastic"]);
+  assert.equal(selectClicks(), 1);
+
+  const result = await fill(["塑料", "纯金属", "陶瓷"]);
+  assert.deepEqual(new Set(result.fields.at(-1).value), new Set(["塑料 Plastic", "纯金属 Pure Metal", "陶瓷 Ceramic"]));
+  assert.ok(searchQueries.includes("纯金属") && searchQueries.includes("陶瓷"));
+  assert.equal(selectClicks(), 3);
 });
 
 test("does not count a choice without actual readback", async t => {

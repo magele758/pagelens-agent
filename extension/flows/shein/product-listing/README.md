@@ -31,6 +31,7 @@
 ```
 
 - 商品目录有中文标题或描述时，可补充 `shein.englishTitle` 和 `shein.englishDescription`。
+- 可搜索的属性下拉在当前列表没有精确匹配时，会用该字段的搜索框再查一次。选择后会核对实际选中值。
 - 基础商品尺寸用 `shein.dimensions`，包装尺寸用 SKU 行里的 `lengthCm`、`widthCm`、`heightCm` 和 `weightG`。
 - 为每个主规格登记首图 `imagePath` 和方形图 `squareImagePath`。当前表单有「色块图」时，需使用 80×80 像素、3 MB 以内的 JPG、JPEG 或 PNG，路径填在 `swatchImagePath`。省略路径时，PageLens 可以从该规格已匹配的首图生成色块图。各规格的「细节图」按自己的首图、共用细节图的顺序写入。共用图可登记在 `shein.sharedGalleryImages` 或 `detailImages`，试填最多带四张共用图。SKU 图使用对应 SKU 行的 `imagePath`。
 - 图片路径相对于选中的商品目录。勾选本次上传后，PageLens 通过 SHEIN 原有上传控件上传，并按主规格或 SKU 核对页面回显。如果 SHEIN 已从同一首图生成对应方形图，核对后会复用。指定的方形图与已有图片不同、缺图或遇到平台拒收时，侧栏显示对应行和待处理原因。

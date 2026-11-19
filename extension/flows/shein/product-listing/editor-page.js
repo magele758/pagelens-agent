@@ -165,6 +165,12 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     return containers.filter(node => !containers.some(parent => parent !== node && parent.contains(node)));
   }
 
+  function searchField(control, menu) {
+    const candidates = new Set([...query(control, "input"), ...query(menu, "input")]);
+    return one([...candidates].filter(node => /^(?:text|search)$/u.test(node.type) &&
+      enabled(node) && !node.readOnly));
+  }
+
   async function closeMenu(node, menu) {
     if (!menu?.isConnected || !menus().includes(menu)) return true;
     const control = node.querySelector('.soui-select-result-wrapper') ?? node;
@@ -199,7 +205,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
       menu = one(menus());
       if (!menu) return null;
       const options = optionNodes(menu);
-      if (!options.length) return null;
+      if (!options.length && !searchField(control, menu)) return null;
       const names = options.map(optionValue);
       const { top, left } = menu.getBoundingClientRect();
       return { key: JSON.stringify([names, Math.round(top), Math.round(left)]) };
@@ -208,22 +214,51 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
       if (menu && !await closeMenu(node, menu)) return fail("MENU_STILL_OPEN", "下拉未完成加载，且无法确认已关闭。");
       return fail("OPTIONS_UNAVAILABLE", "SHEIN 下拉选项未稳定加载。");
     }
+    const menuIsCurrent = () => editContext() && !blocked() && control.isConnected && one(menus()) === menu;
+    async function resolve(value) {
+      if (!menuIsCurrent()) return fail("MENU_CHANGED", "选项菜单已变化。");
+      const direct = matchOptions(optionNodes(menu), value);
+      if (direct.length) return one(direct) ? { ok: true, target: direct[0] } : missingOption(value, direct);
+      const search = searchField(control, menu);
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (!search || !set) return missingOption(value, direct);
+
+      if (search.value !== value) {
+        search.focus({ preventScroll: true });
+        if (!menuIsCurrent() || searchField(control, menu) !== search) return fail("MENU_CHANGED", "下拉搜索框已变化。");
+        set.call(search, value);
+        search.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      }
+      const result = await stable(() => {
+        if (!menuIsCurrent() || searchField(control, menu)?.value !== value) return null;
+        const options = optionNodes(menu);
+        const matches = matchOptions(options, value);
+        return matches.length ? { key: JSON.stringify(options.map(optionValue)), matches } : null;
+      }, 2500);
+      if (!menuIsCurrent()) return fail("MENU_CHANGED", "选项菜单已变化。");
+      const matches = result?.matches ?? [];
+      return one(matches) ? { ok: true, target: matches[0] } : missingOption(value, matches, true);
+    }
+
     try {
       const pending = wanted.filter(value => !alreadyChosen(value));
-      const initialOptions = optionNodes(menu);
-      const matched = new Map(pending.map(value => [value, matchOptions(initialOptions, value)]));
-      for (const [value, matches] of matched) if (matches.length !== 1) return missingOption(value, matches);
-      const selectedLabels = [...matched.values()].map(([node]) => optionValue(node));
-      if (new Set(selectedLabels).size !== selectedLabels.length) return fail("OPTION_AMBIGUOUS", "多个输入映射到了同一个 SHEIN 选项。");
+      const verifiedLabels = new Set();
       for (const value of pending) {
-        if (!editContext() || blocked() || one(menus()) !== menu) return fail("MENU_CHANGED", "选项菜单已变化。");
-        const matches = matchOptions(optionNodes(menu), value);
-        const target = one(matches);
-        if (!target) return missingOption(value, matches);
+        const resolved = await resolve(value);
+        if (!resolved.ok) return resolved;
+        const label = fieldKey(optionValue(resolved.target));
+        if (verifiedLabels.has(label)) return fail("OPTION_AMBIGUOUS", "多个输入映射到了同一个 SHEIN 选项。");
+        verifiedLabels.add(label);
+      }
+      for (const value of pending) {
+        const resolved = await resolve(value);
+        if (!resolved.ok) return resolved;
+        const { target } = resolved;
         const expected = optionNames(target);
         expected.add(fieldKey(value));
+        const retained = chosen(node);
         if (target.matches('[aria-selected="true"],[data-selected="true"],.soui-select-dropdown-item-selected') ||
-            previous.some(prior => expected.has(fieldKey(prior)))) {
+            retained.some(prior => expected.has(fieldKey(prior)))) {
           return fail("EXISTING_VALUE_UNVERIFIED", "该选项可能已选中，已停止重复点击以免取消现有值。");
         }
         target.scrollIntoView?.({ block: 'nearest' });
@@ -235,7 +270,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
           const live = controls().find(control => control.field.key === field.key);
           const values = live && chosen(live.node);
           return values?.some(actual => expected.has(fieldKey(actual))) &&
-            previous.every(prior => values.includes(prior)) ? { key: JSON.stringify(values) } : null;
+            retained.every(prior => values.includes(prior)) ? { key: JSON.stringify(values) } : null;
         }, 2400);
         if (!read) return fail("VALUE_UNVERIFIED", `选择「${value}」后未回读到实际选中值。`);
       }
@@ -245,8 +280,9 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     }
   }
 
-  function missingOption(value, matches) {
-    return fail(matches.length ? "OPTION_AMBIGUOUS" : "OPTION_MISSING", `当前准确选项「${value}」${matches.length ? "有多个" : "未找到"}。`);
+  function missingOption(value, matches, searched = false) {
+    const source = searched ? "SHEIN 搜索结果" : "当前已加载的选项";
+    return fail(matches.length ? "OPTION_AMBIGUOUS" : "OPTION_MISSING", `${source}中${matches.length ? "有多个" : "未找到"}准确选项「${value}」。`);
   }
 
   async function fillText(entry, value) {
