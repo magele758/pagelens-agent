@@ -3,6 +3,7 @@ import { sheinEditorPage } from "./editor-page.js";
 import { sheinVariantPage } from "./variant-page.js";
 import { sheinRowsPage } from "./rows-page.js";
 import { sheinStockPage } from "./stock-page.js";
+import { getCdp } from "../../../lib/cdp.js";
 
 const sellerOrigin = "https://sellerhub.shein.com";
 export const sheinCategoryUrl = sellerOrigin + "/#/spmc/commodities-category/followsales-pro/list?externalSystem=spmp&last_page=page_commodities_list";
@@ -144,6 +145,53 @@ async function editorCall(api, tab, request, signal) {
   } while (true);
 }
 
+async function replayInventory(api, tab, request, signal, onNativeInput) {
+  const page = (kind, index, cleanup = false) => pageCall(api, tab, sheinStockPage, { ...request, kind, index }, cleanup ? undefined : signal);
+  const written = await page("fill");
+  if (written.ok || !["STOCK_SAVE_UNVERIFIED", "STOCK_READBACK_MISMATCH"].includes(written.code)) return written;
+  onNativeInput?.();
+  const cdp = getCdp();
+  const alreadyAttached = cdp.isAttached(tab.id);
+  let opened = false;
+  async function send(method, params) {
+    await currentTab(tab.id, tab.url, api, signal);
+    return cdp.send(tab.id, method, params);
+  }
+  async function click({ x, y }) {
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, x, y });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, x, y });
+  }
+  try {
+    await currentTab(tab.id, tab.url, api, signal);
+    await cdp.ensure(tab.id);
+    const ready = await page("open");
+    opened = true;
+    if (!ready.ok) return ready;
+    const modifiers = /Mac/iu.test(globalThis.navigator?.platform || "") ? 4 : 2;
+    for (const [index, row] of request.rows.entries()) {
+      const found = await page("focus", index);
+      if (!found.ok) return found;
+      await click(found.target);
+      const focused = await page("focused", index);
+      if (!focused.ok) return focused;
+      const selectAll = { key: "a", code: "KeyA", modifiers, windowsVirtualKeyCode: 65, commands: ["selectAll"] };
+      await send("Input.dispatchKeyEvent", { ...selectAll, type: "rawKeyDown" });
+      await send("Input.dispatchKeyEvent", { key: "a", code: "KeyA", modifiers, type: "keyUp" });
+      await send("Input.insertText", { text: String(row.quantity) });
+    }
+    const confirm = await page("confirm");
+    if (!confirm.ok) return confirm;
+    await click(confirm.target);
+    return await page("verify");
+  } catch (error) {
+    signal?.throwIfAborted();
+    return fail(error?.code || "STOCK_NATIVE_INPUT_FAILED", error.message || "未能核对 SHEIN 库存。");
+  } finally {
+    if (opened) await page("cancel", undefined, true).catch(() => {});
+    if (!alreadyAttached && cdp.isAttached(tab.id)) await cdp.detach(tab.id);
+  }
+}
+
 export async function openSheinListingEditor({ tabId, url, signal, useActiveTab = false, api = chrome } = {}) {
   const tab = await currentTab(tabId, url, api, signal);
   if (["category", "editor"].includes(route(tab.url))) {
@@ -239,7 +287,7 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
   }));
   if (stock.length) {
     report("填写并核对各规格库存");
-    const inventory = await pageCall(api, tab, sheinStockPage, { ...pinned, rows: stock }, signal);
+    const inventory = await replayInventory(api, tab, { ...pinned, rows: stock }, signal, () => report("用浏览器原生输入复核库存"));
     if (inventory.ok) {
       items.push(...inventory.items || []);
       issues.push(...inventory.issues || []);

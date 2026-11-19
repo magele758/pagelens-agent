@@ -1,5 +1,5 @@
 /** Updates the selected listing sites in the SHEIN inventory dialog, then reads the saved values back. */
-export async function sheinStockPage({ href, categoryPath, rows } = {}) {
+export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", index } = {}) {
   const clean = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const text = node => clean(node?.innerText ?? node?.textContent);
   const stockArea = '[class*="supplyInfoTable--"]';
@@ -47,7 +47,7 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
     requests.push({ options, siteLabel, quantity: Number(clean(row.quantity)), key });
   }
   if (!requests.length) return { ok: true, items, issues: [] };
-  if (!noOtherOverlay()) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再维护库存。");
+  if (!noOtherOverlay(ownedPanel())) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再维护库存。");
 
   const skuLabel = cell => text(cell).split(/\s*(?:SKC|SKU)\s*:/iu)[0].trim();
   const matchRow = (row, { options }) => options.every((name, index) => name === skuLabel(row.cells[index]));
@@ -149,6 +149,57 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
     if (onPage() && active(cancel)) cancel.click();
     return waited(() => noOtherOverlay());
   }
+
+  async function point(control) {
+    if (!onPage() || !active(control) || !ownedPanel()?.contains(control)) return null;
+    control.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    await delay(100);
+    if (!onPage() || !active(control) || !ownedPanel()?.contains(control)) return null;
+    const rect = control.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const target = document.elementFromPoint(x, y);
+    return target && (target === control || control.contains(target)) ? { x, y } : null;
+  }
+  if (kind === "cancel") {
+    return !ownedPanel() || await close() ? { ok: true } : fail("STOCK_DIALOG_OPEN", "库存弹窗尚未关闭。");
+  }
+  if (kind === "open") {
+    if (ownedPanel() || !await open()) return fail("STOCK_DIALOG_MISSING", "未打开可确认的 SHEIN 库存维护弹窗。");
+    const initial = resolveInputs();
+    if (!initial || requests.some((request, i) => !withinBounds(initial.controls[i], request.quantity))) {
+      return fail("STOCK_TARGET_MISSING", "未核对到对应的 SKU、站点和库存输入范围。");
+    }
+    return { ok: true };
+  }
+  if (kind === "focus") {
+    const control = resolveInputs()?.controls[index];
+    const target = control && withinBounds(control, requests[index]?.quantity) && await point(control);
+    return target ? { ok: true, target } : fail("STOCK_TARGET_CHANGED", "目标库存输入框已变化。");
+  }
+  if (kind === "focused") {
+    const control = resolveInputs()?.controls[index];
+    return control && control === document.activeElement ? { ok: true } :
+      fail("STOCK_TARGET_CHANGED", "浏览器焦点没有落在对应库存输入框。");
+  }
+  if (kind === "confirm") {
+    const current = resolveInputs();
+    const matches = current && requests.every((request, i) => matchesQuantity(current.controls[i], request.quantity));
+    const target = matches && await point(current.confirm);
+    return target ? { ok: true, target } : fail("STOCK_READBACK_MISMATCH", "平台界面的库存与待确认数量不一致。");
+  }
+  if (kind === "verify") {
+    if (!await waited(() => noOtherOverlay()) || !await open()) return fail("STOCK_SAVE_UNVERIFIED", "确认后无法打开库存维护核对数量。");
+    const verified = await waited(() => {
+      const current = resolveInputs();
+      return current && requests.every((request, i) => matchesQuantity(current.controls[i], request.quantity));
+    }, 2600);
+    const closed = await close();
+    return verified && closed ? { ok: true, items: requests.map(request => ({
+      label: `${request.options.join(" / ")} · ${request.siteLabel}库存`, status: "verified", value: request.quantity,
+    })) } : fail("STOCK_SAVE_UNVERIFIED", "重新读取的库存与试填数量不一致。");
+  }
+  if (kind !== "fill" || !noOtherOverlay()) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再维护库存。");
 
   if (!sourceButton()) return fail("STOCK_CONTROL_MISSING", "没有唯一匹配的 SHEIN 编辑库存按钮。");
   if (!await open()) {
