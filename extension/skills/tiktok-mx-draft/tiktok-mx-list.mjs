@@ -70,7 +70,7 @@ async function readDraftList(title, draftId, waitForMatch) {
   const started = Date.now();
   let previous = null;
   let stable = 0;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 100; i++) {
     const verification = sellerVerification();
     if (verification) throw Error("Seller verification on draft list: " + verification);
     const text = document.body?.innerText || "";
@@ -94,7 +94,7 @@ async function readDraftList(title, draftId, waitForMatch) {
       if (!waitForMatch || matches.length || Date.now() - started >= 2000)
         return { matches, ids: records.map(row => draftIdOf(row.text)) };
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error("Draft list not ready or seller login required");
 }

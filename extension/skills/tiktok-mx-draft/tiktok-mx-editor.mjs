@@ -575,9 +575,16 @@ export function mxEditor(bridge, runCode, skuWrites) {
     // On bilingual forms Seller Center copies source-language media into the
     // local editor. Local-only attachments can disappear on the next save.
     const sourceInput = '[data-id="product.publish.description.input_lang"] input[type=file]';
-    const useSource = copy.enDescription && await js(tab, selector => Boolean(document.querySelector(selector)), sourceInput);
+    const info = await js(tab, (srcSel, locSel) => {
+      const src = document.querySelector(srcSel);
+      const loc = document.querySelector(locSel);
+      return { hasSource: Boolean(src), multiple: Boolean((src || loc)?.multiple) };
+    }, sourceInput, localDesc + " input[type=file]");
+    const useSource = Boolean(copy.enDescription && info.hasSource);
     const selector = useSource ? sourceInput : localDesc + " input[type=file]";
-    for (const file of details) await bridge("upload_file", { tabId: tab, selector, paths: [file] });
+    const step = info.multiple ? 3 : 1;
+    for (let i = 0; i < details.length; i += step)
+      await bridge("upload_file", { tabId: tab, selector, paths: details.slice(i, i + step) });
   }
   async function restoreDetails(tab, state, copy, details) {
     if (state.captcha || !details.length || state.detailImages !== 0 || state.gallery !== copy.gallery.length)
@@ -742,8 +749,6 @@ export function mxEditor(bridge, runCode, skuWrites) {
           throw Error("TikTok verification is open in the seller editor");
         if (written.enTitle !== enTitle || !sameText(written.enDescription || "", enDescription))
           throw Error("Source-language copy changed before uploading images");
-        await uploadDetails(tab, copy, details);
-        phases.uploadsSubmitted = Date.now();
       } else checkCopy(written, copy);
       phases.copyRead = Date.now();
       const finishGallery = async () => {
@@ -756,15 +761,21 @@ export function mxEditor(bridge, runCode, skuWrites) {
         }
         phases.gallerySubmitted = Date.now();
       };
-      let detailsSubmitted = bilingualMedia;
+      let detailsSubmitted = !details.length;
       const submitDetails = async () => {
+        if (bilingualMedia) {
+          const pre = await js(tab, formState);
+          if (pre.captcha) throw Error("TikTok verification is open in the seller editor");
+          if (pre.enTitle !== enTitle || !sameText(pre.enDescription || "", enDescription))
+            throw Error("Source-language copy changed before uploading images");
+        }
         await uploadDetails(tab, copy, details);
         detailsSubmitted = true;
         phases.uploadsSubmitted = Date.now();
       };
-      // Both widgets can upload the same asset. Finish the gallery queue before
-      // handing those files to the description widget.
-      if (!detailsSubmitted && (!details.some(file => gallery.includes(file)) || (await js(tab, formState)).gallery === gallery.length))
+      // Finish all gallery uploads before submitting description images so
+      // concurrent uploads never leave an earlier gallery slot stuck at 0%.
+      if (!detailsSubmitted && (await js(tab, formState)).gallery === gallery.length)
         await submitDetails();
       const fillSales = async selected => {
         const categoryPath = value => (value || "").replace(/\s*[-/>]\s*/g, "/");
@@ -803,7 +814,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
         }
         if (state.captcha || (state.gallery === gallery.length && state.detailImages >= details.length)) break;
       }
-      if (!state.captcha && state.detailImages === details.length && copy.enDescription &&
+      if (!state.captcha && state.detailImages >= details.length && copy.enDescription &&
           (!sameText(state.description, copy.description) || state.title !== copy.title))
         state = await setCopy(tab, { title: copy.title, description: copy.description, preserveImages: true });
       check(state, copy);
