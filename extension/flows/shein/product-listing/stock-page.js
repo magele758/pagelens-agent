@@ -77,13 +77,22 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
   function readModal() {
     const panel = ownedPanel();
     if (!panel) return null;
-    const table = one(scan(panel, "table").filter(table => {
-      const headers = scan(table, "thead th");
+    const headersFor = table => scan(table, "thead th").filter(header => header.closest("table") === table);
+    const headerTable = one(scan(panel, "table").filter(table => {
+      const headers = headersFor(table);
       return headers.length > 1 && text(headers.at(-1)) === "库存" && text(headers[0]) === "颜色";
     }));
+    if (!headerTable) return null;
+    const tableGroup = headerTable.closest(".so-table") || headerTable;
+    if (!panel.contains(tableGroup)) return null;
+    const bodies = scan(tableGroup, "tbody").filter(body => tableGroup === headerTable
+      ? body.closest("table") === headerTable
+      : body.closest(".so-table") === tableGroup);
+    const simpleBodies = bodies.filter(body => body.closest(".so-table-simple-body")?.closest(".so-table") === tableGroup);
+    const body = one(simpleBodies.length ? simpleBodies : bodies);
     const confirm = one(button(panel, "确定"));
     const cancel = one(button(panel, "取消"));
-    return table && confirm && cancel ? { panel, table, confirm, cancel, specCount: scan(table, "thead th").length - 1 } : null;
+    return body && confirm && cancel ? { panel, body, confirm, cancel, specCount: headersFor(headerTable).length - 1 } : null;
   }
 
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -110,7 +119,7 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
 
   function siteInput(modal, request) {
     if (modal?.specCount !== request.options.length) return null;
-    const row = one(scan(modal?.table, "tbody tr").filter(candidate => matchRow(candidate, request)));
+    const row = one(scan(modal?.body, "tr").filter(candidate => candidate.closest("tbody") === modal.body && matchRow(candidate, request)));
     const cell = row?.cells[row.cells.length - 1];
     if (!cell || row.cells.length <= request.options.length) return null;
     const candidates = scan(cell, 'input[placeholder="请输入"]').filter(node => active(node) && !node.readOnly && /^(?:number|text)$/u.test(node.type));

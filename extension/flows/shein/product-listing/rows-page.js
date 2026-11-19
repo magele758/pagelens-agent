@@ -1,5 +1,5 @@
 /** Serialized into the verified SHEIN add-product page. */
-export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows = [], dimensions, upload } = {}) {
+export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows = [], dimensions, upload, expectSupply = false } = {}) {
   const clean = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const measureHeaders = { widthCm: "宽度", lengthCm: "长度", heightCm: "高度", diameterCm: "直径" };
   const editable = node => node && !node.disabled && !node.readOnly && node.getClientRects().length;
@@ -28,7 +28,7 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     visible(row) && row.closest(".so-table") === table && row.cells.length > 0);
   const tableFor = search => one(wrappers().filter(table => columns(table).some(search)));
   const refs = {
-    supply: () => one(wrappers().filter(table => table.matches('[class*="supplyInfoTable--"]') && columns(table).some(h => /^价格\(USD\)/u.test(h)))),
+    supply: () => one(wrappers().filter(table => table.matches('[class*="supplyInfoTable--"]') && columns(table).some(h => /^价格\s*\(USD\)/u.test(h)))),
     package: () => tableFor(h => /^含包装重量/u.test(h)),
     media: () => one(wrappers().filter(table => table.closest(".detail_img_container") && columns(table).includes("方形图"))),
     size: () => one(wrappers().filter(table => table.closest('[class*="sizeContentBox--"]') && columns(table).some(h => /\(cm\)/iu.test(h)))),
@@ -93,12 +93,47 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     })) items.push({ label, status: "filled" });
     else issues.push({ label, code: "SHEIN_ROW_READBACK", message: "SHEIN 未回显写入值。" });
   }
-  const rowInput = (role, options, header, selector) => {
+  const rowCell = (role, options, header) => {
     const table = refs[role]();
     const positions = columns(table).flatMap((text, index) => header.test(text) ? [index] : []);
     const row = table && rowFor(table, options);
-    return positions.length === 1 && row && writeable(row.cells[positions[0]], selector);
+    return positions.length === 1 && row ? row.cells[positions[0]] : undefined;
   };
+  const rowInput = (role, options, header, selector) => writeable(rowCell(role, options, header), selector);
+
+  async function useCentimeters(options, label) {
+    const dimension = () => rowCell("package", options, /^含包装尺寸/u);
+    const select = () => one([...dimension()?.querySelectorAll('.so-select .so-select-result') || []].filter(visible));
+    const chosen = () => {
+      const el = select();
+      return el && !el.classList.contains("so-select-empty") ? clean(el.innerText || el.textContent) : "";
+    };
+    const control = select();
+    if (!control) return true;
+    if (/^cm$/iu.test(chosen())) return true;
+    const active = () => [...document.querySelectorAll('.so-list.so-select-options.so-hidable-show')].filter(visible);
+    if (!chosen() && !active().length && live()) {
+      control.click();
+      let target;
+      let since;
+      if (await waitUntil(() => {
+        const candidate = one([...one(active())?.querySelectorAll('.so-select-option') || []].filter(node =>
+          visible(node) && !node.matches('[aria-disabled="true"],.so-select-disabled') && /^cm$/iu.test(clean(node.innerText || node.textContent))));
+        if (candidate !== target) { target = candidate; since = Date.now(); }
+        return candidate && Date.now() - since >= 240;
+      }, 1600)) {
+        if (target.matches('a[href]')) target.addEventListener("click", event => event.preventDefault(), { once: true });
+        target.click();
+        if (await waitUntil(() => /^cm$/iu.test(chosen()) && !active().length, 1300)) {
+          items.push({ label, status: "verified" });
+          return true;
+        }
+      }
+      if (active().length === 1 && live() && select()) select().click();
+    }
+    issues.push({ label, code: "SHEIN_PACKAGE_UNIT", message: "未能核对商品包装尺寸的厘米单位，请在 SHEIN 检查。" });
+    return false;
+  }
 
   const state = () => Object.fromEntries(Object.entries(refs).map(([key, find]) => {
     const table = find();
@@ -143,6 +178,12 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
   }
 
   if (kind !== "fill") return fail("SHEIN_ACTION_UNSUPPORTED", "此 SHEIN 表单操作不可用。");
+  if (expectSupply && rows.length) {
+    await waitUntil(() => {
+      const table = refs.supply();
+      return table && tableRows(table).length > 0;
+    }, 5000);
+  }
   for (const row of rows) {
     if (!live()) return fail("SHEIN_EDIT_CONTEXT_CHANGED", "SHEIN 商品、类目或弹窗已变化。");
     const options = row.options || [];
@@ -152,11 +193,13 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
       issues.push({ label, code: "SHEIN_SKU_MISSING", message: "当前表格未找到唯一对应规格。" });
       continue;
     }
-    await write(() => rowInput("supply", options, /^价格\(USD\)/u), row.priceUsd, label + " 价格 (USD)", { numeric: true });
+    await write(() => rowInput("supply", options, /^价格\s*\(USD\)/u), row.priceUsd, label + " 价格 (USD)", { numeric: true });
     await write(() => rowInput("supply", options, /^商家SKU/u), row.sellerSku, label + " 商家 SKU");
     await write(() => rowInput("package", options, /^含包装重量/u), row.weightG, label + " 包装重量 (g)", { numeric: true });
-    for (const [key, prompt] of [["lengthCm", "长(最长边)"], ["widthCm", "宽(次长边)"], ["heightCm", "高(最短边)"]]) {
-      await write(() => rowInput("package", options, /^含包装尺寸/u, `input[placeholder="${prompt}"]`), row[key], label + " 包装" + prompt, { numeric: true });
+    const edges = [["lengthCm", "长(最长边)"], ["widthCm", "宽(次长边)"], ["heightCm", "高(最短边)"]];
+    if (edges.some(([key]) => clean(row[key])) && await useCentimeters(options, label + " 包装尺寸单位")) {
+      for (const [key, prompt] of edges) await write(() => rowInput("package", options, /^含包装尺寸/u,
+        `input[placeholder="${prompt}"]`), row[key], label + " 包装" + prompt, { numeric: true });
     }
   }
   if (dimensions) for (const [key, name] of Object.entries(measureHeaders)) {

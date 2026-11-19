@@ -93,7 +93,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
 
   function chosen(select) {
     const result = select.querySelector('.soui-select-result-wrapper') ?? select;
-    const tokens = query(result, '.soui-select-result-label,.soui-select-result-text,.soui-select-multiple-result-item,.soui-select-multiple-result-label,.soui-select-result-item,.soui-tag');
+    const tokens = query(result, '.soui-select-ellipsis,.soui-select-result-label,.soui-select-result-text,.soui-select-multiple-result-item,.soui-select-multiple-result-label,.soui-select-result-item,.soui-tag');
     const labels = tokens.filter(node => !tokens.some(other => node !== other && node.contains(other)))
       .map(node => clean(node.getAttribute("title")) || text(node)).filter(Boolean);
     if (!labels.length && !select.classList.contains('soui-select-wrapper-empty')) {
@@ -221,6 +221,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
         const target = one(matches);
         if (!target) return missingOption(value, matches);
         const expected = optionNames(target);
+        expected.add(fieldKey(value));
         if (target.matches('[aria-selected="true"],[data-selected="true"],.soui-select-dropdown-item-selected') ||
             previous.some(prior => expected.has(fieldKey(prior)))) {
           return fail("EXISTING_VALUE_UNVERIFIED", "该选项可能已选中，已停止重复点击以免取消现有值。");
@@ -235,7 +236,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
           const values = live && chosen(live.node);
           return values?.some(actual => expected.has(fieldKey(actual))) &&
             previous.every(prior => values.includes(prior)) ? { key: JSON.stringify(values) } : null;
-        });
+        }, 2400);
         if (!read) return fail("VALUE_UNVERIFIED", `选择「${value}」后未回读到实际选中值。`);
       }
       return { ok: true, status: "filled" };

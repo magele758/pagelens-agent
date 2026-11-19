@@ -228,7 +228,9 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
   const rowIds = rows.map(row => row.options.map(key).join("\0"));
   if (rowIds.length !== new Set(rowIds).size) return outcome(fail("SKU_DUPLICATE", "存在规格完全相同的多行 SKU，请核对资料。"), "SKU");
   report("填写价格、包装和产品尺寸");
-  const table = await pageCall(api, tab, sheinRowsPage, { ...pinned, kind: "fill", rows, dimensions: product.dimensions }, signal);
+  const table = await pageCall(api, tab, sheinRowsPage, {
+    ...pinned, kind: "fill", rows, dimensions: product.dimensions, expectSupply: activeSites.length > 0,
+  }, signal);
   if (!table.ok) return outcome(table, "SKU 表格");
   items.push(...table.items || []);
   issues.push(...table.issues || []);

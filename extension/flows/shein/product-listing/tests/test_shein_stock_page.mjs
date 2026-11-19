@@ -33,11 +33,13 @@ function mount(t, { save = true } = {}) {
     stockModal.className = "so-modal so-modal-show";
     stockModal.innerHTML = `<div class="so-modal-mask"><section class="so-modal-panel">
       <div class="so-card-header so-modal-title">库存维护</div>
-      <table><thead><tr><th>颜色</th><th>库存</th></tr></thead><tbody>
+      <div class="so-table">
+      <div class="so-table-simple-header"><table><thead><tr><th>颜色</th><th>库存</th></tr></thead></table></div>
+      <div class="so-table-simple-body"><table><tbody>
         ${["黑色", "白色"].map(color => `<tr><td><span>${color}</span><div>SKC：<span>fixture</span></div></td><td>
           ${["美国", "墨西哥"].map(site => `<div><div>${site}</div><span><input type="text" placeholder="请输入" data-stock="${color}:${site}" value="${remote[`${color}:${site}`]}" /></span></div>`).join("")}
         </td></tr>`).join("")}
-      </tbody></table>
+      </tbody></table></div></div>
       <footer><button data-cancel>取消</button><button data-confirm>确定</button></footer>
     </section></div>`;
     stockModal.querySelector("[data-cancel]").onclick = () => { actions.push("cancel"); stockModal.remove(); };
