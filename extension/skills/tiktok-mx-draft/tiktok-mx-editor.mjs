@@ -150,7 +150,11 @@ async function categorySearchOperation() {
       const field = repairCategoryInput(control);
       if (field) {
         field.input.focus({ preventScroll: true });
-        if (document.activeElement === field.input) return { selector: field.selector, current };
+        if (document.activeElement === field.input) {
+          document.querySelectorAll("[data-pagelens-category-search]").forEach(node => node.removeAttribute("data-pagelens-category-search"));
+          field.input.setAttribute("data-pagelens-category-search", "1");
+          return { selector: '[data-pagelens-category-search="1"]', current };
+        }
       }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
