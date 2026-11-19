@@ -115,6 +115,14 @@ try {
   assert.equal(await supply({ requiredColumns: ["肩宽"] }), "data:image/jpeg;base64," + main.toString("base64"));
   assert.equal(mainReads, 1);
 
+  const reference = path.join(single.root, folder, "detail.jpg");
+  fs.writeFileSync(reference, main);
+  fs.writeFileSync(path.join(dir, "product.json"), JSON.stringify({ title: "Shirt", detailImages: ["detail.jpg"] }));
+  const readReference = expectedPath => handleFs({ action: "readProductSizeChartChunk", root: single.root,
+    folder, offset: 0, asset: "main", expectedPath });
+  assert.equal(readReference(reference).base64, main.toString("base64"));
+  assert.equal(readReference(item.input.imagePath).ok, false);
+
   const previousChrome = globalThis.chrome;
   const storage = {};
   let modelRequests = 0;

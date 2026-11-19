@@ -7,6 +7,7 @@ import { temuControls } from "./controls.js";
 import { temuDecorationPage } from "./decoration-page.js";
 import { temuEditorPage } from "./editor-page.js";
 import { temuMediaPage } from "./media-page.js";
+import { temuSensitivePage } from "./sensitive-page.js";
 import { temuSpecPage } from "./spec-page.js";
 import { isTemuCategoryPage, temuStagePage } from "./stage1.js";
 import { temuStockPage } from "./stock-page.js";
@@ -284,6 +285,9 @@ export function createTemuListingToolCaller({
             const scope = { site, categoryPath };
             const request = { field, query: args.query, scope: editorScope() };
             if (tool === "temu_select") {
+              if (field.skuMember === "sensitiveAttr") {
+                return await runInPage(temuSensitivePage, { href, key: field.key, value: args.value });
+              }
               const selected = await runInPage(temuControls, { ...request, kind: "select", value: args.value });
               if (selected?.options?.length) await optionCache.write(scope, field, selected.options);
               return selected;

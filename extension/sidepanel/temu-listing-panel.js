@@ -448,6 +448,7 @@ export function bindTemuListingPanel({
       input.uploadImages = approved;
       const useModel = find("listing-ai").checked;
       const selectedProduct = products[productIndex];
+      const referenceImage = input.mainImages?.[0] || input.detailImages?.[0] || input.variantImages?.[0];
       const readSizeChart = useModel && selectedProduct && input.sizeChartImagePath
         ? async () => (await prepareSizeChartInput({ ...selectedProduct, input }, {
           root: directoryRoot, signal, getSettings: getSettings ? async () => getSettings() : undefined,
@@ -455,8 +456,8 @@ export function bindTemuListingPanel({
         : undefined;
       const suggestSizeChart = useModel ? async (product, { sizes, signal }) => suggestTemuSizeChart(product, {
         sizes, signal, settings: await getSettings?.(),
-        readImage: selectedProduct && input.mainImages?.[0] ? () => readProductImage({
-          root: directoryRoot, folder: selectedProduct.folder, path: input.mainImages[0], asset: "main", signal,
+        readImage: selectedProduct && referenceImage ? () => readProductImage({
+          root: directoryRoot, folder: selectedProduct.folder, path: referenceImage, asset: "main", signal,
         }) : undefined,
       }) : undefined;
       const imagePaths = new Set([...(input.mainImages || []), ...(input.detailImages || []), ...(input.variantImages || []), input.sizeChartImagePath]);

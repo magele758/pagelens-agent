@@ -195,7 +195,7 @@ test("looks up Temu's local composition term for a sourced English fiber name", 
 test("resolves a full multiselect request before changing choices and verifies the selected chips", async t => {
   const href = "https://agentseller.temu.com/goods/edit?productDraftId=multiple";
   const dom = new JSDOM(`<main id="page_container_id"><div id="productProperties[51]">
-    <label>季节 Season</label>
+    <label>季节Season</label>
     <div class="ST_outerWrapper_test"><div class="ST_head_test"><input aria-controls="seasons">
     <span class="ST_selectValueMultiple_test"></span></div></div>
     </div></main><div class="ST_dropdown_test" hidden>
@@ -208,9 +208,10 @@ test("resolves a full multiselect request before changing choices and verifies t
   const menu = document.querySelector('[role="listbox"]');
   const portal = menu.parentElement;
   const chips = document.querySelector('[class^="ST_selectValueMultiple_"]');
-  const names = new Map([["spring", "春"], ["summer", "夏"], ["winter", "冬"]]);
+  const names = new Map([["spring", "春Spring"], ["summer", "夏Summer"], ["winter", "冬Winter"]]);
   const selected = new Set(["spring"]);
   let clicks = 0;
+  let ignoreClick = false;
   function show(query) {
     const visibleOptions = query
       ? [...names].filter(([, label]) => label.toLowerCase().includes(query.toLowerCase())) : [["spring", names.get("spring")]];
@@ -229,6 +230,7 @@ test("resolves a full multiselect request before changing choices and verifies t
   input.addEventListener("input", () => { window.setTimeout(() => show(input.value), 40); });
   menu.addEventListener("click", event => {
     clicks++;
+    if (ignoreClick) return;
     const id = event.target.dataset.value;
     if (selected.has(id)) selected.delete(id);
     else selected.add(id);
@@ -243,6 +245,127 @@ test("resolves a full multiselect request before changing choices and verifies t
   assert.equal(clicks, 3);
   assert.deepEqual([...selected], ["winter", "summer"]);
   assert.equal(portal.hidden, true);
+  ignoreClick = true;
+  assert.equal((await run({ kind: "select", value: ["夏季"], field })).code, "READBACK_MISMATCH");
+  assert.equal(clicks, 4, "a multiselect with unverified state never retries its toggle");
+  assert.deepEqual([...selected], ["winter", "summer"]);
+});
+
+test("keeps similar bilingual fiber rows distinct and accepts an exact rendered name", async t => {
+  const href = "https://agentseller.temu.com/goods/edit?productDraftId=duplicate-fibers";
+  const dom = new JSDOM(`<main id="page_container_id"><div id="productProperties[15]"><table><tbody><tr><td>
+    <div class="ST_outerWrapper_test"><div class="ST_head_test"><input placeholder="请选择" aria-controls="fibers" readonly>
+    <span class="ST_selectValueSingle_test"></span></div></div></td><td><input placeholder="请输入"></td>
+    </tr></tbody></table></div></main><div class="ST_dropdown_test" hidden><div role="listbox" id="fibers">
+      <div role="option" data-value="p1"><span class="name-label_name__test">聚酯纤维(涤纶)Polyester<span class="name-label_enName__test">Polyester</span></span></div>
+      <div role="option" data-value="p2">聚酯纤维(涤纶）Polyester</div>
+    </div></div>`, { url: href, runScripts: "outside-only" });
+  t.after(() => dom.window.close());
+  const { window } = dom;
+  const { document } = window;
+  window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const menu = document.getElementById("fibers");
+  const input = document.querySelector("input");
+  const selected = [];
+  const open = () => { menu.parentElement.hidden = false; };
+  input.addEventListener("focus", open);
+  input.addEventListener("click", open);
+  input.addEventListener("keydown", event => { if (event.key === "Escape") menu.parentElement.hidden = true; });
+  menu.addEventListener("click", event => {
+    selected.push(event.target.dataset.value);
+    document.querySelector(".ST_selectValueSingle_test").innerHTML = event.target.innerHTML;
+    menu.parentElement.hidden = true;
+  });
+  const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
+  const [field] = (await run({ kind: "inspect" })).fields;
+  const [first, second] = menu.children;
+  const ambiguous = await run({ kind: "select", field, value: "Polyester" });
+  assert.equal(ambiguous.code, "OPTION_AMBIGUOUS");
+  assert.match(ambiguous.message, /\[p1\].*\[p2\]/u);
+  assert.deepEqual(selected, []);
+  assert.equal((await run({ kind: "select", field, value: first.textContent })).status, "filled");
+  assert.deepEqual(selected, [first.dataset.value]);
+  document.querySelector(".ST_selectValueSingle_test").replaceChildren();
+  assert.equal((await run({ kind: "select", field, value: second.textContent })).status, "filled");
+  assert.deepEqual(selected, [first.dataset.value, second.dataset.value]);
+});
+
+test("waits for the active menu and option to finish opening before clicking and verifies a delayed write", async t => {
+  const href = "https://agentseller.temu.com/goods/edit?productDraftId=animated";
+  const dom = new JSDOM(`<main id="page_container_id"><div id="productProperties[24]">
+    <label>门襟类型Placket Type</label><div class="ST_outerWrapper_test"><div class="ST_head_test">
+    <input aria-controls="plackets" readonly><span class="ST_selectValueSingle_test"></span></div></div>
+    </div></main><div class="ST_dropdown_test" style="opacity:0;pointer-events:none">
+    <div role="listbox" id="plackets"></div></div>`, { url: href, runScripts: "outside-only" });
+  t.after(() => dom.window.close());
+  const { window } = dom;
+  window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const { document } = window;
+  const menu = document.getElementById("plackets");
+  const shell = menu.parentElement;
+  const selected = document.querySelector(".ST_selectValueSingle_test");
+  let ready = false;
+  let clicks = 0;
+  menu.getBoundingClientRect = () => ({ left: 0, right: 200, top: 50, bottom: 220 });
+  document.querySelector("input").addEventListener("focus", () => {
+    shell.style.opacity = "0.4";
+    menu.innerHTML = '<div role="option" data-value="pullovers" aria-selected="false" style="pointer-events:none">套头衫Pullovers</div>';
+    menu.firstElementChild.getBoundingClientRect = () =>
+      ({ left: 20, right: 180, top: ready ? 100 : 70, bottom: ready ? 120 : 90, width: 160, height: 20 });
+    window.setTimeout(() => {
+      shell.style.opacity = "1";
+      shell.style.pointerEvents = "auto";
+    }, 110);
+    window.setTimeout(() => {
+      ready = true;
+      menu.firstElementChild.style.pointerEvents = "auto";
+    }, 280);
+  });
+  document.elementFromPoint = () => ready ? menu.firstElementChild : null;
+  menu.addEventListener("click", () => {
+    clicks++;
+    if (!ready) return;
+    window.setTimeout(() => {
+      selected.textContent = "套头衫";
+      shell.style.opacity = "0";
+      shell.style.pointerEvents = "none";
+    }, 230);
+  });
+  const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
+  const [field] = (await run({ kind: "inspect" })).fields;
+  assert.equal((await run({ kind: "select", field, value: "套头" })).status, "filled");
+  assert.equal(clicks, 1);
+  assert.equal(selected.textContent, "套头衫");
+  assert.equal(shell.style.opacity, "0");
+});
+
+test("matches the compound Temu SKU option title and retries only a provably unapplied single click", async t => {
+  const href = "https://agentseller.temu.com/goods/edit?productDraftId=retry";
+  const dom = new JSDOM(`<main id="page_container_id"><div id="productSkuMap.red.productSkuMultiPack.skuClassification">
+    <div class="ST_outerWrapper_test"><div class="ST_head_test">
+    <input aria-controls="sku-menu" readonly><span class="ST_selectValueSingle_test"></span></div></div>
+    </div></main><div class="ST_dropdown_test" hidden><div role="listbox" id="sku-menu">
+    <div role="option" data-value="single" aria-selected="false">单品<div>仅1件商品 (如1个碗、1对耳环)</div></div>
+    <div role="option" data-value="same" aria-selected="false">同款多件装<div>多件同规格同种类单品</div></div>
+    </div></div>`, { url: href, runScripts: "outside-only" });
+  t.after(() => dom.window.close());
+  const { window } = dom;
+  window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const { document } = window;
+  const menu = document.getElementById("sku-menu");
+  const shell = menu.parentElement;
+  const confirmed = [];
+  document.querySelector("input").addEventListener("focus", () => { shell.hidden = false; });
+  menu.addEventListener("click", event => {
+    confirmed.push(event.target.dataset.value);
+    if (confirmed.length !== 2) return;
+    document.querySelector(".ST_selectValueSingle_test").textContent = "单品";
+    shell.hidden = true;
+  });
+  const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
+  const [field] = (await run({ kind: "inspect" })).fields;
+  assert.equal((await run({ kind: "select", field, value: "单品" })).status, "filled");
+  assert.deepEqual(confirmed, ["single", "single"]);
 });
 
 test("caches category attribute observations only within a site and exact category path", async () => {

@@ -7,17 +7,17 @@ const name = "PL女上装7ae31b";
 
 function fixture(existing) {
   const dom = new JSDOM('<main id="page_container_id">' + `
-    <section id="attached"><span>* 尺码表</span><button id="open">添加尺码表</button></section>
+    <section id="attached"><span>* 尺码表</span><button id="open">+ 添加尺码表</button></section>
     <button id="publish">创建</button><button id="save-draft">保存草稿</button>
     <div aria-modal="true" id="picker" hidden>
       <h2>选择尺码表模板</h2>
       <input data-testid="beast-core-select-htmlInput" readonly>
       <span tabindex="0" data-testid="beast-core-input-suffix"></span>
       <div role="listbox" hidden></div>
-      <button>创建模板</button><button>确认</button><button>取消</button>
+      <a id="create" href="#create-template">创建模板</a><button>确认</button><button>取消</button>
     </div>
-    <div aria-modal="true" id="editor" hidden>
-      <h2>创建模板</h2>
+    <div id="editor" data-placement="right" hidden>
+      <div><span>创建模板</span></div>
       <div data-testid="beast-core-form-item"><span>* 模板名称</span><input maxlength="20"></div>
       <label><input name="entry" type="radio" checked>系统默认</label>
       <label><input name="entry" type="radio">手动录入</label>
@@ -44,7 +44,7 @@ function fixture(existing) {
           <table id="body-data"><tbody><tr><td>S</td><td></td></tr><tr><td>M</td><td></td></tr></tbody></table>
         </section>
       </div>
-      <button>确认</button><button>取消</button>
+      <button disabled>确认</button><button>取消</button>
     </div>
     <div role="alertdialog" id="switch" hidden>
       <p>确认切换填写方式？切换后将清空原填写的尺码和参数信息</p><button>确认</button><button>取消</button>
@@ -78,7 +78,7 @@ function fixture(existing) {
     option.addEventListener("click", () => { selector.value = name; menu.hidden = true; });
     menu.append(option);
   }
-  button(picker, "创建模板").addEventListener("click", () => {
+  id("create").addEventListener("click", () => {
     actions.created++;
     editor.hidden = false;
     id("notice").hidden = false;
@@ -98,6 +98,9 @@ function fixture(existing) {
   id("range").addEventListener("change", () => {
     for (const row of id("body-data").rows) row.cells[1].innerHTML = '<input placeholder="最小值"><input placeholder="最大值">';
   });
+  editor.querySelector('input[maxlength="20"]').addEventListener("input", event => {
+    button(editor, "确认").disabled = !event.target.value;
+  });
   button(editor, "确认").addEventListener("click", () => {
     selector.value = editor.querySelector('input[maxlength="20"]').value;
     editor.hidden = true;
@@ -113,6 +116,7 @@ function fixture(existing) {
     close: () => window.close(),
     run: request => window.eval(`(${temuApparelPage.toString()})(${JSON.stringify({ href, ...request })})`),
     values: selector => [...doc.querySelectorAll(selector)].map(node => node.value),
+    url: () => window.location.href,
     showTip: () => { id("notice").hidden = false; },
     actions,
   };
@@ -138,6 +142,7 @@ const normalized = { name, unit: "cm", rows: [
   const result = await page.run({ kind: "create-size-chart", value: normalized });
   assert.equal(result.status, "verified", result.message);
   assert.equal(result.created, true);
+  assert.equal(page.url(), href);
   assert.deepEqual(page.values("#garment-data input"), ["102", "69", "96", "67"]);
   assert.deepEqual(page.values("#body-data input"), ["86", "90", "90", "94"]);
   assert.deepEqual(page.actions, { created: 1, attached: 1, noticed: 1, forbidden: 0, switched: 1 });

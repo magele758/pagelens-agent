@@ -65,6 +65,18 @@ function chartImage(dir, input) {
   return candidates.length ? image(dir, candidates[0], MAX_SIZE_CHART_IMAGE) : null;
 }
 
+function productReferenceImage(dir, input, expectedPath) {
+  const array = value => Array.isArray(value) ? value : [];
+  const roleImages = array(input.imageFiles).filter(file => ["main", "gallery", "detail", "variant"].includes(file?.role))
+    .map(file => file.path);
+  const variants = array(input.variantGroups).flatMap(group => array(group?.options)).map(option => option?.imagePath);
+  const references = [input.imagePath, ...array(input.mainImages), ...array(input.detailImages), ...roleImages,
+    ...variants, ...array(input.skus).map(sku => sku?.imagePath)];
+  const file = references.find(relative => typeof relative === "string" && !/^https:\/\//u.test(relative) &&
+    path.join(dir, relative) === expectedPath);
+  return file && image(dir, file, MAX_SIZE_CHART_IMAGE);
+}
+
 function resolveAdditionalImages(dir, input) {
   const checked = new Map();
   const missing = [];
@@ -163,9 +175,7 @@ export function readProductSizeChartChunk({ root, folder, expectedPath, offset, 
   const dirStat = fs.lstatSync(dir);
   if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || fs.realpathSync(dir) !== dir) throw new Error("商品目录已变化。");
   const input = readManifest(dir);
-  const file = asset === "main"
-    ? input.imagePath && image(dir, input.imagePath, MAX_SIZE_CHART_IMAGE)
-    : chartImage(dir, input);
+  const file = asset === "main" ? productReferenceImage(dir, input, expectedPath) : chartImage(dir, input);
   if (!file || file !== expectedPath) throw new Error(`${label}已变化，请重新读取商品目录。`);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {

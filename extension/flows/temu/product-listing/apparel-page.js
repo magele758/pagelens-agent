@@ -370,11 +370,14 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       return fail("VALUE_INVALID", "需要提供准确的 Temu 尺码表模板名，手动录入时还需要厘米尺码数据。");
     }
     const exact = (scope, selector, name) => {
-      const matches = [...scope?.querySelectorAll(selector) || []].filter(node => visible(node) &&
-        clean(node.textContent) === name && !node.disabled && !node.matches('[aria-disabled="true"],[data-disabled="true"]'));
+      const matches = [...scope?.querySelectorAll(selector) || []].filter(node => {
+        const text = clean(node.textContent);
+        return visible(node) && (name instanceof RegExp ? name.test(text) : text === name) &&
+          !node.disabled && !node.matches('[aria-disabled="true"],[data-disabled="true"]');
+      });
       return matches.length === 1 ? matches[0] : null;
     };
-    const modalSelector = '[class*="MDL_inner_"],dialog[open],[role="alertdialog"],[aria-modal="true"]';
+    const modalSelector = '[class*="MDL_inner_"],dialog[open],[role="dialog"],[role="alertdialog"],[aria-modal="true"]';
     const modals = () => [...document.querySelectorAll(modalSelector)].filter(visible);
     const button = (scope, label) => exact(scope, 'button,[role="button"]', label);
     const heading = 'h1,h2,h3,[role="heading"],[class*="MDL_title_"],[class*="MDL_header_"]';
@@ -384,7 +387,31 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       return matches.find(node => matches.every(other => other === node || other.contains(node))) || null;
     }
     const picker = () => titledDialog("选择尺码表模板", heading + ",span,div");
-    const editor = () => titledDialog("创建模板");
+    let activeEditor;
+    let activeTitle;
+    const editor = () => {
+      if (visiblePopup(activeEditor) && visiblePopup(activeTitle) && activeEditor.contains(activeTitle) &&
+          clean(activeTitle.textContent) === "创建模板") return activeEditor;
+      const drawerTitles = [...document.querySelectorAll(heading + ",span,div")].filter(node =>
+        clean(node.textContent) === "创建模板" && !node.closest('a,button,[role="link"],[role="button"]') && visiblePopup(node));
+      const editors = new Map();
+      for (const title of drawerTitles) {
+        for (let area = title.parentElement, depth = 0; area && depth < 8 && area !== root && !area.matches("main,body"); area = area.parentElement, depth++) {
+          const actions = [...area.querySelectorAll('button,[role="button"]')].filter(visible).map(node => clean(node.textContent));
+          if (["确认", "取消"].some(label => actions.filter(text => text === label).length !== 1)) continue;
+          const labels = [...area.querySelectorAll("label,span,div")].filter(visible)
+            .map(node => clean(node.textContent).replace(/^\*\s*/u, ""));
+          if (["模板名称", "系统默认", "手动录入"].every(label => labels.includes(label))) {
+            editors.set(area, title);
+            break;
+          }
+        }
+      }
+      const matches = [...editors.keys()];
+      activeEditor = matches.find(node => matches.every(other => other === node || other.contains(node))) || null;
+      activeTitle = editors.get(activeEditor);
+      return activeEditor;
+    };
     const switcher = () => {
       const matches = modals().filter(node => {
         const message = clean(node.textContent).replace(/\s+/gu, "");
@@ -404,7 +431,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       } while (Date.now() < deadline);
       return null;
     }
-    const target = button(root, "添加尺码表");
+    const target = button(root, /^\+?\s*添加尺码表$/u);
     if (!target) return attachedChart() ? fail("SIZE_CHART_ALREADY_ATTACHED", "页面已有尺码表，请核对现有模板。") :
       fail("SIZE_CHART_MISSING", "当前服装页没有可用的添加尺码表按钮。");
     if (openMenu().length) return fail("MENU_STILL_OPEN", "请关闭其他下拉后再添加尺码表。");
@@ -510,11 +537,19 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       }
       const hasBody = Object.keys(bodyColumns()).some(field => chart.rows.every(row => measurement(row?.body?.[field], field)));
       if (!hasBody) return fail("SIZE_CHART_BODY_REQUIRED", "Temu 新建尺码表需要至少一列可核对的身体参数，例如身高、胸围或腰围。");
-      const create = exact(modal, 'button,[role="button"],a', "创建模板");
-      if (!create || picker() !== modal || create.matches('a[href]:not([href="#"])')) {
+      const create = exact(modal, 'button,[role="button"],a,[role="link"]', "创建模板");
+      if (!create || picker() !== modal) {
         return fail("SIZE_CHART_CREATE_MISSING", "当前尺码表弹窗没有可用的创建模板入口。");
       }
-      create.click();
+      const preventNavigation = event => {
+        if (create.contains(event.target)) event.preventDefault();
+      };
+      if (create.matches("a[href]")) window.addEventListener("click", preventNavigation);
+      try {
+        create.click();
+      } finally {
+        window.removeEventListener("click", preventNavigation);
+      }
       const form = await waitFor(editor);
       if (!form) return fail("SIZE_CHART_CREATE_MISSING", "未打开 Temu 尺码表模板编辑窗。");
       const tip = await dismissSizeTip();
