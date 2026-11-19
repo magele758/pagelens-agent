@@ -195,9 +195,23 @@ const hooks = {
     assert.equal(args.tabId, 7);
     if (tool === "close_tab") { open = false; return {}; }
     if (tool === "reload_tab") { reloads++; render(); return {}; }
+    if (tool === "trusted_type") {
+      const input = dom.window.document.querySelector(args.selector);
+      assert.ok(input, "missing " + args.selector);
+      input.value = String(args.value);
+      const label = input.closest("tr")?.dataset.label;
+      if (label && input.closest("[data-id]")?.dataset.id.includes("sale_price"))
+        writes.push({ label, price: String(args.value) });
+      return { ok: true, action: "type" };
+    }
+    if (tool === "press_keys") {
+      if (changeFunctionBeforeSave)
+        dom.window.document.querySelector('#function [role="option"]').setAttribute("aria-selected", "true");
+      return { ok: true, action: "press_keys" };
+    }
     if (tool === "run_js") {
       assert.ok(args.code.length <= 8000);
-      if (priceChangedAfterRead && args.code.includes("function setDraftSkuPrice"))
+      if (priceChangedAfterRead && args.code.includes("function readDraftSkuNumbers"))
         dom.window.document.querySelector('[data-label="Silver / 1 piece"] [data-id*="sale_price"] input').value = "222";
       return { ok: true, result: await dom.window.eval("(async()=>{" + args.code + "})()") };
     } else assert.equal(tool, "activate_tab");
