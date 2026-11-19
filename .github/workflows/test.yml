@@ -28,6 +28,7 @@ jobs:
           node tools/test-tiktok-mx-reprice.mjs
           node tools/test-tiktok-mx-orders.mjs
           node tools/test-tiktok-mx-seller.mjs
+          node tools/test-tiktok-mx-seller-delist.mjs
       - name: Native host tests
         run: node native/test_host.mjs
       - name: Native gateway (socket broker + MCP shim) tests

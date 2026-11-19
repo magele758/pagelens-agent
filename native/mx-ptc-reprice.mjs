@@ -1,14 +1,14 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { createPtcExecTool } from "@mage-ai-lab/agent-loop/ptc";
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
-import { commerceScript, setDraftSkuPrice } from "../tools/tiktok-mx-commerce.mjs";
+import { commerceScript, setDraftSkuPrice, setDraftSkuStock } from "../tools/tiktok-mx-commerce.mjs";
 import {
-  readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
+  attributeCode, matchAttributeValue, readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
 import { registeredListing } from "./mx-ptc-inspect.mjs";
 
@@ -32,6 +32,32 @@ function priceTargets(baseline, multiplier) {
   });
 }
 
+function validateCap(row, maxPriceMXN) {
+  const cents = Math.round(maxPriceMXN * 100);
+  if (typeof maxPriceMXN !== "number" || !Number.isSafeInteger(cents) || cents / 100 !== maxPriceMXN ||
+      maxPriceMXN < row.beforeMXN || maxPriceMXN >= row.requestedMXN)
+    throw Error("Invalid seller price ceiling for " + row.label);
+  return maxPriceMXN;
+}
+
+async function readPriceCaps(file, { sourceId, draftId, multiplier }, targets) {
+  let saved;
+  try { saved = JSON.parse(await fs.readFile(file, "utf8")); }
+  catch (error) {
+    if (error.code === "ENOENT") return new Map();
+    throw error;
+  }
+  if (saved.sourceId !== sourceId || saved.draftId !== draftId || saved.multiplier !== multiplier || !Array.isArray(saved.caps))
+    throw Error("Unexpected saved test price plan");
+  const caps = new Map();
+  for (const { label, maxPriceMXN } of saved.caps) {
+    const row = targets.find(target => target.label === label);
+    if (!row || caps.has(label)) throw Error("Unexpected saved SKU ceiling");
+    caps.set(label, validateCap({ ...row, requestedMXN: row.afterMXN }, maxPriceMXN));
+  }
+  return caps;
+}
+
 function bindPrices(commerce, targets) {
   if (!commerce || commerce.skus.length !== targets.length)
     throw Error("The baseline must cover every SKU in the draft");
@@ -52,20 +78,50 @@ function bindPrices(commerce, targets) {
   });
 }
 
-function verifyPreserved(before, state, targets) {
-  if (state.url !== before.url || state.captcha) throw Error("Wrong draft or seller verification");
-  for (const field of ["title", "description", "enTitle", "enDescription", "gallery", "detailImages", "category", "attributes"])
-    if (!sameSnapshotValue(before[field], state[field])) throw Error("Unexpected change to draft " + field);
+// Reduce existing stock proportionally and assign the remaining whole units by
+// largest remainder. A zero-stock SKU stays at zero and no SKU gains units.
+function capInventory(rows, limit) {
+  const total = rows.reduce((sum, row) => sum + row.stock, 0);
+  if (!limit || total <= limit) return rows.map(row => ({ ...row, afterStock: row.stock }));
+  const scaled = rows.map(row => {
+    const share = row.stock * limit / total;
+    const whole = Math.floor(share);
+    return { ...row, afterStock: whole, remainder: share - whole };
+  });
+  const spare = limit - scaled.reduce((sum, row) => sum + row.afterStock, 0);
+  const ranked = [...scaled].sort((a, b) => b.remainder - a.remainder || a.label.localeCompare(b.label));
+  for (const row of ranked.slice(0, spare)) row.afterStock++;
+  return scaled;
+}
+
+function verifyPreserved(before, state, targets, stage) {
+  if (state.url !== before.url || state.captcha) throw Error("Wrong draft or seller verification " + stage);
+  for (const field of ["title", "description", "enTitle", "enDescription", "gallery", "detailImages", "category"])
+    if (!sameSnapshotValue(before[field], state[field])) throw Error("Unexpected change to draft " + field + " " + stage);
   for (const field of ["brand", "axes", "axisLabels", "options", "weightUnit", "dimensionsInCm", "packagedWeightGrams", "packageCm"])
     if (!sameSnapshotValue(before.salesAndShipping[field], state.salesAndShipping?.[field]))
-      throw Error("Unexpected change to draft " + field);
+      throw Error("Unexpected change to draft " + field + " " + stage);
   const rows = bindPrices(state.salesAndShipping, targets);
   for (const [index, row] of rows.entries())
-    if (row.stock !== targets[index].stock) throw Error("Unexpected stock change for " + row.label);
+    if (row.stock !== targets[index].afterStock) throw Error("Unexpected stock change for " + row.label + " " + stage);
   return rows.every(row => row.currentMXN === row.afterMXN);
 }
 
-function expectedPriceUpdate(copy, prices, multiplier) {
+function verifyAttributeSelections(before, observed, stage) {
+  const byName = new Map(observed.map(field => [field.name, field]));
+  if (byName.size !== observed.length || before.length !== observed.length)
+    throw Error("Category attribute fields changed " + stage);
+  for (const { name, selected } of before) {
+    const field = byName.get(name);
+    if (!field || field.selected.length !== selected.length)
+      throw Error("Category attribute " + name + " changed " + stage);
+    const matched = new Set(selected.map(value => matchAttributeValue(field.options, value)));
+    if (matched.size !== selected.length || [...matched].some(value => !field.selected.includes(value)))
+      throw Error("Category attribute " + name + " changed " + stage);
+  }
+}
+
+function expectedPriceUpdate(copy, prices, multiplier, maxTotalStock) {
   if (copy.salesAndShipping?.skus?.length !== prices.length || !copy.salesAndShipping.origins) return null;
   const next = structuredClone(copy);
   const used = new Set();
@@ -75,11 +131,21 @@ function expectedPriceUpdate(copy, prices, multiplier) {
     const row = matched[0];
     if (matched.length !== 1 || used.has(row) || ![row.beforeMXN, row.afterMXN].includes(sku.priceMXN)) return null;
     used.add(row);
-    if (sku.priceMXN === row.afterMXN) continue;
-    sku.priceMXN = row.afterMXN;
-    next.salesAndShipping.origins[sku.option + ".priceMXN"] = {
-      kind: "seller", verified: true, basis: `用户指定卖家草稿售价 MXN ${row.beforeMXN} × ${multiplier}。已刷新核对 MXN ${row.afterMXN}`,
-    };
+    if (sku.priceMXN !== row.afterMXN) {
+      sku.priceMXN = row.afterMXN;
+      next.salesAndShipping.origins[sku.option + ".priceMXN"] = {
+        kind: "seller", verified: true,
+        basis: `用户指定卖家草稿售价 MXN ${row.beforeMXN} × ${multiplier}。` +
+          (row.maxPriceMXN === undefined ? "" : `采用卖家页面对应 SKU 上限 MXN ${row.maxPriceMXN}。`) +
+          `已刷新核对 MXN ${row.afterMXN}`,
+      };
+    }
+    if (maxTotalStock && sku.stock !== row.afterStock) {
+      sku.stock = row.afterStock;
+      next.salesAndShipping.origins[sku.option + ".stock"] = {
+        kind: "seller", verified: true, basis: `测试期每个商品可售库存合计最多 ${maxTotalStock} 件。已刷新核对该 SKU 为 ${row.afterStock} 件。`,
+      };
+    }
   }
   return next;
 }
@@ -95,7 +161,9 @@ async function ptcVerify(before, saved, prices) {
   const executor = createPtcExecTool({ getAuthorizedTools: () => [{
     name: "verify_draft_prices", ptc: { kind: "read" },
     async execute() {
-      if (!verifyPreserved(before, saved, prices)) throw Error("Draft prices differ on refreshed readback");
+      if (!verifyPreserved(before, saved, prices, "after refresh"))
+        throw Error("Saved SKU prices did not reach their targets after refreshing the draft");
+      verifyAttributeSelections(before.attributeCatalog, saved.attributeCatalog, "after refresh");
       return { ok: true, content: "verified" };
     },
   }] });
@@ -104,9 +172,10 @@ async function ptcVerify(before, saved, prices) {
   if (!result.ok || JSON.parse(result.content).result !== "verified") throw Error(result.content);
 }
 
-export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, multiplier }, hooks) {
+export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, multiplier, maxTotalStock }, hooks) {
   if (![sourceId, draftId].every(id => typeof id === "string" && exactId.test(id)))
     throw Error("Expected exact TikTok source and draft IDs");
+  if (maxTotalStock !== undefined && maxTotalStock !== 10) throw Error("Expected the approved total test stock limit of 10");
   const targets = priceTargets(baselinePricesMXN, multiplier);
   const start = Date.now();
   const link = "https://seller.tiktokshopglobalselling.com/product/edit-draft/" + draftId + "?shop_region=MX";
@@ -125,24 +194,65 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     if (!reply?.ok) throw Error(reply?.error || "Draft price editor did not respond");
     return reply.result;
   }
+  async function readAttributeSelections(state, stage) {
+    if (!state.hasCategoryAttributes) return [];
+    const catalog = await runCode(tab, attributeCode(link));
+    if (!Array.isArray(catalog) || !catalog.length) throw Error("Category attribute controls unavailable " + stage);
+    return catalog;
+  }
   await fs.mkdir(lock);
   try {
     const { copy, dir } = await (hooks.registeredListing ?? registeredListing)(sourceId, draftId);
+    const digest = createHash("sha256").update(JSON.stringify([...targets].sort((a, b) => a.label.localeCompare(b.label)))).digest("hex").slice(0, 16);
+    const planPath = path.join(dir, "test-price-" + multiplier + "-" + digest + ".json");
+    const identity = { sourceId, draftId, multiplier };
+    const caps = multiplier === 100 ? await readPriceCaps(planPath, identity, targets) : new Map();
+    const requested = targets.map(row => {
+      const maxPriceMXN = caps.get(row.label);
+      return { ...row, planLabel: row.label, requestedMXN: row.afterMXN, afterMXN: maxPriceMXN ?? row.afterMXN, maxPriceMXN };
+    });
     tab = await group.open(link, [], false);
     await group.waitForUrl(tab, link);
     const before = await readFreshDocument(link, inEditor, snapshot);
     if (before.url !== link || before.captcha || before.title !== copy.title)
       throw Error("Draft differs from its source registration or requires seller verification");
-    const prices = bindPrices(before.salesAndShipping, targets);
-    const changes = prices.filter(row => row.currentMXN !== row.afterMXN);
+    const prices = capInventory(bindPrices(before.salesAndShipping, requested), maxTotalStock);
+    const changes = prices.filter(row => row.currentMXN !== row.afterMXN || row.stock !== row.afterStock);
+    if (changes.length) await inEditor("activate_tab", {});
+    before.attributeCatalog = await readAttributeSelections(before, "before editing");
     let saved = before, signal = null;
     if (changes.length) {
-      await inEditor("activate_tab", {});
       group.pendingForm = tab;
-      for (const row of changes)
-        await runCode(tab, verification + commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, row.afterMXN));
+      for (const row of changes) {
+        const inventory = row.stock !== row.afterStock ? { before: row.stock, after: row.afterStock } : null;
+        if (row.currentMXN === row.afterMXN) {
+          await runCode(tab, verification + commerceScript(setDraftSkuStock, row.label, row.stock, row.afterStock));
+          continue;
+        }
+        const result = await runCode(tab, verification +
+          commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, row.requestedMXN, multiplier === 100, inventory));
+        if (!result || result.priceMXN === undefined) throw Error("Seller price adjustment gave no readback for " + row.label);
+        if (result.maxPriceMXN !== undefined && multiplier === 100) {
+          row.maxPriceMXN = validateCap(row, result.maxPriceMXN);
+          caps.set(row.planLabel, row.maxPriceMXN);
+        } else {
+          if (result.maxPriceMXN !== undefined) throw Error("Unexpected seller price ceiling for " + row.label);
+          row.maxPriceMXN = undefined;
+          caps.delete(row.planLabel);
+        }
+        row.afterMXN = row.maxPriceMXN ?? row.requestedMXN;
+        if (result.priceMXN !== row.afterMXN) throw Error("Seller price result differs for " + row.label);
+        if (inventory && result.stock !== inventory.after) {
+          if (result.stock !== inventory.before) throw Error("Seller stock result differs for " + row.label);
+          await runCode(tab, verification + commerceScript(setDraftSkuStock, row.label, row.stock, row.afterStock));
+        }
+      }
       const staged = await runCode(tab, snapshot);
-      if (!verifyPreserved(before, staged, prices)) throw Error("Draft prices differ before saving");
+      if (!verifyPreserved(before, staged, prices, "before saving")) throw Error("Draft prices differ before saving");
+      verifyAttributeSelections(before.attributeCatalog, await readAttributeSelections(staged, "before saving"), "before saving");
+      if (multiplier === 100) await writeJson(planPath, {
+        ...identity, caps: [...caps].map(([label, maxPriceMXN]) => ({ label, maxPriceMXN })),
+      });
       signal = await runCode(tab, verification + saveDraftCode(link));
       if (/提交失败|保存失败/.test(signal?.message || "")) throw Error(signal.message);
       if (signal?.message?.includes("草稿保存成功") && /\/product\/edit-draft\//.test(signal.url || "") && signal.url !== link)
@@ -152,16 +262,23 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       for (const delay of [0, 1000, 4000]) {
         if (delay) await sleep(delay);
         saved = await readFreshDocument(link, inEditor, snapshot);
-        if (verifyPreserved(before, saved, prices)) break;
+        if (verifyPreserved(before, saved, prices, "after refresh")) {
+          saved.attributeCatalog = await readAttributeSelections(saved, "after refresh");
+          break;
+        }
       }
     }
     await ptcVerify(before, saved, prices);
-    const expected = expectedPriceUpdate(copy, prices, multiplier);
+    const expected = expectedPriceUpdate(copy, prices, multiplier, maxTotalStock);
     const expectedPlanUpdated = Boolean(expected && !isDeepStrictEqual(copy, expected));
     const receiptFile = path.join(dir, "reprice-" + randomUUID() + "-receipt.json");
     const receipt = {
       verified: true, changed: Boolean(changes.length), sourceId, draftId, link, multiplier,
-      prices: prices.map(({ label, stock, beforeMXN, afterMXN }) => ({ label, stock, beforeMXN, afterMXN })),
+      ...(maxTotalStock !== undefined && { maxTotalStock, savedTotalStock: prices.reduce((sum, row) => sum + row.afterStock, 0) }),
+      prices: prices.map(({ label, stock, afterStock, beforeMXN, afterMXN, requestedMXN, maxPriceMXN }) => ({
+        label, stock: afterStock, beforeMXN, afterMXN, ...(stock !== afterStock && { beforeStock: stock }),
+        ...(maxPriceMXN !== undefined && { requestedMXN, maxPriceMXN }),
+      })),
       expectedPlanUpdated, signal: signal?.message || null, receiptFile,
       elapsedSeconds: (Date.now() - start) / 1000,
     };

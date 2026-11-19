@@ -1,5 +1,16 @@
 const origin = "https://seller.tiktokshopglobalselling.com";
 const numericId = /^\d{12,22}$/;
+const editorQuery = {
+  __next_global_seller__: numericId,
+  global_seller_id: numericId,
+  seller_id: numericId,
+  category_id: /^\d{1,22}$/,
+  root_category_id: /^\d{1,22}$/,
+  online: /^[01]$/,
+  tab: /^\d{1,2}$/,
+  field: /^[a-zA-Z_][a-zA-Z_\d]{0,49}$/,
+  shop_region: /^MX$/,
+};
 export const mxOrderUrl = origin + "/order?shop_region=MX";
 export const mxManageUrl = origin + "/product/manage?shop_region=MX";
 export const mxDraftUrl = id => origin + "/product/edit-draft/" + id + "?shop_region=MX";
@@ -47,9 +58,11 @@ function draft(body) {
 export function mxSellerRequest(body) {
   switch (body?.mode) {
     case "reprice_draft":
-      fields(body, ["mode", "sourceId", "draftId", "baselinePricesMXN", "multiplier"]);
+      fields(body, ["mode", "sourceId", "draftId", "baselinePricesMXN", "multiplier"], ["maxTotalStock"]);
       if (![10, 100].includes(body.multiplier)) throw Error("Expected an explicit 10× or 100× test price multiplier");
-      return { ...draft(body), baselinePricesMXN: prices(body.baselinePricesMXN), multiplier: body.multiplier };
+      if (Object.hasOwn(body, "maxTotalStock") && body.maxTotalStock !== 10) throw Error("Expected the approved total test stock limit of 10");
+      return { ...draft(body), baselinePricesMXN: prices(body.baselinePricesMXN), multiplier: body.multiplier,
+        ...(body.maxTotalStock !== undefined && { maxTotalStock: body.maxTotalStock }) };
     case "publish_draft": {
       fields(body, ["mode", "sourceId", "draftId", "offer"]);
       const { offer } = body;
@@ -104,10 +117,11 @@ export function mxSellerUrlAllowed(parameters, url, { destination = false } = {}
     if (parameters.mode === "reprice_draft" && destination) return false;
     const tabs = page.searchParams.getAll("tab");
     return [...page.searchParams.keys()].every(key => ["shop_region", "tab"].includes(key)) &&
-      (!tabs.length || (tabs.length === 1 && ["all", "draft", "active", "deactivate"].includes(tabs[0])));
+      (!tabs.length || (tabs.length === 1 && ["all", "draft", "active", "deactivate", "reviewing"].includes(tabs[0])));
   }
   return parameters.mode === "optimize_listing" &&
     page.pathname === "/product/edit/" + parameters.productId &&
-    [...page.searchParams.keys()].every(key => key === "shop_region") &&
+    [...page.searchParams].every(([key, value]) => Object.hasOwn(editorQuery, key) &&
+      editorQuery[key].test(value) && page.searchParams.getAll(key).length === 1) &&
     (!parameters.editorUrl || page.href === parameters.editorUrl);
 }

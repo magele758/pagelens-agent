@@ -39,7 +39,7 @@ async function withSellerTab(send, url, run) {
     do {
       const tabs = await send("list_tabs", {});
       if (tabs.some(tab => tab.id === tabId && tab.url === url))
-        return await run(call, () => { keep = true; return tabId; });
+        return await run(call, () => { keep = true; return tabId; }, tabId);
       await new Promise(resolve => setTimeout(resolve, 150));
     } while (Date.now() < deadline);
     throw Error("The expected Seller Center page did not open");
@@ -159,7 +159,20 @@ async function delistProduct(send, { productId }) {
   return withSellerTab(send, url, async (call, keepOpen) => {
     const before = await readFreshDocument(url, call, sellerListCode(url, productId));
     if (before.status !== "active") throw Error("Could not verify this exact product as active");
-    const signal = (await call("run_js", { code: sellerListCode(url, productId, "delist") })).result;
+    const marker = randomUUID();
+    const run = async operation => (await call("run_js", { code: sellerListCode(url, productId, operation, marker) })).result;
+    let signal = await run("prepare_delist");
+    if (signal?.selector) {
+      const hover = await call("hover", { selector: signal.selector });
+      if (!hover?.ok) throw Error("Seller product actions did not open");
+      signal = await run("click_delist");
+    }
+    if (signal?.confirmationReady === true) {
+      try { signal = await run("confirm_delist"); }
+      catch (error) {
+        return { productId, status: "delist_unconfirmed", verified: false, tabId: keepOpen(), signal, error: error.message };
+      }
+    }
     const saved = await refreshedProduct(send, productId, "deactivate").catch(error => ({ error: error.message }));
     if (saved.status !== "inactive") return { productId, status: "delist_unconfirmed", verified: false,
       tabId: keepOpen(), signal, readback: saved };
@@ -171,37 +184,59 @@ async function delistProduct(send, { productId }) {
 
 function comparable(form) {
   const { enTitle, description, enDescription, gallery, detailImages, category, salesAndShipping } = form;
-  const { brand, packagedWeightGrams, packageCm, skus } = salesAndShipping;
+  const { brand, packagedWeightGrams, packageCm, axes, options, skus } = salesAndShipping;
   return { enTitle, description, enDescription, gallery, detailImages, category,
-    brand, packagedWeightGrams, packageCm, skus: skus.map(({ label, priceMXN, stock }) => ({ label, priceMXN, stock })) };
+    brand, packagedWeightGrams, packageCm, axes, options, skus: skus.map(({ label, priceMXN, stock }) => ({ label, priceMXN, stock })) };
 }
 
 async function optimizeProduct(send, { productId, editorUrl, beforeTitle, afterTitle }) {
   const current = await refreshedProduct(send, productId);
-  if (!["active", "inactive"].includes(current.status) || !current.editLinks.includes(editorUrl))
-    throw Error("Seller Center did not provide that edit link on the exact product row");
-  return withSellerTab(send, editorUrl, async call => {
+  if (!["active", "inactive"].includes(current.status) || (!current.editLinks.includes(editorUrl) && !current.canEdit))
+    throw Error("Seller Center did not expose an edit control on the exact product row");
+  return withSellerTab(send, editorUrl, async (call, keepOpen, tabId) => {
     const before = await readFreshDocument(editorUrl, call);
     if (before.captcha || ![beforeTitle, afterTitle].includes(before.title)) throw Error("The saved product title or verification state changed");
     if (before.title === afterTitle) return { productId, title: afterTitle, verified: true, changed: false };
+    async function selectedAttributes(form, inEditor = call) {
+      if (!form.hasCategoryAttributes) return [];
+      const { result } = await inEditor("run_js", { code: attributeCode(editorUrl) });
+      return result.map(({ name, selected }) => [name, [...selected].sort()]).sort((a, b) => a[0].localeCompare(b[0]));
+    }
+    const attributes = await selectedAttributes(before);
     const field = await call("run_js", { code:
       "return document.querySelectorAll(" + JSON.stringify(titleSelector) + ").length;" });
     if (field.result !== 1) throw Error("The title input could not be located uniquely");
     const write = await call("trusted_type", { selector: titleSelector, value: afterTitle, clear: true });
     if (!write.ok) throw Error(write.error || "Title input was not written");
+    await call("press_keys", { keys: ["Tab"] });
     const staged = (await call("run_js", { code: snapshotCode(true, true, true) })).result;
-    const compare = form => {
+    const compare = async (form, inEditor) => {
       if (form.url !== editorUrl || form.captcha || form.title !== afterTitle ||
-          JSON.stringify(comparable(before)) !== JSON.stringify(comparable(form)))
+          JSON.stringify(comparable(before)) !== JSON.stringify(comparable(form)) ||
+          JSON.stringify(attributes) !== JSON.stringify(await selectedAttributes(form, inEditor)))
         throw Error("The exact title and other product fields did not match");
     };
     await ptcVerify(() => compare(staged));
-    const signal = (await call("run_js", { code: editorSubmitCode(editorUrl, ["保存", "提交审核"]) })).result;
+    const signal = (await call("run_js", { code: editorSubmitCode(editorUrl, ["更新", "保存", "提交审核"]) })).result;
     if (signal.dialog || signal.verificationRequired || signal.messages?.some(message => /失败/.test(message)))
-      return { productId, status: "optimization_unconfirmed", verified: false, signal };
-    const saved = await withSellerTab(send, editorUrl, fresh => readFreshDocument(editorUrl, fresh));
-    const executor = await ptcVerify(() => compare(saved));
-    return { productId, title: afterTitle, verified: true, changed: true, executor, signal };
+      return { productId, status: "optimization_unconfirmed", verified: false, tabId: keepOpen(), signal };
+    try {
+      const review = await refreshedProduct(send, productId, "reviewing");
+      if (review.title === afterTitle && review.status === "under_review")
+        return { productId, title: afterTitle, status: "optimization_under_review", submitted: true, verified: false, signal, review };
+      const verifyEditor = async inEditor => {
+        const saved = await readFreshDocument(editorUrl, inEditor);
+        return ptcVerify(() => compare(saved, inEditor));
+      };
+      const tabs = await send("list_tabs", {});
+      const executor = tabs.some(tab => tab.id === tabId && tab.url === editorUrl) ? await verifyEditor(call) :
+        await withSellerTab(send, editorUrl, verifyEditor);
+      const listing = await refreshedProduct(send, productId);
+      if (listing.title !== afterTitle) throw Error("The updated title did not appear on the exact listing");
+      return { productId, title: afterTitle, status: listing.status, verified: true, changed: true, executor, signal };
+    } catch (error) {
+      return { productId, status: "optimization_unconfirmed", verified: false, tabId: keepOpen(), signal, error: error.message };
+    }
   });
 }
 

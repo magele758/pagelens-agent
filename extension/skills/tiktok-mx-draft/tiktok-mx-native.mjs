@@ -1,6 +1,6 @@
 import { NATIVE_HOST_NAME } from "../../lib/native-host.js";
 import { isMxSellerManageReturn, runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
-import { mxSellerRequest, mxSellerUrlAllowed } from "./tiktok-mx-seller-request.mjs";
+import { mxManageUrl, mxSellerRequest, mxSellerUrlAllowed } from "./tiktok-mx-seller-request.mjs";
 
 const tools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab", "activate_tab",
   "wait_for", "upload_file", "trusted_type", "press_keys", "navigate_tab"]);
@@ -78,7 +78,8 @@ export function createMxSellerTransport(parameters, call, tabUrl) {
   const allowed = (url, destination = false) => mxSellerUrlAllowed(parameters, url, { destination });
   return async job => {
     const { tool, args } = job.request || {};
-    if (job.action !== "bridge_call" || !allowedTools.has(tool) || !args || typeof args !== "object")
+    const delistHover = parameters.mode === "delist_listing" && tool === "hover";
+    if (job.action !== "bridge_call" || (!allowedTools.has(tool) && !delistHover) || !args || typeof args !== "object")
       throw Error("Unexpected TikTok MX seller action or tool");
     if (tool === "open_tab") {
       if (!allowed(args.url, true) || (args.backgroundUrls != null && (!Array.isArray(args.backgroundUrls) || args.backgroundUrls.length)) ||
@@ -95,6 +96,10 @@ export function createMxSellerTransport(parameters, call, tabUrl) {
         throw error;
       }
       if (!allowed(currentUrl)) throw Error("Task tab navigated outside the TikTok MX seller scope");
+      if (delistHover && (currentUrl !== mxManageUrl + "&tab=active" ||
+          !/^button\[data-pagelens-mx-delist="[a-f0-9-]{36}"\]$/i.test(args.selector) ||
+          Object.keys(args).some(key => !["tabId", "selector"].includes(key))))
+        throw Error("Expected the marked product dropdown on the active MX seller list");
       if (tool === "navigate_tab" && !allowed(args.url, true)) throw Error("Unexpected TikTok MX seller destination");
     }
     const reply = await call(tool, args);

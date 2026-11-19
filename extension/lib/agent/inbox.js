@@ -32,7 +32,9 @@ import { auditEntry, getAuditLog, originOfUrl } from "../bridge/audit.js";
 import { enforceTokenGuards } from "../bridge/trust-guard.js";
 import { chromeStorageAdapter, createApprovalQueue } from "./trust/approval-queue.js";
 import { offscreenDoc } from "../offscreen-doc.js";
+import { requireOptionalFeature } from "../optional-permissions.js";
 import { markJobStarted, recordJobFinished } from "./inbox-activity.js";
+import { createMxApprovalWatcher } from "./mx-approval-watch.js";
 import { developmentInboxJob } from "./inbox-development.js";
 import { cancelAgentPrompt, settleHeadless, startAgentPrompt, takeCompletion, takeExpired } from "./inbox-agent.js";
 
@@ -44,6 +46,28 @@ export const ALARM_NAME = "pagelens-agent-inbox";
 const cdp = getCdp();
 const gate = createPollGate();
 const MAX_PARALLEL_MX_CREATES = 3;
+let mxApprovalWatcher;
+
+function getMxApprovalWatcher() {
+  mxApprovalWatcher ??= createMxApprovalWatcher({
+    async notify({ mode, productId, title, jobId, intentAt }) {
+      const caption = mode === "optimize_listing" ? "TikTok Shop 商品更新审核通过" : "TikTok Shop 商品上架审核通过";
+      const message = `${String(title || "").trim().slice(0, 160) || "墨西哥店铺商品"} · ID ${productId}`;
+      const id = `mx-approval:${mode}:${productId}:${intentAt || jobId || ""}`;
+      await recordJobFinished({ id, action: `${caption} · ${message}` }, { ok: true }, Date.now());
+      try {
+        if (chrome.notifications?.create && !await requireOptionalFeature("notifications", { interactive: false })) {
+          await chrome.notifications.create(id, {
+            type: "basic", iconUrl: chrome.runtime.getURL("icons/icon48.png"), title: caption, message,
+          });
+        }
+      } catch {
+        // The Inbox activity is available when desktop notifications are disabled.
+      }
+    },
+  });
+  return mxApprovalWatcher;
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -865,6 +889,7 @@ export async function pollAgentInboxOnce(deps = {}) {
   const active = new Map();
   const results = [];
   let receiptError;
+  let reloadAccepted = false;
 
   // Only execution overlaps. Outbox and activity writes are applied here, one at a time.
   async function finishNextDraft() {
@@ -953,8 +978,11 @@ export async function pollAgentInboxOnce(deps = {}) {
       const { result, startedAt } = await runInboxJob(job, options);
       await recordJobFinished(job, result, startedAt);
       results.push(await finishJob(root, name, job, result, claimedRel));
+      if (directed && job.action === "ptc_mx_seller_action")
+        await getMxApprovalWatcher().record(job, result).catch(() => {});
       if (result.ok && job.action === "dev_reload") {
         // Persist the accepted receipt before Chrome destroys the worker.
+        reloadAccepted = true;
         chrome.runtime.reload();
         break;
       }
@@ -962,6 +990,12 @@ export async function pollAgentInboxOnce(deps = {}) {
         pollForNextStep();
     }
     await drainDrafts();
+    if (!reloadAccepted && settings.agentBridgeEnabled === true) {
+      await getMxApprovalWatcher().poll(productId => executeJob({
+        action: "ptc_mx_seller_action",
+        request: { mode: "listing_status", productId },
+      }, { ...deps, settings, directed: true })).catch(() => {});
+    }
     return { ok: true, processed: results.length, results };
   } finally {
     try { await drainDrafts(); }

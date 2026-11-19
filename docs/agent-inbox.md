@@ -42,14 +42,16 @@ node tools/agent-inbox.mjs wait "$JOB_ID" --extension-id "$EXTENSION_ID"
 
 | Mode | Request fields and readback |
 | --- | --- |
-| `reprice_draft` | `sourceId`, `draftId`, `multiplier` and `baselinePricesMXN` with one `{label, priceMXN}` entry per saved SKU. Set `multiplier: 100` for the listing test. A value of 10 remains accepted for existing jobs. Use the same multiplier and baseline on retries. Verify the target prices and unchanged inventory after refreshing the registered draft. |
+| `reprice_draft` | `sourceId`, `draftId`, `multiplier` and `baselinePricesMXN` with one `{label, priceMXN}` entry per saved SKU. For listing tests use `multiplier: 100` and `maxTotalStock: 10`. Stock is reduced only when the sum across the product's SKUs exceeds 10. When supported by the visible seller price control, the test reads the exact SKU's maximum after attempting the requested price. The receipt records the requested price, maximum and saved price. A multiplier of 10 remains accepted for existing jobs. Retry with the same multiplier and baseline. Verify prices, inventory and selected attributes after refreshing the registered draft. |
 | `publish_draft` | `sourceId`, `draftId` and `offer` with confirmed `brand`, `packagedWeightGrams`, `packageCm` with `length`, `width` and `height`, and `skus` with `label`, `priceMXN` and `stock`. Verify the exact saved offer, then select 提交审核 on the registered draft. An uncertain result stays recorded for reconciliation and prevents a duplicate submit. |
 | `listing_status` | `productId`. Read the status and any edit link from the product column and status column for that exact ID. `under_review` records review and `active` records a confirmed live listing. |
-| `optimize_listing` | `productId`, the `editorUrl` displayed for that exact product, and the `beforeTitle` and `afterTitle` in Spanish. Verify saved title, price and stock after refreshing. |
-| `delist_listing` | `productId`. Use the exact active row's 下架 control and check the same ID after refreshing 已下架. |
+| `optimize_listing` | `productId`, the `editorUrl` opened by that exact product row, and the `beforeTitle` and `afterTitle` in Spanish. Use 更新 and verify the saved title, selected attributes, price and stock after refreshing. |
+| `delist_listing` | `productId`. Use the exact active row's 下架 control, including the More menu when present. Confirm only the seller's one-item dialog and check the same ID after refreshing 已下架. |
 | `read_orders` | Optional `orderStatus`. Review the selected status and the count within Seller Center's current time range and filters after refresh. |
 
 Use the PTC receipt's `verified` and `status` fields to decide which seller action can run next. Keep the exact saved editor open when the publish result is uncertain.
+
+With the Inbox and seller bridge enabled, PageLens records verified submissions awaiting review and checks one due product ID about once a minute, including when the side panel is closed. An initial listing approval requires the seller's refreshed product row to say 在售. A title update also requires the expected new title on that product row. PageLens records each approval once in the Inbox activity log and sends a desktop notification when notifications are available.
 
 Run these commands in the checkout that Chrome loads as an unpacked extension:
 
