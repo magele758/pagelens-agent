@@ -957,7 +957,7 @@ export function createHostMessageHandler({ write, socketPath = defaultSocketPath
 
   return {
     async onMessage(msg) {
-      if (msg?.type === "mx.create" || msg?.type === "mx.repair") {
+      if (msg?.type === "mx.create" || msg?.type === "mx.repair" || msg?.type === "mx.seller") {
         try { write({ type: "mx.done", ok: true, result: await draft.start(msg) }); }
         catch (e) { write({ type: "mx.done", ok: false, error: e.message }); }
         return;

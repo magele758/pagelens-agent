@@ -499,7 +499,7 @@ export function sellerRead(ui) {
 
 // Resolve the current row immediately before each trusted edit. Seller Center
 // may replace its numeric SKU IDs when an earlier input commits.
-export function locateSkuInput(ui, option, field, value, force = false) {
+export function locateSkuInput(ui, option, field, value, force = false, expectedCurrent = null) {
   const tags = ui.options().map(ui.optionLabels).filter(labels =>
     labels.some(label => ui.norm(label) === ui.norm(option)));
   if (tags.length !== 1) throw Error("Cannot identify variant " + option);
@@ -507,7 +507,10 @@ export function locateSkuInput(ui, option, field, value, force = false) {
   if (matches.length !== 1) throw Error("Cannot identify SKU row " + option);
   const input = matches[0][field === "stock" ? "stock" : "price"];
   if (!input || input.disabled || input.readOnly) throw Error("Cannot edit " + option + " " + field);
-  if (!force && ui.numeric(input) === value) return null;
+  const current = ui.numeric(input);
+  if (!force && current === value) return null;
+  if (expectedCurrent !== null && current !== expectedCurrent)
+    throw Error("SKU value changed before editing " + option + " " + field);
   input.scrollIntoView({ block: "center", inline: "center" });
   const id = input.closest("[data-id]")?.dataset.id;
   if (!/^product\.publish\.skus\.(stock|sale_price)\.[\w-]+$/.test(id)) throw Error("Unexpected SKU control");

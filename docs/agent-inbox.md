@@ -30,6 +30,27 @@ Then reload PageLens on `chrome://extensions`.
 
 `tools/pagelens-dev-update.mjs test` runs the extension and Native Host regression tests. It includes a directed PTC draft inspection with real Native Messaging and a fixture seller page. It can run without a browser or store session.
 
+### TikTok México seller actions
+
+Use `ptc_mx_seller_action` with the unpacked extension ID and a JSON request. The target store must be signed in and the Seller Center origin must already be authorized. Each request opens its own working tabs.
+
+```sh
+node tools/agent-inbox.mjs enqueue --extension-id "$EXTENSION_ID" \
+  --action ptc_mx_seller_action --request-json '{"mode":"read_orders","orderStatus":"to_ship"}'
+node tools/agent-inbox.mjs wait "$JOB_ID" --extension-id "$EXTENSION_ID"
+```
+
+| Mode | Request fields and readback |
+| --- | --- |
+| `reprice_draft` | `sourceId`, `draftId`, `multiplier: 10` and `baselinePricesMXN` with one `{label, priceMXN}` entry per saved SKU. Use the same baseline on retries. Verify the target prices and unchanged inventory after refreshing the registered draft. |
+| `publish_draft` | `sourceId`, `draftId` and `offer` with confirmed `brand`, `packagedWeightGrams`, `packageCm` with `length`, `width` and `height`, and `skus` with `label`, `priceMXN` and `stock`. Verify the exact saved offer, then select 提交审核 on the registered draft. An uncertain result stays recorded for reconciliation and prevents a duplicate submit. |
+| `listing_status` | `productId`. Read the status and any edit link from the product column and status column for that exact ID. `under_review` records review and `active` records a confirmed live listing. |
+| `optimize_listing` | `productId`, the `editorUrl` displayed for that exact product, and the `beforeTitle` and `afterTitle` in Spanish. Verify saved title, price and stock after refreshing. |
+| `delist_listing` | `productId`. Use the exact active row's 下架 control and check the same ID after refreshing 已下架. |
+| `read_orders` | Optional `orderStatus`. Review the selected status and the count within Seller Center's current time range and filters after refresh. |
+
+Use the PTC receipt's `verified` and `status` fields to decide which seller action can run next. Keep the exact saved editor open when the publish result is uncertain.
+
 Run these commands in the checkout that Chrome loads as an unpacked extension:
 
 ```bash

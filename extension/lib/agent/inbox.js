@@ -627,13 +627,16 @@ export async function executeJob(
   const repairing = action === "ptc_repair_mx_draft";
   if (repairing && (!directed || job.token != null))
     return { ok: false, error: "TikTok draft repair requires a directed inbox request without a token" };
+  const sellerAction = action === "ptc_mx_seller_action";
+  if (sellerAction && (!directed || job.token != null))
+    return { ok: false, error: "TikTok MX seller action requires a directed inbox request without a token" };
   let auth = null;
   if (job?.token != null && action !== "bridge_call") {
     const res = await authorizeJobToken(job, action, loadTokens, now);
     if (res.error) return res.error;
     auth = res.record;
   }
-  if (repairing || action === "ptc_inspect_mx_draft" || action === "ptc_create_mx_draft") {
+  if (repairing || sellerAction || action === "ptc_inspect_mx_draft" || action === "ptc_create_mx_draft") {
     const bridge = getBridge();
     if (!bridge) return { ok: false, error: "PageLens bridge unavailable" };
     const run = action === "ptc_inspect_mx_draft" ? inspectDraftJob : runNativeDraft;
