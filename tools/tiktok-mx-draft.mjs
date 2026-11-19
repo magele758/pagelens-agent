@@ -394,7 +394,7 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
   try {
     data = await js(tab, extract, id);
   } catch (error) {
-    if (!/Frame with ID 0 is showing error page|Product data unavailable/i.test(error.message)) throw error;
+    if (!/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed/i.test(error.message)) throw error;
     mark("sourceReload");
     await bridge("activate_tab", { tabId: tab });
     await bridge("reload_tab", { tabId: tab });
@@ -1423,6 +1423,7 @@ export async function save(
       mark("saved");
       // A successful save can navigate the editor back to the product list.
       edit = await group.reopenSavedDraft(edit, link);
+      await bridge("activate_tab", { tabId: edit });
       if (expectedEdit === link) editTabs.add(edit);
       state = await readSaved(edit, link, copy, plan);
       // A forced rewrite of identical values needs a positive save indication.
