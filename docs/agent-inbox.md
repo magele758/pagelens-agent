@@ -51,6 +51,8 @@ node tools/agent-inbox.mjs wait "$JOB_ID" --extension-id "$EXTENSION_ID"
 
 Use the PTC receipt's `verified` and `status` fields to decide which seller action can run next. Keep the exact saved editor open when the publish result is uncertain.
 
+With the Inbox and seller bridge enabled, PageLens records each verified submission that's awaiting review and checks its exact product ID about once a minute, including when the side panel is closed. An initial listing approval requires the seller's refreshed product row to say 在售. A title update also requires the expected new title on that product row. Each approval generates one desktop notification and one entry in the Inbox activity log.
+
 Run these commands in the checkout that Chrome loads as an unpacked extension:
 
 ```bash
