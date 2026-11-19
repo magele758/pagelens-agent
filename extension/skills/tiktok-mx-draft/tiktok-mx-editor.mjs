@@ -80,7 +80,7 @@ export function snapshotCode(withCommerce, allowEmptyDescription, settle = false
   return `let seen=0;for(let i=0;i<100;i++){
     if(document.querySelector('${titleSelector}')?.value && (document.querySelector('${localDesc} .ProseMirror')?.textContent.trim() || (${allowEmptyDescription} && i>=12 && document.querySelector('${localDesc} .ProseMirror')))){
       const state=(${formState.toString()})();state.salesAndShipping=await ${numbers};
-      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=8)return state;
+      if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=(${expectedDetails}>0?35:10))return state;
     }
     await new Promise(r=>setTimeout(r,80));
   }throw Error("Draft editor did not load")`.split("\n").map(line => line.trimStart()).join("\n");
