@@ -481,8 +481,15 @@ async function createDraft(url, rate) {
     const preselectPromise = (!previous && !controls?.category?.label && pendingPreflight)
       ? (async () => {
           const [tab, searchRes] = await Promise.all([pendingPreflight, categorySearchQuery(facts)]);
-          const tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
-          const selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+          let tempCopy = { category: { searches: [searchRes.query], search: searchRes.query } };
+          let selected;
+          try {
+            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+          } catch (error) {
+            if (/verification|验证/i.test(error.message) || searchRes.queries.length < 2) throw error;
+            tempCopy = { category: { searches: searchRes.queries.slice(1), search: searchRes.queries[1] } };
+            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+          }
           let catalog = null;
           let attrDecision = Promise.resolve(null);
           try {
@@ -493,11 +500,15 @@ async function createDraft(url, rate) {
               attrDecision.catch(() => {});
             }
           } catch (error) {
+            if (/verification|验证/i.test(error.message)) throw error;
+            stages.preselectAttributesFallback = error.message;
             console.error("Preselect attributes fallback: " + error.message);
           }
           mark("preselectReady");
           return { selected, category: tempCopy.category, catalog, attrDecision };
         })().catch(error => {
+          if (/verification|验证/i.test(error.message)) throw error;
+          stages.preselectFallback = error.message;
           console.error("Preselect fallback: " + error.message);
           return null;
         })

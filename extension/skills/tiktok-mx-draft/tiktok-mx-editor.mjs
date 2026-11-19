@@ -149,12 +149,7 @@ async function categorySearchOperation() {
       if (field) {
         field.input.focus({ preventScroll: true });
         if (document.activeElement === field.input) {
-          if (field.input.value) {
-            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field.input, "");
-            field.input.dispatchEvent(new Event("input", { bubbles: true }));
-            field.input.focus({ preventScroll: true });
-            field.input.select();
-          }
+          if (field.input.value) field.input.setSelectionRange?.(0, field.input.value.length);
           document.querySelectorAll("[data-pagelens-category-search]").forEach(node => node.removeAttribute("data-pagelens-category-search"));
           field.input.setAttribute("data-pagelens-category-search", "1");
           return { selector: '[data-pagelens-category-search="1"]', current };
@@ -439,10 +434,11 @@ export function mxEditor(bridge, runCode, skuWrites) {
   const fillCopy = async (copy) => {
     const pause = (ms) => new Promise((r) => setTimeout(r, ms));
     const set = (el, val) => {
-      if (el.value === val) return;
+      if (!el || el.value === val) return;
+      getSelection?.()?.removeAllRanges?.();
       el.focus();
-      el.select();
-      if (document.execCommand("insertText", false, val)) {
+      el.select?.();
+      if (document.activeElement === el && document.execCommand("insertText", false, val) && el.value === val) {
         el.blur();
         return;
       }
@@ -451,6 +447,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
         "value",
       ).set.call(el, val);
       el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
       el.blur();
     };
     const desc = (id, val) => {
@@ -493,6 +490,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
         if (!view.state.doc.textContent.includes(paragraphs[0].textContent))
           throw Error("Editor did not commit description");
         e.blur();
+        getSelection?.()?.removeAllRanges?.();
         return;
       }
       e.focus();
@@ -520,6 +518,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
       if (!document.execCommand("insertText", false, val))
         throw new Error("Description edit failed");
       e.blur();
+      getSelection?.()?.removeAllRanges?.();
     };
     const src = document.querySelector(
       '[data-id="product.publish.title.input_lang"]',
@@ -739,7 +738,9 @@ export function mxEditor(bridge, runCode, skuWrites) {
         await js(tab, selector => Boolean(document.querySelector(selector)), sourceInput));
       const written = await setCopy(tab, { title, description, enTitle, enDescription, deferLocalDescription: bilingualMedia });
       if (bilingualMedia) {
-        if (written.captcha || written.enTitle !== enTitle || !sameText(written.enDescription || "", enDescription))
+        if (written.captcha)
+          throw Error("TikTok verification is open in the seller editor");
+        if (written.enTitle !== enTitle || !sameText(written.enDescription || "", enDescription))
           throw Error("Source-language copy changed before uploading images");
         await uploadDetails(tab, copy, details);
         phases.uploadsSubmitted = Date.now();
