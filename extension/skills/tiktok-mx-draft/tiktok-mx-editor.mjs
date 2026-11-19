@@ -50,9 +50,7 @@ export function formState() {
         ).size
       : 0,
     category:
-      document
-        .querySelector("#product-cascader-select-view")
-        ?.innerText.trim() || "",
+      (document.querySelector("#product-cascader-select-view")?.innerText || "").split("\n")[0].trim(),
     hasCategoryAttributes: [...document.querySelectorAll('[role="combobox"][aria-haspopup="listbox"]')]
       .some(e => e.getClientRects().length && !e.closest('[data-id],table,[role="row"]')),
     singleSku: document.body.innerText.includes("价格和库存"),
@@ -217,7 +215,7 @@ async function categoryOptionsOperation(wanted) {
           shown(button) && !button.disabled && button.innerText.trim() === "继续");
         if (proceed.length === 1) { proceed[0].click(); confirmed = true; }
       }
-      const current = document.querySelector("#product-cascader-select-view")?.innerText;
+      const current = (document.querySelector("#product-cascader-select-view")?.innerText || "").split("\n")[0];
       if (!dialog && normalize(current) === normalize(match.label)) return { choices, choice: match.label };
       await pause();
     }
@@ -319,7 +317,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
         if (!control)
           return { selected: false, reason: "Category selector unavailable" };
         const norm = (s) => s.replace(/\s*[-/>]\s*/g, "/").trim();
-        const selected = () => document.querySelector("#product-cascader-select-view")?.innerText.trim() || "";
+        const selected = () => (document.querySelector("#product-cascader-select-view")?.innerText || "").split("\n")[0].trim();
         const changeDialog = () => [...document.querySelectorAll('[role="dialog"]')].find(e =>
           e.getClientRects().length && e.innerText.includes("更改商品类目") && e.innerText.includes("属性信息将被清除"));
         if (changeDialog()) throw Error("A prior category change is awaiting confirmation");
