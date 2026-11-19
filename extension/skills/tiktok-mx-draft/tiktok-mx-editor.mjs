@@ -647,7 +647,14 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (src && copy.enTitle) {
       set(src, copy.enTitle);
       desc("product.publish.description.input_lang", copy.enDescription);
-      await pause(800);
+      await pause(copy.deferLocalDescription ? 800 : 1000);
+      if (!copy.deferLocalDescription) {
+        for (let w = 0; w < 25; w++) {
+          const t = document.querySelector('[data-id="product.publish.description.local_lang"] .ProseMirror')?.innerText?.trim() || "";
+          if (!/^(翻译中|Translating|Traduciendo)/i.test(t)) break;
+          await pause(200);
+        }
+      }
     }
     set(
       document.querySelector('[data-id="product.publish.product_name"]'),
