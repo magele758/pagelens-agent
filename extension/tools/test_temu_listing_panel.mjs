@@ -44,9 +44,9 @@ const open = bindTemuListingPanel({
   fetchImpl,
   chooseDirectory: async () => ++picked === 1
     ? { directoryName: "跨境", products: [product], issues: [] } : null,
-  suggestCategory: async ({ title }) => {
-    recommended.push(title);
-    return { category, source: "model" };
+  suggestCategory: async ({ title, operatorNotes }, { useModel }) => {
+    recommended.push([title, operatorNotes, useModel]);
+    return { category, source: useModel ? "model" : "local" };
   },
   openTab: async options => {
     navigation = options;
@@ -73,19 +73,20 @@ assert.equal(dom.window.localStorage.getItem("pagelens.temu.listingSite"), "加�
 get('[data-action="choose"]').click();
 await delay(15);
 assert.equal(get("#temu-directory-summary").textContent, "Water Bottle");
-assert.deepEqual(recommended, ["Water Bottle"]);
+assert.deepEqual(recommended, [["Water Bottle", "", false]]);
 assert.match(value("listing-category"), /运动杯/);
-assert.match(get("#temu-category-hint").textContent, /AI 推荐/);
+assert.match(get("#temu-category-hint").textContent, /已按商品资料匹配/);
 assert.equal(value("listing-site"), "加拿大站");
 get('[data-action="choose"]').click();
 await delay(10);
 assert.equal(get("#temu-directory-summary").textContent, "Water Bottle");
 
-const json = get("#temu-product-json");
-inputText(json, '{"title":"Edited Title"}');
+assert.equal(get("#temu-product-json"), null);
+const notes = get("#temu-product-notes");
+inputText(notes, "附带蓝色盖子");
 assert.equal(value("listing-category"), "选择类目");
 await delay(440);
-assert.deepEqual(recommended, ["Water Bottle", "Edited Title"]);
+assert.deepEqual(recommended, [["Water Bottle", "", false], ["Water Bottle", "附带蓝色盖子", false]]);
 
 openSelect("listing-origin");
 await delay(20);
@@ -95,6 +96,7 @@ await delay(20);
 clickChoice("listing-region", "广东省");
 assert.equal(value("listing-region"), "广东省");
 
+assert.equal(get('[data-action="run"]').textContent, "开始上品");
 get('[data-action="run"]').click();
 await delay(10);
 assert.equal(navigation.href, "https://agentseller.temu.com/goods/create/category");
@@ -104,6 +106,7 @@ assert.equal(replayed.tabId, 5);
 assert.deepEqual(replayed.input.sites, ["加拿大站"]);
 assert.deepEqual(replayed.input.categoryPath, category.path);
 assert.deepEqual(replayed.input.origin, { country: "中国大陆", region: "广东省" });
+assert.equal(replayed.input.operatorNotes, "附带蓝色盖子");
 
 openSelect("listing-category");
 await delay(25);

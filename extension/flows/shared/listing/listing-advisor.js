@@ -36,7 +36,8 @@ export function createListingAdvisor({ settings = {}, product, referenceImages =
     if (!isModelReady(model)) throw new Error("请先配置上品助手使用的模型。");
     const prompt = JSON.stringify({ product: productEvidence(product), ...data });
     const result = await request(model, {
-      signal, temperature: 0, maxTokens, rejectTruncated: true, lowLatency: true,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(22000)]) : AbortSignal.timeout(22000),
+      temperature: 0, maxTokens, rejectTruncated: true, lowLatency: true,
       messages: [{ role: "system", content: system },
         { role: "user", content: picture ? multimodalUserContent(prompt, picture) : prompt }],
     });

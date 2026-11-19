@@ -58,6 +58,7 @@ function verifiedValue(field, raw) {
     return;
   }
   const value = text(raw);
+  if (["englishTitle", "englishDescription"].includes(field.key) && (!/[a-z]/iu.test(value) || /\p{Script=Han}/u.test(value))) return;
   if (value && value.length <= Math.min(field.maxLength || 500, 500)) return value;
 }
 

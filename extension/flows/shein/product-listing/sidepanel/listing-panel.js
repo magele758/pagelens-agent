@@ -159,7 +159,12 @@ export function bindSheinListingPanel({
     updateSelectedProduct();
     renderResults(loaded.issues);
   }));
-  description.addEventListener("input", renderTarget);
+  description.addEventListener("input", () => {
+    if (!selectedProduct()) renderCategory([]);
+    report();
+    renderResults();
+    renderTarget();
+  });
   product.addEventListener("change", () => {
     description.value = "";
     report();

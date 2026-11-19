@@ -197,7 +197,7 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
     const usable = scope => visible(scope) && getComputedStyle(scope).pointerEvents !== "none" &&
       getComputedStyle(scope).opacity !== "0";
     if (usable(controlled)) return { region: controlled, rows: resultRows(controlled) };
-    const hint = one(matches(document, '.category_footer_tips', node => /^未找到合适的?分类\s*[?？]?(?:\s*点击申请)?$/u.test(label(node))));
+    const hint = one(matches(document, '.category_footer_tips', node => /^未找到合适的?分类/u.test(label(node))));
     const nearest = hint?.parentElement;
     for (let region = nearest, depth = 0; region && region !== document.body && depth < 5;
       region = region.parentElement, depth++) {
@@ -218,10 +218,11 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
     const previousState = rows => rows.map(({ node, path }) => [path, (node.innerHTML || "").slice(0, 600)]);
     const initial = JSON.stringify(previousState(existing?.rows ?? []));
     if (!sameQuery || !existing) {
+      input.click();
       input.focus({ preventScroll: true });
       if (!onPage() || blocked() || !storeMatches() || !enabled(input)) return fail("PAGE_CHANGED", "SHEIN 分类搜索框已变化。");
       set.call(input, query);
-      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: query }));
     }
     let lastKey = null;
     let since = 0;
