@@ -195,11 +195,11 @@ async function categoryOptionsOperation(wanted) {
     };
     if (wanted !== null && !fullPath(wanted)) throw Error("Expected a full category path");
     let entries = [];
-    const pause = () => new Promise(resolve => setTimeout(resolve, 60));
-    for (let i = 0; i < 40; i++) {
+    const pause = () => new Promise(resolve => setTimeout(resolve, 80));
+    for (let i = 0; i < 50; i++) {
       const scan = search();
       entries = scan.entries;
-      if (wanted === null ? (entries.length || (i >= 4 && scan.empty)) : entries.some(entry => normalize(entry.label) === normalize(wanted))) break;
+      if (wanted === null ? (entries.length || (i >= 12 && scan.empty)) : entries.some(entry => normalize(entry.label) === normalize(wanted))) break;
       await pause();
     }
     const choices = [...new Set(entries.filter(entry => !entry.disabled).map(entry => entry.label))];
@@ -333,14 +333,14 @@ export function mxEditor(bridge, runCode, skuWrites) {
         if (changeDialog()) throw Error("A prior category change is awaiting confirmation");
         const readSelection = async () => {
           let confirmed = false;
-          for (let i = 0; i < 24; i++) {
+          for (let i = 0; i < 40; i++) {
             const dialog = changeDialog();
             if (dialog) {
               const confirm = [...dialog.querySelectorAll("button")].find(b => !b.disabled && b.innerText.trim() === "继续");
               if (confirm && !confirmed) { confirm.click(); confirmed = true; }
             }
             if (norm(selected()) === norm(label) && !dialog) return { selected: true, label, shown: selected() };
-            await pause(200);
+            await pause(80);
           }
           const shown = selected();
           return { selected: false, label, shown };

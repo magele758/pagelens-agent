@@ -266,14 +266,14 @@ async function imageFile(url, file) {
     raw + "[0]",
     "-auto-orient",
     "-resize",
-    "1400x1400>",
+    "1000x1000>",
     "-background",
     "white",
     "-alpha",
     "remove",
     "-strip",
     "-quality",
-    "90",
+    "82",
     file,
   ]);
   await fs.unlink(raw);
@@ -422,31 +422,33 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
   const assets = images.map((url, i) => ({
     name: "image-" + String(i + 1).padStart(2, "0") + ".jpg", url, reused: false,
   }));
-  const downloadImages = async () => {
-    for (let i = 0; i < assets.length; i += 9) {
-      await Promise.all(assets.slice(i, i + 9).map(async asset => {
-        const file = path.join(dir, asset.name);
-        const cacheFile = path.join(cacheDir, assetKey(asset.url) + ".jpg");
-        const previous = priorSource?.assets.find(a => a.url === asset.url);
-        for (const candidate of [cacheFile, ...(previous ? [path.join(previousRun.dir, previous.name)] : [])]) {
-          try {
-            await fs.copyFile(candidate, file);
-            asset.reused = true;
-            break;
-          } catch (error) {
-            if (error.code !== "ENOENT") throw error;
-          }
-        }
-        if (!asset.reused) await imageFile(asset.url, file);
-        const tmp = cacheFile + "." + randomUUID();
-        await fs.copyFile(file, tmp);
-        await fs.rename(tmp, cacheFile);
-      }));
+  const assetPromises = new Map();
+  const downloadOne = async asset => {
+    const file = path.join(dir, asset.name);
+    const cacheFile = path.join(cacheDir, assetKey(asset.url) + ".jpg");
+    const previous = priorSource?.assets.find(a => a.url === asset.url);
+    for (const candidate of [cacheFile, ...(previous ? [path.join(previousRun.dir, previous.name)] : [])]) {
+      try {
+        await fs.copyFile(candidate, file);
+        asset.reused = true;
+        break;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
     }
-    mark("mediaReady");
+    if (!asset.reused) await imageFile(asset.url, file);
+    const tmp = cacheFile + "." + randomUUID();
+    await fs.copyFile(file, tmp);
+    await fs.rename(tmp, cacheFile);
+    return file;
   };
-  const mediaDone = downloadImages();
-  await Promise.all([mediaDone, onFactsReady?.({ ...data, assets }, dir, mediaDone)]);
+  for (const asset of assets) {
+    const p = downloadOne(asset);
+    p.catch(() => {});
+    assetPromises.set(asset.name, p);
+  }
+  const mediaDone = Promise.all(assetPromises.values()).then(() => { mark("mediaReady"); });
+  await Promise.all([mediaDone, onFactsReady?.({ ...data, assets }, dir, { all: mediaDone, byName: assetPromises })]);
   await write(path.join(dir, "source.json"), {
     ...data,
     url,
@@ -472,13 +474,13 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
 
 async function createDraft(url, rate) {
   await assertSourceCanBeCreated(sourceId(url));
-  const { generateListing, matchingPlan, categorySearchQuery, chooseAttributes, hanCategoryTerm } = await import("./tiktok-mx-ptc.mjs");
+  const { generateListing, matchingPlan, categorySearchQuery, chooseCategory, chooseAttributes, hanCategoryTerm } = await import("./tiktok-mx-ptc.mjs");
   const { confirmedControls } = await import("./tiktok-mx-flows.mjs");
   let generated, initialList, preselected, confirmedInitialList = false, preuploadedCount = 0;
   const dir = await prepare(url, false, tab => {
     pendingPreflight = openCreateForm(tab);
     pendingPreflight.catch(() => {});
-  }, async (facts, dir, mediaDone) => {
+  }, async (facts, dir, media) => {
     const previous = await matchingPlan(facts);
     const controls = previous ? null : await confirmedControls(facts);
     mark("generationStarted");
@@ -494,10 +496,11 @@ async function createDraft(url, rate) {
     });
     let earlyGalleryPromise = Promise.resolve(0);
     const startEarlyGallery = formTab => {
-      earlyGalleryPromise = Promise.all([listingPromise, mediaDone]).then(async ([gen]) => {
+      earlyGalleryPromise = listingPromise.then(async gen => {
         const names = gen.copy.gallery || [];
         if (names.length < 2) return 0;
-        const paths = await Promise.all(names.slice(0, 3).map(n => listingImage(dir, n, facts.assets)));
+        const firstBatch = names.slice(0, 3);
+        const paths = await Promise.all(firstBatch.map(n => media.byName.get(n)));
         const canMulti = await js(formTab, sel => document.querySelector(sel)?.multiple === true, 'input[type=file][accept=".jpg,.png,.jpeg"]');
         const batch = canMulti ? paths : paths.slice(0, 1);
         await bridge("upload_file", { tabId: formTab, selector: 'input[type=file][accept=".jpg,.png,.jpeg"]', paths: batch });
@@ -506,20 +509,60 @@ async function createDraft(url, rate) {
     };
     const preselectPromise = (!previous && !controls?.category?.label && pendingPreflight)
       ? (async () => {
-          const [tab, searchRes] = await Promise.all([pendingPreflight, categorySearchQuery(facts)]);
-          let tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
-          let selected;
-          try {
-            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
-          } catch (error) {
-            if (/verification|验证/i.test(error.message) || !/No suitable seller category|offered no category candidates/.test(error.message)) throw error;
-            const gen = await listingPromise;
-            const alt = gen?.copy?.category?.search?.trim();
-            if (!alt || !hanCategoryTerm.test(alt) || searchRes.queries.includes(alt)) throw error;
-            tempCopy = { category: { searches: [alt], search: alt } };
-            selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
-          }
+          const [tab, gen] = await Promise.all([pendingPreflight, listingPromise]);
           startEarlyGallery(tab);
+          let tempCopy = { category: null };
+          let selected = null;
+          // Trigger Seller Center's own AI category suggestions (✨ 建议) from the title first.
+          try {
+            const titleField = await js(tab, () => {
+              const en = document.querySelector('[data-id="product.publish.title.input_lang"]');
+              return en ? '[data-id="product.publish.title.input_lang"]' : '[data-id="product.publish.product_name"]';
+            });
+            const seedTitle = titleField.includes("input_lang") ? gen.copy.enTitle : gen.copy.title;
+            if (seedTitle) {
+              await bridge("trusted_type", { tabId: tab, selector: titleField, clear: true, value: seedTitle });
+              await bridge("press_keys", { tabId: tab, selector: titleField, keys: ["Tab"] });
+              const suggested = await js(tab, async expected => {
+                for (let i = 0; i < 22; i++) {
+                  if (location.href !== expected) throw Error("Draft changed during category suggestions");
+                  const list = [...new Set([...document.querySelectorAll("button")].filter(b => b.innerText.trim() === "应用" &&
+                    !b.disabled && b.getClientRects().length).map(b => b.parentElement.parentElement.innerText.replace(/\s*应用\s*$/, "").trim())
+                    .filter(p => p.split(/\s+[>/-]\s+/).length >= 3))];
+                  if (list.length) return list;
+                  await new Promise(r => setTimeout(r, 100));
+                }
+                return [];
+              }, createUrl);
+              if (suggested.length) {
+                const picked = await chooseCategory(facts, suggested).catch(() => null);
+                if (picked?.choice?.label) {
+                  const applied = await category(tab, picked.choice);
+                  if (applied?.selected) {
+                    selected = applied;
+                    tempCopy.category = picked.choice;
+                    await write(path.join(dir, "category-generation.json"), picked.ptc);
+                    mark("aiSuggestedCategoryApplied");
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            if (/verification|验证/i.test(error.message)) throw error;
+          }
+          if (!selected?.selected) {
+            const searchRes = await categorySearchQuery(facts);
+            tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
+            try {
+              selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+            } catch (error) {
+              if (/verification|验证/i.test(error.message) || !/No suitable seller category|offered no category candidates/.test(error.message)) throw error;
+              const alt = gen?.copy?.category?.search?.trim();
+              if (!alt || !hanCategoryTerm.test(alt) || searchRes.queries.includes(alt)) throw error;
+              tempCopy = { category: { searches: [alt], search: alt } };
+              selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
+            }
+          }
           let catalog = null;
           let attrDecision = Promise.resolve(null);
           try {
@@ -1207,6 +1250,7 @@ export async function save(
       // than waiting on a list document that cannot see the new row yet.
       const identifyUntil = Date.now() + 60000;
       for (let i = 0; i < 24 && Date.now() < identifyUntil && !id; i++) {
+        if (i === 0) await sleep(1000);
         const saved = await refreshDraftList(list, copy.title, true);
         const fresh = (saved.matches || []).filter((row) => row.id && !seenIds.includes(String(row.id)));
         if (fresh.length > 1) throw new Error("Ambiguous draft match");

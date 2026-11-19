@@ -91,7 +91,7 @@ async function readDraftList(title, draftId, waitForMatch) {
     previous = signature;
     if (ready && stable >= 1) {
       const matches = selectDraftRows(records, title, draftId);
-      if (!waitForMatch || matches.length || Date.now() - started >= 2000)
+      if (!waitForMatch || matches.length || Date.now() - started >= 400)
         return { matches, ids: records.map(row => draftIdOf(row.text)) };
     }
     await new Promise((r) => setTimeout(r, 100));
