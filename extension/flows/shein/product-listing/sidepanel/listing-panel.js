@@ -18,9 +18,18 @@ async function pickSheinDirectory() {
   return window.showDirectoryPicker({ id: "pagelens-shein-products", mode: "read" });
 }
 
+async function currentTabAccess(tab) {
+  try {
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: () => location.href });
+    return result?.result === tab.url;
+  } catch {
+    return false;
+  }
+}
+
 export function bindSheinListingPanel({
   getTargetTab, isAgentBusy, onBack, pickDirectory = pickSheinDirectory,
-  authorize = requireHostUrl, openEditor, inspect, replay,
+  authorize = requireHostUrl, probeAccess = currentTabAccess, openEditor, inspect, replay,
 }) {
   const get = name => $(`shein-listing-${name}`);
   const dialog = get("dialog");
@@ -111,6 +120,10 @@ export function bindSheinListingPanel({
     signal.throwIfAborted();
     targetTab = tab;
     if (!isSheinTab(tab)) throw new Error("当前标签已切换，请切回 SHEIN 商家后台。");
+    if (await probeAccess(tab)) {
+      signal.throwIfAborted();
+      return { tabId: tab.id, url: tab.url, signal, useActiveTab: true };
+    }
     const denied = await authorize(tab.url, { userGesture: true, tabId: tab.id });
     signal.throwIfAborted();
     if (denied) throw new Error(denied);

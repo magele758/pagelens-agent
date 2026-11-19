@@ -144,12 +144,13 @@ async function editorCall(api, tab, request, signal) {
   } while (true);
 }
 
-export async function openSheinListingEditor({ tabId, url, signal, api = chrome } = {}) {
+export async function openSheinListingEditor({ tabId, url, signal, useActiveTab = false, api = chrome } = {}) {
   const tab = await currentTab(tabId, url, api, signal);
   if (["category", "editor"].includes(route(tab.url))) {
     return { ok: true, stage: route(tab.url), tabId, url: tab.url };
   }
-  const created = await api.tabs.create({ url: sheinCategoryUrl, openerTabId: tabId, active: true });
+  const created = useActiveTab ? await api.tabs.update(tabId, { url: sheinCategoryUrl }) :
+    await api.tabs.create({ url: sheinCategoryUrl, openerTabId: tabId, active: true });
   const next = await waitForPage(api, created.id, "category", signal, "未能打开 SHEIN 商品发布分类页。");
   return { ok: true, stage: "category", tabId: next.id, url: next.url, message: "已打开 SHEIN 商品发布分类页。" };
 }
@@ -162,7 +163,7 @@ export async function inspectSheinListing({ tabId, url, signal, api = chrome } =
   return fail("WORKFLOW_PAGE_REQUIRED", "请先打开 SHEIN 商品发布页，再读取当前分类或表单。");
 }
 
-export async function replaySheinListing({ tabId, url, input, images = [], signal, onStep, api = chrome } = {}) {
+export async function replaySheinListing({ tabId, url, input, images = [], signal, onStep, useActiveTab, api = chrome } = {}) {
   const product = normalizeSheinListingInput(input);
   const report = label => onStep?.({ label });
   const fields = [];
@@ -176,7 +177,7 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
 
   if (!["category", "editor"].includes(route(tab.url))) {
     report("打开 SHEIN 商品发布分类页");
-    const opened = await openSheinListingEditor({ tabId, url, signal, api });
+    const opened = await openSheinListingEditor({ tabId, url, signal, useActiveTab, api });
     if (!opened.ok) return outcome(opened, "商品发布");
     tab = await currentTab(opened.tabId, opened.url, api, signal);
   }
