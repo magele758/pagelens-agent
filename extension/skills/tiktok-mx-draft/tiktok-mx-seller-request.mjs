@@ -47,9 +47,11 @@ function draft(body) {
 export function mxSellerRequest(body) {
   switch (body?.mode) {
     case "reprice_draft":
-      fields(body, ["mode", "sourceId", "draftId", "baselinePricesMXN", "multiplier"]);
+      fields(body, ["mode", "sourceId", "draftId", "baselinePricesMXN", "multiplier"], ["maxTotalStock"]);
       if (![10, 100].includes(body.multiplier)) throw Error("Expected an explicit 10× or 100× test price multiplier");
-      return { ...draft(body), baselinePricesMXN: prices(body.baselinePricesMXN), multiplier: body.multiplier };
+      if (Object.hasOwn(body, "maxTotalStock") && body.maxTotalStock !== 10) throw Error("Expected the approved total test stock limit of 10");
+      return { ...draft(body), baselinePricesMXN: prices(body.baselinePricesMXN), multiplier: body.multiplier,
+        ...(body.maxTotalStock !== undefined && { maxTotalStock: body.maxTotalStock }) };
     case "publish_draft": {
       fields(body, ["mode", "sourceId", "draftId", "offer"]);
       const { offer } = body;
