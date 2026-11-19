@@ -82,9 +82,10 @@ export function formState() {
 // Kept within the run_js size limit; the caller checks all values against its plan.
 export function snapshotCode(withCommerce, allowEmptyDescription, settle = false, expectedDetails = 0) {
   const numbers = withCommerce ? commerceScript(sellerRead).replace(/^return await /, "") : "null";
+  const readForm = formState.toString().replace(/\n\s+/g, "\n");
   return `let seen=0;for(let i=0;i<100;i++){
     if(document.querySelector('${titleSelector}')?.value && (document.querySelector('${localDesc} .ProseMirror')?.textContent.trim() || (${allowEmptyDescription} && i>=12 && document.querySelector('${localDesc} .ProseMirror')))){
-      const state=(${formState.toString()})();if(${expectedDetails}>0&&state.detailImages<${expectedDetails}){const pm=document.querySelector('${localDesc} .ProseMirror');if(pm){for(const n of pm.children)n.scrollIntoView?.({block:'center'});}}state.salesAndShipping=await ${numbers};
+      const state=(${readForm})();state.salesAndShipping=await ${numbers};
       if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=(${expectedDetails}>0?35:10))return state;
     }
     await new Promise(r=>setTimeout(r,80));
