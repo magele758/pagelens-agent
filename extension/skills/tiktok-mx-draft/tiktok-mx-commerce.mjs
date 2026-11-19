@@ -644,6 +644,22 @@ export async function setDraftSkuStock(ui, resolve, singleBatch, validateStock, 
   return { stock: target };
 }
 
+// The ceiling hint span may never render while a price settles. The price
+// control's own currency configuration carries the same sale price limitation.
+export async function readDraftSkuCeiling(ui, resolve, option) {
+  const input = resolve(ui, option).price;
+  if (!input) throw Error("Missing SKU price control");
+  const key = Object.keys(input).find(name => name.startsWith("__reactFiber$"));
+  for (let fiber = key ? input[key] : null, depth = 0; fiber && depth < 30; depth++, fiber = fiber.return) {
+    const rules = fiber.memoizedProps?.currency?.price_limitation;
+    if (rules) {
+      const limits = [...new Set(rules.map(rule => Number(rule?.max_sale_price)).filter(value => value > 0))];
+      return limits.length === 1 ? limits[0] : null;
+    }
+  }
+  return null;
+}
+
 export async function sellerNumbers(ui, readState, mode, plan) {
   const {
     field,
@@ -718,9 +734,11 @@ export async function sellerNumbers(ui, readState, mode, plan) {
 export function commerceScript(fn, ...args) {
   const source = fn => fn.toString().replace(/^ *\/\/.*\n/gm, "");
   const skuSource = "(" + source(skuDom) + ")()";
+  const ceilingRead = fn === readDraftSkuCeiling;
   const draftMutation = fn === setDraftSkuPrice || fn === setDraftSkuStock;
-  const domSource = draftMutation ? skuSource : "(" + source(commerceDom) + ")(" + skuSource + "," + localizedColor + ")";
-  const helpers = draftMutation ? [resolveSkuRow, singleSkuBatch, validateInventory] :
+  const domSource = draftMutation || ceilingRead ? skuSource : "(" + source(commerceDom) + ")(" + skuSource + "," + localizedColor + ")";
+  const helpers = ceilingRead ? [resolveSkuRow] :
+    draftMutation ? [resolveSkuRow, singleSkuBatch, validateInventory] :
     fn === sellerNumbers ? [sellerRead] : fn === locateSkuInput ? [resolveSkuRow] : [];
   let code =
     "return await (" +

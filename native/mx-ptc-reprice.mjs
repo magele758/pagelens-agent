@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { createPtcExecTool } from "@mage-ai-lab/agent-loop/ptc";
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
-import { commerceScript, setDraftSkuPrice, setDraftSkuStock } from "../tools/tiktok-mx-commerce.mjs";
+import { commerceScript, readDraftSkuCeiling, setDraftSkuPrice, setDraftSkuStock } from "../tools/tiktok-mx-commerce.mjs";
 import {
   attributeCode, matchAttributeValue, readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
@@ -229,16 +229,30 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
           await runCode(tab, verification + commerceScript(setDraftSkuStock, row.label, row.stock, row.afterStock));
           continue;
         }
+        let target = row.requestedMXN, configuredCap = null;
+        if (multiplier === 100) {
+          // The ceiling hint may never render while the price settles. The
+          // price control's own configuration carries the same sale price limit.
+          const ceiling = await runCode(tab, commerceScript(readDraftSkuCeiling, row.label));
+          if (ceiling !== null && ceiling >= row.beforeMXN && ceiling < target) {
+            configuredCap = validateCap(row, ceiling);
+            row.maxPriceMXN = configuredCap;
+            caps.set(row.planLabel, configuredCap);
+            target = configuredCap;
+          }
+        }
         const result = await runCode(tab, verification +
-          commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, row.requestedMXN, multiplier === 100, inventory));
+          commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, target, multiplier === 100, inventory));
         if (!result || result.priceMXN === undefined) throw Error("Seller price adjustment gave no readback for " + row.label);
         if (result.maxPriceMXN !== undefined && multiplier === 100) {
           row.maxPriceMXN = validateCap(row, result.maxPriceMXN);
           caps.set(row.planLabel, row.maxPriceMXN);
         } else {
           if (result.maxPriceMXN !== undefined) throw Error("Unexpected seller price ceiling for " + row.label);
-          row.maxPriceMXN = undefined;
-          caps.delete(row.planLabel);
+          if (configuredCap === null) {
+            row.maxPriceMXN = undefined;
+            caps.delete(row.planLabel);
+          }
         }
         row.afterMXN = row.maxPriceMXN ?? row.requestedMXN;
         if (result.priceMXN !== row.afterMXN) throw Error("Seller price result differs for " + row.label);

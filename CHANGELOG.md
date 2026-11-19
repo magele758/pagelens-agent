@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增单元测试 `extension/tools/test_clippings.mjs`，覆盖 URL 规范化过滤、Frontmatter 结构与书签标题组装校验。
 
 ### Fixed
+- TikTok 墨西哥改价兜底读取售价上限：卖家价格控件的「价格不能超过」提示 span 可能在改价观察窗口内不渲染，导致超上限价格被暂存、保存被表单校验静默拦截并误报 `Unexpected stock change`。改价循环现在先用独立脚本读取每个 SKU 价格控件自带的 `price_limitation.max_sale_price` 配置，直接以 `min(请求价, 上限)` 作为页面输入目标（多档不同上限视为无兜底）；页面提示仍优先生效，上限回执与上限计划文件照常记录。回执与文档口径：上限来自提示或控件配置。
 - 多选类任务过慢：`list_controls` 现在包含复选框/开关/单选（带 `checked` 与标签文字），弹窗内控件排在最前，默认 60、上限 150；工具结果归档阈值 1800→6000 字符、分页 3000→6000，避免小结果被迫分页多轮读取；页面被操作后再次读取同样参数不再被当作重复调用拦截；系统提示加入"并行调用 / 批量勾选"指引。
 
 ## [0.12.0] - 2026-09-11
