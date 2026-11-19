@@ -20,7 +20,7 @@ function newWatch(job, result, time) {
         (result.sourceId != null && request.sourceId !== result.sourceId)) return null;
     return { ...common, key: "publish:" + productId + ":" + result.intentAt, intentAt: result.intentAt };
   }
-  if (request.mode !== "optimize_listing" || request.productId !== productId ||
+  if (request.mode !== "optimize_listing" || request.productId !== productId || result.changed === false ||
       typeof request.afterTitle !== "string" || !request.afterTitle.trim() || title !== request.afterTitle) return null;
   const review = result.review;
   const pending = status === "optimization_under_review" && submitted === true &&
