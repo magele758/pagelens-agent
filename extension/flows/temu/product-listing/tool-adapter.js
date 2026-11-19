@@ -182,17 +182,21 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
     const denied = paths?.length ? await approveFiles("detail", paths) : null;
     const files = denied ? [] : paths || [];
     if (!files.length && !description?.trim()) return denied || failure("VALUE_INVALID", "没有可填写的详情资料。");
-    const edit = kind => runInPage(temuDecorationPage, { href, kind, description });
-    const prepared = await edit("prepare");
+    const edit = (kind, text) => runInPage(temuDecorationPage, { href, kind, description: text, hasImages: files.length > 0 });
+    const prepared = await edit("prepare", description);
     if (!prepared.ok) return prepared;
-    let imageResult;
-    if (files.length) {
-      imageResult = await uploadMaterial("decoration-images", files);
-      if (!imageResult.ok && !description?.trim()) return imageResult;
+    let verified;
+    try {
+      const written = prepared.written ?? description;
+      const imageResult = files.length ? await uploadMaterial("decoration-images", files) : null;
+      if (imageResult && !imageResult.ok && !written?.trim()) return imageResult;
+      verified = await edit("apply", written);
+      const imageIssue = denied || (imageResult && !imageResult.ok ? imageResult : null);
+      return verified.ok ? { ...verified, uploaded: imageResult?.ok ? files.length : 0,
+        ...(imageIssue && { imageIssue }), ...(prepared.detailIssue && { detailIssue: prepared.detailIssue }) } : verified;
+    } finally {
+      if (!verified?.ok && !signal?.aborted) await edit("cancel").catch(() => {});
     }
-    const verified = await edit("apply");
-    const imageIssue = denied || (imageResult && !imageResult.ok ? imageResult : null);
-    return verified.ok ? { ...verified, uploaded: imageResult?.ok ? files.length : 0, ...(imageIssue && { imageIssue }) } : verified;
   }
 
   return async (tool, args = {}) => {
@@ -218,7 +222,8 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
             if (!state.ok) return state;
             const dropdowns = await runInPage(temuControls, { kind: "inspect", scope: editorScope() });
             if (!dropdowns.ok) return dropdowns;
-            return { ...state, fields: [...state.fields, ...dropdowns.fields], unsupported: dropdowns.unsupported };
+            return { ...state, fields: [...state.fields, ...dropdowns.fields],
+              unsupported: dropdowns.unsupported, truncated: Boolean(state.truncated || dropdowns.truncated) };
           }
           case "temu_field_options":
           case "temu_select": {
@@ -239,7 +244,7 @@ export function createTemuListingToolCaller({ tabId, url, signal, confirmUpload,
             if (!["inspect", "add-color", "set-color", "set-sizes", "select-size-chart", "composition-inspect", "composition-add", "composition-percentage"].includes(args.kind)) {
               return failure("ACTION_UNSUPPORTED", "此操作不属于服装试填。");
             }
-            return await runInPage(temuApparelPage, { href, kind: args.kind, key: args.key, value: args.value });
+            return await runInPage(temuApparelPage, { href, kind: args.kind, key: args.key, value: args.value, alternate: args.alternate });
           case "temu_description":
             return await fillDetails(args);
           case "temu_origin":

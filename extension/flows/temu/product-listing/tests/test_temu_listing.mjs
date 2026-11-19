@@ -15,7 +15,7 @@ const title = { key: "productEnName", label: "英文商品名称", kind: "text",
 const material = { key: "productProperties[22]", label: "主体材质", kind: "select", required: true, options: [], value: "", locator: {} };
 const price = {
   key: "productSkuMap.color-size.siteSupplierPriceMap.100", label: "申报价格（CNY）",
-  skuGroup: "color-size", skuMember: "siteSupplierPriceMap.100", rowLabels: ["红色", "Small"],
+  skuGroup: "color-size", skuMember: "siteSupplierPriceMap.100", rowLabels: ["红色", "S"],
 };
 const images = ["/products/cup/photo.png"];
 const input = {
@@ -50,6 +50,7 @@ const input = {
     },
   });
   assert.equal(receipt.status, "ready-for-review");
+  assert.equal(receipt.verificationComplete, true);
   assert.equal(receipt.draftUrl, editor);
   assert.deepEqual(calls.filter(([tool]) => tool === "temu_write").map(([, args]) => args.value), ["Water Bottle", "19.80"]);
   assert.deepEqual(calls.find(([tool]) => tool === "temu_upload")[1].paths, images);
@@ -70,6 +71,7 @@ const input = {
   });
   assert.equal(result.status, "needs-review");
   assert.equal(result.code, "PAGE_CHANGED");
+  assert.equal(result.verificationComplete, false);
 }
 
 {
@@ -169,6 +171,16 @@ const input = {
   const receipt = await dom.window.eval(`(${temuDecorationPage.toString()})(${JSON.stringify({ href: editor, description })})`);
   assert.equal(receipt.status, "verified");
   assert.equal(localDescription, description);
+  textarea.hidden = true;
+  textarea.value = "";
+  textarea.maxLength = 8;
+  const prepare = await dom.window.eval(`(${temuDecorationPage.toString()})(${JSON.stringify({ href: editor, kind: "prepare", description })})`);
+  assert.equal(prepare.ok, true);
+  assert.equal(prepare.written, "A travel");
+  assert.equal(prepare.detailIssue.code, "DESCRIPTION_TRUNCATED");
+  const apply = await dom.window.eval(`(${temuDecorationPage.toString()})(${JSON.stringify({ href: editor, kind: "apply", description: prepare.written })})`);
+  assert.equal(apply.status, "verified");
+  assert.equal(localDescription, prepare.written);
   assert.equal(listingWrites, 0);
   dom.window.close();
 }

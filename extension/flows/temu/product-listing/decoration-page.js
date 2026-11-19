@@ -1,5 +1,5 @@
-/** Edit only the independent details decoration dialog on a scoped, new Temu draft. */
-export async function temuDecorationPage({ href, description = "", kind }) {
+/** Edit only the independent details decoration dialog on a scoped Temu draft. */
+export async function temuDecorationPage({ href, description = "", kind = "fill", hasImages }) {
   const clean = value => String(value ?? "").replace(/\s+/gu, " ").trim();
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
@@ -7,72 +7,118 @@ export async function temuDecorationPage({ href, description = "", kind }) {
     !node.closest('[hidden],[inert],[aria-hidden="true"]') && getComputedStyle(node).visibility !== "hidden");
   const fail = (code, message) => ({ ok: false, code, message });
   const root = document.getElementById("page_container_id");
-  const modalSelector = '[class*="MDL_inner_"],dialog[open],[role="alertdialog"],[aria-modal="true"]';
-  const modalTitle = "详情页装修";
+  const modalSelector = '[class*="MDL_inner_"],dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]';
   const modals = () => [...document.querySelectorAll(modalSelector)].filter(visible);
   const unique = items => items.length === 1 ? items[0] : null;
-  const decoration = () => unique(modals().filter(node => [...node.querySelectorAll('h1,h2,h3,[role="heading"],span,div')]
-    .some(heading => visible(heading) && heading.childElementCount === 0 && clean(heading.textContent) === modalTitle)));
+  const exact = (area, selector, label) => unique([...area.querySelectorAll(selector)]
+    .filter(node => visible(node) && !node.disabled && node.getAttribute("aria-disabled") !== "true" && clean(node.textContent) === label));
+  const buttons = 'button,[role="button"]';
+  const decoration = () => {
+    const candidates = modals().filter(node => [...node.querySelectorAll('h1,h2,h3,[role="heading"],span,div')]
+      .some(heading => visible(heading) && heading.childElementCount === 0 && clean(heading.textContent) === "详情页装修"));
+    return unique(candidates.filter(node => !candidates.some(other => node !== other && node.contains(other))));
+  };
+  const textControl = dialog => unique([...dialog.querySelectorAll('textarea[placeholder="请输入"]')]
+    .filter(node => visible(node) && !node.disabled && !node.readOnly));
+  const isOnlyDecoration = dialog => dialog && modals().every(node =>
+    node === dialog || node.contains(dialog) || dialog.contains(node));
 
-  async function waitFor(resolve, interval = 30) {
-    const deadline = Date.now() + 2800;
+  async function waitFor(resolve) {
+    const deadline = Date.now() + 3000;
     do {
       if (!onPage()) return null;
       const result = resolve();
       if (result) return result;
-      await new Promise(next => setTimeout(next, interval));
+      await new Promise(next => setTimeout(next, 45));
     } while (Date.now() < deadline);
     return null;
   }
 
-  if (!onPage()) return fail("PAGE_CHANGED", "Temu 商品页已切换。");
-  if (kind === "apply") return apply();
-  if (modals().length) return fail("MODAL_BLOCKED", "页面已有弹窗，详情图文尚未开始试填。");
-  if (typeof description !== "string" || description.length > 10000) {
-    return fail("VALUE_INVALID", "商品详情文本超长。");
+  async function cancel(dialog) {
+    if (decoration() !== dialog || !isOnlyDecoration(dialog)) return false;
+    const button = exact(dialog, buttons, "取消");
+    if (!button) return false;
+    button.click();
+    const done = await waitFor(() => {
+      if (!decoration()) return { closed: true };
+      const match = unique([...document.querySelectorAll("div,span,p")].filter(node =>
+        visible(node) && !node.childElementCount && clean(node.textContent) === "确认直接退出吗？当前已填写内容将不会被保存"));
+      // This confirmation is outside the decoration dialog on the live page.
+      const confirmation = match && modals().filter(node => node.contains(match) && !node.contains(dialog));
+      const area = confirmation && unique(confirmation.filter(node =>
+        !confirmation.some(other => node !== other && node.contains(other))));
+      const confirm = area && exact(area, buttons, "确认");
+      return confirm && { confirm };
+    });
+    if (!done || done.closed) return Boolean(done);
+    done.confirm.click();
+    return Boolean(await waitFor(() => !decoration()));
   }
-  const button = unique([...root?.querySelectorAll('[class^="decoration_operate__"] button') || []]
-    .filter(node => visible(node) && !node.disabled && clean(node.textContent) === "开始装修"));
-  if (!button) return fail("DECORATION_MISSING", "当前类目没有可核对的详情图文装修入口。");
-  button.click();
+
+  function boundedText(input, value) {
+    if (input.maxLength < 0 || value.length <= input.maxLength) return value;
+    const prefix = value.slice(0, input.maxLength).replace(/[\uD800-\uDBFF]$/u, "");
+    return prefix.trimEnd();
+  }
+
+  if (!onPage()) return fail("PAGE_CHANGED", "Temu 商品页已切换。");
+  if (kind === "cancel") return { ok: await cancel(decoration()) };
+  async function apply(text) {
+    const active = decoration();
+    if (!isOnlyDecoration(active)) return fail("MODAL_BLOCKED", "详情装修弹窗不在前台，请先核对。");
+    if (text.trim() && textControl(active)?.value !== text) {
+      return fail("READBACK_MISMATCH", "详情图文内容已变化。");
+    }
+    const save = exact(active, buttons, "保存");
+    if (!save) return fail("DECORATION_UNVERIFIED", "找不到详情页装修弹窗内的保存按钮。");
+    save.click();
+    const outcome = await waitFor(() => {
+      if (!decoration()) return { ok: true, status: "verified" };
+      const imageRequired = [...document.querySelectorAll('div,span,[role="alert"]')].some(node =>
+        visible(node) && !node.childElementCount && clean(node.textContent) === "详情图文需至少上传一张图片");
+      return imageRequired ? fail("DETAIL_IMAGE_REQUIRED", "Temu 要求详情图文至少有一张图片。请选含详情图的商品目录，并勾选上传图片后重试。") : null;
+    });
+    return outcome || fail("DECORATION_UNVERIFIED", "详情页装修弹窗尚未关闭，请核对后继续。");
+  }
+
+  if (kind === "apply") return apply(description);
+  if (kind !== "prepare" && kind !== "fill") return fail("ACTION_UNSUPPORTED", "此操作不属于详情装修。");
+  if (modals().length) return fail("MODAL_BLOCKED", "页面已有弹窗，详情图文尚未开始试填。");
+  if (typeof description !== "string" || description.length > 10000) return fail("VALUE_INVALID", "商品详情文本超长。");
+  if (hasImages === false && [...root?.querySelectorAll("p,div,span") || []].some(node =>
+    visible(node) && node.childElementCount <= 1 && /详情装修请同时具备图片展示及文字描述/u.test(clean(node.textContent)) &&
+    clean(node.textContent).length <= 220)) {
+    return fail("DETAIL_IMAGE_REQUIRED", "Temu 要求详情图文包含图片。请选择含详情图的商品目录并勾选上传图片。");
+  }
+  const open = root && exact(root, '[class^="decoration_operate__"] button', "开始装修");
+  if (!open) return fail("DECORATION_MISSING", "当前类目没有可核对的详情图文装修入口。");
+  open.click();
   const dialog = await waitFor(decoration);
   if (!dialog) return fail("DECORATION_UNVERIFIED", "详情页装修弹窗未出现。");
-  if (!description.trim()) return { ok: true, status: "opened" };
-  const textItem = unique([...dialog.querySelectorAll('[class^="side-left_sectionItem__"] span')]
-    .filter(node => visible(node) && clean(node.textContent) === "文本"));
-  if (!textItem) return fail("DECORATION_UNVERIFIED", "没有唯一匹配的装修文本组件。");
-  const current = () => {
-    const scoped = decoration();
-    return scoped && unique([...scoped.querySelectorAll('textarea[placeholder="请输入"]')]
-      .filter(node => visible(node) && !node.disabled && !node.readOnly));
-  };
-  if (current()) return fail("DECORATION_OCCUPIED", "详情图文已经有编辑内容，需要手动核对。");
-  if (!onPage() || decoration() !== dialog) return fail("PAGE_CHANGED", "详情装修弹窗已切换。");
-  textItem.click();
-  const input = await waitFor(current);
-  if (!input || input.value || input.maxLength >= 0 && description.length > input.maxLength) {
-    return fail("DECORATION_UNVERIFIED", "详情文本编辑框缺失、已有内容或超出平台字数限制。");
+  if (!description.trim()) return kind === "prepare" ? { ok: true, status: "opened", written: "" } : apply("");
+
+  async function recover(code, message) {
+    const closed = await cancel(dialog);
+    return fail(code, closed ? message : message + " 请在 Temu 关闭详情装修后继续。");
   }
-  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set.call(input, description);
+
+  const item = exact(dialog, '[class^="side-left_sectionItem__"] span', "文本");
+  if (!item) return recover("DECORATION_UNVERIFIED", "没有唯一匹配的装修文本组件。");
+  if (textControl(dialog)) return recover("DECORATION_OCCUPIED", "详情图文已有编辑内容，请核对现有内容。");
+  if (decoration() !== dialog || !isOnlyDecoration(dialog)) return fail("MODAL_BLOCKED", "详情装修弹窗已切换。");
+  item.click();
+  const input = await waitFor(() => decoration() === dialog && textControl(dialog));
+  if (!input || input.value) return recover("DECORATION_UNVERIFIED", "详情文本编辑框缺失或已有内容。");
+  const written = boundedText(input, description);
+  if (!written.trim()) return recover("VALUE_INVALID", "详情文本超过此类目的输入限制。");
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set.call(input, written);
   input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
   if (input.isConnected && onPage()) input.dispatchEvent(new Event("change", { bubbles: true }));
   input.blur();
-  const verified = await waitFor(() => current()?.value === description);
-  if (!verified) return fail("READBACK_MISMATCH", "平台未接受填写的详情图文。");
-  return kind === "prepare" ? { ok: true, status: "opened" } : apply();
-
-  async function apply() {
-    const active = decoration();
-    if (!active || modals().some(node => node !== active && !node.contains(active) && !active.contains(node))) {
-      return fail("MODAL_BLOCKED", "详情装修弹窗不在前台，请先核对。");
-    }
-    if (description.trim() && ![...active.querySelectorAll('textarea[placeholder="请输入"]')].some(node =>
-      visible(node) && node.value === description)) return fail("READBACK_MISMATCH", "详情图文内容已变化。");
-    const save = unique([...active.querySelectorAll('[class^="footer_footer__"] button')]
-      .filter(node => visible(node) && !node.disabled && clean(node.textContent) === "保存"));
-    if (!save) return fail("DECORATION_UNVERIFIED", "找不到详情页装修弹窗内的保存按钮。");
-    save.click();
-    const closed = await waitFor(() => !decoration());
-    return closed ? { ok: true, status: "verified" } : fail("DECORATION_UNVERIFIED", "详情页装修弹窗尚未关闭，请核对后继续。");
-  }
+  const verified = await waitFor(() => decoration() === dialog && textControl(dialog)?.value === written);
+  if (!verified) return recover("READBACK_MISMATCH", "平台未接受填写的详情图文。");
+  const detailIssue = written.length < description.length ?
+    { code: "DESCRIPTION_TRUNCATED", message: `Temu 此组件限 ${input.maxLength} 字，已试填前 ${written.length} 字，原文保留在商品资料中。` } : null;
+  if (kind === "fill") return apply(written);
+  return { ok: true, status: "opened", written, ...(detailIssue && { detailIssue }) };
 }
