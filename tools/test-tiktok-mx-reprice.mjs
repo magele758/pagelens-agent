@@ -64,6 +64,16 @@ function buildEditor(rows, documentEpoch) {
   win.HTMLElement.prototype.scrollIntoView = () => {};
   win.HTMLElement.prototype.getClientRects = function () { return this.closest("[hidden]") ? [] : [{}]; };
   win.HTMLElement.prototype.getBoundingClientRect = function () { return { width: this.closest("[hidden]") ? 0 : 100 }; };
+  // React-controlled price inputs carry the seller's sale price limitation in
+  // their component props even while the ceiling hint span stays unrendered.
+  if (priceLimit !== null) for (const field of win.document.querySelectorAll('[data-id^="product.publish.skus.sale_price."]')) {
+    const rules = priceLimit === "ambiguous"
+      ? [{ max_sale_price: "4672.5" }, { max_sale_price: "9999" }]
+      : [{ warehouse_sub_type: 3, min_dutiable_price: "1", max_sale_price: String(priceLimit) }];
+    field.querySelector("input").__reactFiber$fixture = {
+      memoizedProps: { currency: { price_limitation: rules } }, return: null,
+    };
+  }
   return dom;
 }
 
@@ -71,6 +81,7 @@ let persisted = structuredClone(original), dom, epoch = 0, open = false, clicks 
 let corruptStock = false, priceChangedAfterRead = false, changeFunctionBeforeSave = false;
 let persistedFunction = false, changeFunctionAfterSave = false;
 let showBatch = false, batchStock = "";
+let priceLimit = null;
 const writes = [], batchApplies = [], batchStockApplies = [];
 function render() {
   dom?.window.close();
@@ -275,6 +286,33 @@ try {
   assert.deepEqual(batchApplies, [12000, 4672.5, 12000, 4672.5]);
   assert.deepEqual(batchStockApplies, [10, 10, 10]);
   assert.deepEqual([persisted[0].priceMXN, persisted[0].stock], [4672.5, 10]);
+
+  // The ceiling hint span may never render for direct per-row price edits.
+  // The control's own price limit configuration then supplies the ceiling.
+  showBatch = false;
+  persisted = structuredClone(original);
+  await fs.writeFile(listingFile, JSON.stringify(listing));
+  priceLimit = 4672.5;
+  const configured = await runMxDraftReprice(args, hooks);
+  assert.equal(configured.verified, true);
+  assert.equal(configured.changed, true);
+  assert.deepEqual(configured.prices, [
+    { label: "Silver / 1 piece", stock: 0, beforeMXN: 120, afterMXN: 4672.5, requestedMXN: 12000, maxPriceMXN: 4672.5 },
+    { label: "Gold", stock: 3, beforeMXN: 9.99, afterMXN: 999 },
+  ]);
+  assert.deepEqual(persisted.map(row => row.priceMXN), [4672.5, 999]);
+  assert.match((await readJson(listingFile)).salesAndShipping.origins["Plata / 1 pza.priceMXN"].basis,
+    /上限 MXN 4672\.5/);
+
+  // Ambiguous configured limits keep the unconfirmed ceiling out of the flow.
+  persisted = structuredClone(original);
+  priceLimit = "ambiguous";
+  const ambiguous = await runMxDraftReprice(args, hooks);
+  assert.equal(ambiguous.verified, true);
+  assert.ok(ambiguous.prices.every(row => row.maxPriceMXN === undefined));
+  assert.deepEqual(ambiguous.prices.map(row => [row.label, row.afterMXN]), [["Silver / 1 piece", 12000], ["Gold", 999]]);
+  assert.deepEqual(persisted.map(row => row.priceMXN), [12000, 999]);
+  priceLimit = null;
 
   const savedStocks = [81, 19];
   persisted = original.map((row, index) => ({ ...row, priceMXN: [12000, 999][index], stock: savedStocks[index] }));
