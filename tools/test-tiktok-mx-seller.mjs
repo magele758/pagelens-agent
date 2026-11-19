@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { editorSubmitCode, sellerListCode } from "../native/mx-seller-page.mjs";
+import { editorSubmitCode, editorAdvisoryConfirmCode, sellerListCode } from "../native/mx-seller-page.mjs";
 import { mxManageUrl, mxDraftUrl, mxSellerRequest, mxSellerUrlAllowed } from "../extension/skills/tiktok-mx-draft/tiktok-mx-seller-request.mjs";
 
 const productId = "1738630710999877196";
@@ -60,6 +60,42 @@ const table = rows => `<h1>商品管理</h1><table><thead><tr><th>商品</th><th
   assert.match((await page.run(editorSubmitCode(draft, ["提交审核"]))).dialog, /同意协议/);
   await assert.rejects(page.run(editorSubmitCode(draft, ["提交审核"])), /unexpected seller dialog/);
   assert.equal(clicks, 1);
+  page.window.close();
+}
+{
+  const page = sellerDocument("<button>提交审核</button>", draft);
+  const button = page.document.querySelector("button");
+  button.onclick = () => page.document.body.insertAdjacentHTML("beforeend",
+    '<div role="dialog">1 个问题可能需要优化 发品详情 建议 图片数量 上传至少 5 张商品图片以提高转化率。<button>返回编辑</button><button>提交</button></div>');
+  assert.match((await page.run(editorSubmitCode(draft, ["提交审核"]))).dialog, /上传至少 5 张商品图片/);
+  await assert.rejects(page.run(editorAdvisoryConfirmCode(mxDraftUrl(otherId))), /changed/);
+  let confirmedClicks = 0;
+  for (const control of page.document.querySelectorAll("button")) {
+    if (control.textContent === "提交") control.onclick = () => {
+      confirmedClicks++;
+      control.closest('[role="dialog"]').remove();
+      page.document.body.insertAdjacentHTML("beforeend",
+        '<div class="arco-message-content">提交成功<a href="' + mxManageUrl + '">商品 ID: ' + otherId + "</a></div>");
+    };
+  }
+  const confirmed = await page.run(editorAdvisoryConfirmCode(draft));
+  assert.equal(confirmedClicks, 1);
+  assert.equal(confirmed.advisoryConfirmed, true);
+  assert.match(confirmed.messages.join(" "), /提交成功/);
+  assert.equal(confirmed.productLinks.length, 1);
+  page.window.close();
+}
+{
+  const page = sellerDocument("<button>提交审核</button>", draft);
+  page.document.body.insertAdjacentHTML("beforeend", '<div role="dialog">提交前请阅读并同意协议<button>同意</button></div>');
+  await assert.rejects(page.run(editorAdvisoryConfirmCode(draft)), /not a confirmable advisory/);
+  page.window.close();
+}
+{
+  const page = sellerDocument("<button>提交审核</button>", draft);
+  page.document.body.insertAdjacentHTML("beforeend",
+    '<div role="dialog">建议 补充合规资质<button>返回编辑</button><button>提交</button><button>取消</button></div>');
+  await assert.rejects(page.run(editorAdvisoryConfirmCode(draft)), /not a confirmable advisory/);
   page.window.close();
 }
 {
