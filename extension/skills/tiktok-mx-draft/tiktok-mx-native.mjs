@@ -1,10 +1,14 @@
 import { NATIVE_HOST_NAME } from "../../lib/native-host.js";
 import { isMxSellerManageReturn, runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
+import { mxSellerRequest, mxSellerUrlAllowed } from "./tiktok-mx-seller-request.mjs";
 
 const tools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab", "activate_tab",
   "wait_for", "upload_file", "trusted_type", "press_keys", "navigate_tab"]);
 const seller = "https://seller.tiktokshopglobalselling.com";
 const productId = /^\d{12,22}$/;
+const sellerTools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab", "activate_tab",
+  "wait_for", "trusted_type", "press_keys", "navigate_tab"]);
+const orderTools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab"]);
 export function japaneseSourceId(value) {
   const page = new URL(value);
   const match = page.pathname.match(/^\/jp\/pdp\/(?:[^/]+\/)?(\d{12,22})\/?$/);
@@ -68,25 +72,70 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
   };
 }
 
-export async function runNativeDraft(job, bridge) {
+export function createMxSellerTransport(parameters, call, tabUrl) {
+  const owned = new Set();
+  const allowedTools = parameters.mode === "read_orders" ? orderTools : sellerTools;
+  const allowed = (url, destination = false) => mxSellerUrlAllowed(parameters, url, { destination });
+  return async job => {
+    const { tool, args } = job.request || {};
+    if (job.action !== "bridge_call" || !allowedTools.has(tool) || !args || typeof args !== "object")
+      throw Error("Unexpected TikTok MX seller action or tool");
+    if (tool === "open_tab") {
+      if (!allowed(args.url, true) || (args.backgroundUrls != null && (!Array.isArray(args.backgroundUrls) || args.backgroundUrls.length)) ||
+          (args.groupWithTab != null && !owned.has(args.groupWithTab))) throw Error("Unexpected TikTok MX seller destination");
+    } else if (tool !== "list_tabs") {
+      if (!owned.has(args.tabId)) throw Error("Tab outside TikTok MX seller task");
+      let currentUrl;
+      try { currentUrl = await tabUrl(args.tabId); }
+      catch (error) {
+        if (tool === "close_tab" && /\bNo tab with id\b/i.test(error?.message || "")) {
+          owned.delete(args.tabId);
+          throw Error("TAB_NOT_FOUND: TikTok MX seller task tab already closed");
+        }
+        throw error;
+      }
+      if (!allowed(currentUrl)) throw Error("Task tab navigated outside the TikTok MX seller scope");
+      if (tool === "navigate_tab" && !allowed(args.url, true)) throw Error("Unexpected TikTok MX seller destination");
+    }
+    const reply = await call(tool, args);
+    if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
+    if (tool === "open_tab") owned.add(reply.result.tabId);
+    if (tool === "close_tab") owned.delete(args.tabId);
+    if (tool === "list_tabs") return reply.result.filter(tab => owned.has(tab.id) && allowed(tab.url));
+    return reply.result;
+  };
+}
+
+function draftOpening(job, action) {
   const { rate } = job;
-  const repairing = String(job.action || "").trim() === "ptc_repair_mx_draft";
-  const repair = repairing ? repairDraftRequest(job) : null;
+  const repair = action === "ptc_repair_mx_draft" ? repairDraftRequest(job) : null;
   const sourceId = repair?.sourceId ?? (job.sourceUrl ? japaneseSourceId(job.sourceUrl) : job.sourceId);
   if (job.sourceId != null && job.sourceId !== sourceId) throw Error("Conflicting source identities");
   if (repair && job.token != null) throw Error("TikTok draft repair does not accept a token");
   if (!repair && (job.token != null || typeof sourceId !== "string" || !productId.test(sourceId) || !Number.isFinite(rate) || rate <= 0))
     throw Error("Expected a local draft request with a source ID and conversion rate");
-  const opening = repair ? { type: "mx.repair", ...repair } : { type: "mx.create", sourceId, rate };
+  return repair ? { type: "mx.repair", ...repair } : { type: "mx.create", sourceId, rate };
+}
+
+export async function runNativeDraft(job, bridge) {
+  const action = String(job.action || "").trim();
+  const sellerAction = action === "ptc_mx_seller_action";
+  if (sellerAction && job.token != null) throw Error("TikTok MX seller action does not accept a token");
+  const opening = sellerAction ? { type: "mx.seller", request: mxSellerRequest(job.request) } : draftOpening(job, action);
   let step = 0;
-  const execute = createDraftTransport(sourceId, (tool, args) => bridge.call({ id: job.id + "." + ++step, tool, args }),
-    async id => { const t = await chrome.tabs.get(id); return t.url || t.pendingUrl; }, { draftId: repair?.draftId });
+  const call = (tool, args) => bridge.call({ id: job.id + "." + ++step, tool, args });
+  const tabUrl = async id => { const t = await chrome.tabs.get(id); return t.url || t.pendingUrl; };
+  const execute = sellerAction
+    ? createMxSellerTransport(opening.request, call, tabUrl)
+    : createDraftTransport(opening.sourceId, call, tabUrl, { draftId: opening.draftId });
   const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+  const task = sellerAction ? "TikTok MX seller action" : "Native draft";
   let timer;
   try {
     return await new Promise((resolve, reject) => {
-      timer = setTimeout(() => reject(Error("Native draft timed out; reconcile its receipt before retrying")), 300000);
-      port.onDisconnect.addListener(() => reject(Error(chrome.runtime.lastError?.message || "Draft host disconnected")));
+      timer = setTimeout(() => reject(Error(task + " timed out; reconcile its receipt before retrying")), 300000);
+      port.onDisconnect.addListener(() => reject(Error(chrome.runtime.lastError?.message ||
+        (sellerAction ? "TikTok MX seller action host disconnected" : "Draft host disconnected"))));
       port.onMessage.addListener(msg => {
         if (msg.type === "mx.done") {
           if (msg.ok) resolve(msg.result);

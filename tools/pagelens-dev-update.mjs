@@ -26,6 +26,10 @@ const tests = [
   "tools/test-tiktok-mx-ptc.mjs",
   "tools/test-pagelens-directed-ptc.mjs",
   "tools/test-pagelens-draft-repair-routing.mjs",
+  "tools/test-pagelens-mx-seller-routing.mjs",
+  "tools/test-tiktok-mx-reprice.mjs",
+  "tools/test-tiktok-mx-orders.mjs",
+  "tools/test-tiktok-mx-seller.mjs",
 ];
 const help = `Usage:
   node tools/pagelens-dev-update.mjs test

@@ -564,6 +564,16 @@ export function mxEditor(bridge, runCode, skuWrites) {
     return runCode(tab, "for(let i=0;i<50;i++){const s=(" + formState.toString() +
       ")(); if(s.detailImages >= " + details.length + ") return s; await new Promise(r=>setTimeout(r,200))} throw Error('Detail images did not finish uploading')");
   }
+  async function typeSkuValue(tab, option, field, value, force = false, expectedCurrent = null) {
+    const selector = await runCode(tab, commerceScript(locateSkuInput, option, field, value, force, expectedCurrent));
+    if (!selector) return false;
+    const typed = await bridge("trusted_type", { tabId: tab, selector, clear: true, value: String(value) });
+    if (typed?.ok === false) throw Error("Trusted SKU input failed");
+    const committed = await bridge("press_keys", { tabId: tab, keys: ["Tab"] });
+    if (committed?.ok === false) throw Error("SKU input could not commit");
+    return true;
+  }
+
   async function commercialState(
     tab,
     plan,
@@ -617,15 +627,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
               }
               return true;
             }, { option: sku.option, stock: sku.stock, priceMXN: sku.priceMXN }));
-          } else for (const key of keys) {
-            const selector = await runCode(tab, commerceScript(locateSkuInput, sku.option, key, sku[key], force));
-            if (!selector) continue;
-            const typed = await bridge("trusted_type", {
-              tabId: tab, selector, clear: true, value: String(sku[key]),
-            });
-            if (typed?.ok === false) throw Error("Trusted SKU input failed");
-            await bridge("press_keys", { tabId: tab, keys: ["Tab"] });
-          }
+          } else for (const key of keys) await typeSkuValue(tab, sku.option, key, sku[key], force);
           const observed = await runCode(tab, commerceScript(async (ui, sku, force) => {
             const observe = () => {
               const tags = ui.options().map(ui.optionLabels).filter(labels => labels.includes(sku.option));
@@ -812,7 +814,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     phases.fieldsRead = Date.now();
     return { state, commerce, phases };
   }
-  return { fillPage, setCopy, category, supplement, repairSavedCopy, restoreDetails, commercialState };
+  return { fillPage, setCopy, category, supplement, repairSavedCopy, restoreDetails, commercialState, typeSkuValue };
 }
 
 // Runs inside the extension. Each browser operation still uses the ordinary

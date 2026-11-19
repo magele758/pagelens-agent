@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { japaneseSourceId, repairDraftRequest } from "../extension/skills/tiktok-mx-draft/tiktok-mx-native.mjs";
+import { mxSellerRequest } from "../extension/skills/tiktok-mx-draft/tiktok-mx-seller-request.mjs";
 
 const home = process.env.PAGELENS_HOME || path.join(os.homedir(), ".pagelens");
 const sharedInbox = path.join(home, "agent-inbox");
@@ -67,7 +68,8 @@ function enqueue(opts) {
     throw new Error("Agent prompts and cancellations use the shared inbox");
   const development = action === "dev_status" || action === "dev_reload";
   const repairing = action === "ptc_repair_mx_draft";
-  const localOnly = development || repairing;
+  const sellerAction = action === "ptc_mx_seller_action";
+  const localOnly = development || repairing || sellerAction;
   if (localOnly && !extensionId) throw new Error(`${action} requires --extension-id`);
   if (localOnly && opts["token-file"]) throw new Error(`${action} does not accept a token`);
   if (!repairing && (opts.repair !== undefined || opts["queries-json"] !== undefined))
@@ -80,6 +82,11 @@ function enqueue(opts) {
     createdAt: new Date().toISOString(),
     action,
   };
+
+  if (sellerAction) {
+    if (typeof opts["request-json"] !== "string") throw new Error("ptc_mx_seller_action requires --request-json");
+    job.request = mxSellerRequest(JSON.parse(opts["request-json"]));
+  }
 
   if (action === "dev_reload") {
     if (typeof opts.revision !== "string" || !/^[0-9a-f]{40}$/.test(opts.revision))
@@ -107,7 +114,7 @@ function enqueue(opts) {
   if (opts["tab-url-includes"] || opts.tabUrlIncludes) {
     job.tabUrlIncludes = String(opts["tab-url-includes"] || opts.tabUrlIncludes);
   }
-  if (opts["request-json"]) job.request = JSON.parse(String(opts["request-json"]));
+  if (!sellerAction && opts["request-json"]) job.request = JSON.parse(String(opts["request-json"]));
   if (opts.prompt && opts.prompt !== true) job.prompt = String(opts.prompt);
   if (opts["prompt-file"]) job.prompt = readMaybeFile(opts["prompt-file"]);
   if (action === "agent_prompt" && !String(job.prompt || "").trim()) {
