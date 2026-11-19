@@ -507,6 +507,9 @@ async function createDraft(url, rate) {
         return batch.length;
       }).catch(() => 0);
     };
+    const searchQueryPromise = (!previous && !controls?.category?.label && pendingPreflight)
+      ? categorySearchQuery(facts).catch(() => null)
+      : Promise.resolve(null);
     const preselectPromise = (!previous && !controls?.category?.label && pendingPreflight)
       ? (async () => {
           const [tab, gen] = await Promise.all([pendingPreflight, listingPromise]);
@@ -515,35 +518,35 @@ async function createDraft(url, rate) {
           let selected = null;
           // Trigger Seller Center's own AI category suggestions (✨ 建议) from the title first.
           try {
-            const titleField = await js(tab, () => {
-              const en = document.querySelector('[data-id="product.publish.title.input_lang"]');
-              return en ? '[data-id="product.publish.title.input_lang"]' : '[data-id="product.publish.product_name"]';
-            });
-            const seedTitle = titleField.includes("input_lang") ? gen.copy.enTitle : gen.copy.title;
-            if (seedTitle) {
-              await bridge("trusted_type", { tabId: tab, selector: titleField, clear: true, value: seedTitle });
-              await bridge("press_keys", { tabId: tab, selector: titleField, keys: ["Tab"] });
-              const suggested = await js(tab, async expected => {
-                for (let i = 0; i < 22; i++) {
-                  if (location.href !== expected) throw Error("Draft changed during category suggestions");
-                  const list = [...new Set([...document.querySelectorAll("button")].filter(b => b.innerText.trim() === "应用" &&
-                    !b.disabled && b.getClientRects().length).map(b => b.parentElement.parentElement.innerText.replace(/\s*应用\s*$/, "").trim())
-                    .filter(p => p.split(/\s+[>/-]\s+/).length >= 3))];
-                  if (list.length) return list;
-                  await new Promise(r => setTimeout(r, 100));
-                }
-                return [];
-              }, createUrl);
-              if (suggested.length) {
-                const picked = await chooseCategory(facts, suggested).catch(() => null);
-                if (picked?.choice?.label) {
-                  const applied = await category(tab, picked.choice);
-                  if (applied?.selected) {
-                    selected = applied;
-                    tempCopy.category = picked.choice;
-                    await write(path.join(dir, "category-generation.json"), picked.ptc);
-                    mark("aiSuggestedCategoryApplied");
-                  }
+            const hasEn = await js(tab, () => Boolean(document.querySelector('[data-id="product.publish.title.input_lang"]')));
+            if (hasEn && gen.copy.enTitle) {
+              await bridge("trusted_type", { tabId: tab, selector: '[data-id="product.publish.title.input_lang"]', clear: true, value: gen.copy.enTitle });
+              await bridge("press_keys", { tabId: tab, selector: '[data-id="product.publish.title.input_lang"]', keys: ["Tab"] });
+            }
+            if (gen.copy.title) {
+              await bridge("trusted_type", { tabId: tab, selector: titleSelector, clear: true, value: gen.copy.title });
+              await bridge("press_keys", { tabId: tab, selector: titleSelector, keys: ["Tab"] });
+            }
+            const suggested = await js(tab, async expected => {
+              for (let i = 0; i < 18; i++) {
+                if (location.href !== expected) throw Error("Draft changed during category suggestions");
+                const list = [...new Set([...document.querySelectorAll("button")].filter(b => b.innerText.trim() === "应用" &&
+                  !b.disabled && b.getClientRects().length).map(b => b.parentElement.parentElement.innerText.replace(/\s*应用\s*$/, "").trim())
+                  .filter(p => p.split(/\s+[>/-]\s+/).length >= 3))];
+                if (list.length) return list;
+                await new Promise(r => setTimeout(r, 100));
+              }
+              return [];
+            }, createUrl);
+            if (suggested.length) {
+              const picked = await chooseCategory(facts, suggested).catch(() => null);
+              if (picked?.choice?.label) {
+                const applied = await category(tab, picked.choice);
+                if (applied?.selected) {
+                  selected = applied;
+                  tempCopy.category = picked.choice;
+                  await write(path.join(dir, "category-generation.json"), picked.ptc);
+                  mark("aiSuggestedCategoryApplied");
                 }
               }
             }
@@ -551,15 +554,18 @@ async function createDraft(url, rate) {
             if (/verification|验证/i.test(error.message)) throw error;
           }
           if (!selected?.selected) {
-            const searchRes = await categorySearchQuery(facts);
-            tempCopy = { category: { searches: searchRes.queries, search: searchRes.query } };
+            const searchRes = (await searchQueryPromise) || await categorySearchQuery(facts);
+            const firstTerm = searchRes.query;
+            tempCopy = { category: { searches: [firstTerm], search: firstTerm } };
             try {
               selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
             } catch (error) {
               if (/verification|验证/i.test(error.message) || !/No suitable seller category|offered no category candidates/.test(error.message)) throw error;
+              const rest = [...searchRes.queries.slice(1)];
               const alt = gen?.copy?.category?.search?.trim();
-              if (!alt || !hanCategoryTerm.test(alt) || searchRes.queries.includes(alt)) throw error;
-              tempCopy = { category: { searches: [alt], search: alt } };
+              if (alt && hanCategoryTerm.test(alt) && alt !== firstTerm && !rest.includes(alt)) rest.push(alt);
+              if (!rest.length) throw error;
+              tempCopy = { category: { searches: rest.slice(0, 3), search: rest[0] } };
               selected = await resolveCategory(tab, createUrl, facts, tempCopy, dir, false);
             }
           }
