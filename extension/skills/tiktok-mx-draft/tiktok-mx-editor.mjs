@@ -527,7 +527,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (src && copy.enTitle) {
       set(src, copy.enTitle);
       desc("product.publish.description.input_lang", copy.enDescription);
-      await pause(600);
+      await pause(350);
     }
     set(
       document.querySelector('[data-id="product.publish.product_name"]'),
@@ -583,7 +583,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     }, sourceInput, localDesc + " input[type=file]");
     const useSource = Boolean(copy.enDescription && info.hasSource);
     const selector = useSource ? sourceInput : localDesc + " input[type=file]";
-    const step = info.multiple ? 3 : 1;
+    const step = info.multiple ? 5 : 1;
     for (let i = 0; i < details.length; i += step)
       await bridge("upload_file", { tabId: tab, selector, paths: details.slice(i, i + step) });
   }
@@ -757,8 +757,13 @@ export function mxEditor(bridge, runCode, skuWrites) {
         for (let offset = batchSize; offset < gallery.length; offset += batchSize) {
           await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
             ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + offset +
-            ")return true;await new Promise(r=>setTimeout(r,150))}while(Date.now()<until);throw Error('Previous gallery batch still uploading')");
+            ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Previous gallery batch still uploading')");
           await uploadBatch(offset);
+        }
+        if (!detailsSubmitted) {
+          await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
+            ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + gallery.length +
+            ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Gallery upload still pending')");
         }
         phases.gallerySubmitted = Date.now();
       };
@@ -803,7 +808,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
           [...document.querySelectorAll("button")].some(b=>!b.disabled && b.innerText.trim()==="应用" &&
             sameCategory(b.parentElement.parentElement.innerText.replace("应用","").trim(),expectedPath)))) return s;
         if(s.captcha || (s.gallery===${gallery.length} && (!detailsSubmitted || s.detailImages>=${details.length})) || Date.now()>=until)return s;
-        await new Promise(r=>setTimeout(r,250));
+        await new Promise(r=>setTimeout(r,120));
       }while(true)`;
       for (let i = 0; i < 4; i++) {
         state = await runCode(tab, "const commerceReady=" + Boolean(commerce || cat.selected) +

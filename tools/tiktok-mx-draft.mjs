@@ -149,7 +149,7 @@ function sourceId(url) {
   return id;
 }
 async function extract(id) {
-  for (let i = 0; i < 45; i++) {
+  for (let i = 0; i < 80; i++) {
     const el = document.querySelector("#__MODERN_ROUTER_DATA__");
     if (el) {
       const data = Object.values(JSON.parse(el.textContent).loaderData).find(
@@ -194,8 +194,8 @@ async function extract(id) {
         document.title + " " + document.body?.innerText?.slice(0, 1000),
       )
     )
-      break;
-    await new Promise((r) => setTimeout(r, 250));
+      throw new Error("TikTok Shop verification required on product tab");
+    await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error(
     "Product data unavailable. Check the product tab for region, login or verification.",
@@ -384,15 +384,16 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
     path.join(os.tmpdir(), "pagelens-mx-" + id + "-"),
   );
   group = new DraftTabs(id, bridge);
-  const tab = reuseSourceForCreate ? await group.open(url, [drafts], false) : await open(url);
+  const tab = reuseSourceForCreate ? await group.open(url, [drafts], true) : await open(url);
   await waitForSourceTab(tab, url);
   if (!reuseSourceForCreate) afterOpening?.();
   let data;
   try {
     data = await js(tab, extract, id);
   } catch (error) {
-    if (!/Frame with ID 0 is showing error page/i.test(error.message)) throw error;
+    if (!/Frame with ID 0 is showing error page|Product data unavailable/i.test(error.message)) throw error;
     mark("sourceReload");
+    await bridge("activate_tab", { tabId: tab });
     await bridge("reload_tab", { tabId: tab });
     data = await js(tab, extract, id);
   }
