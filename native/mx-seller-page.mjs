@@ -224,3 +224,45 @@ export function editorSubmitCode(url, labels) {
   return sellerVerification.toString() + "\nreturn await (" + run.toString() + ")(" +
     JSON.stringify(url) + "," + JSON.stringify(labels) + ");";
 }
+
+// A seller advisory dialog (for example the at-least-5-images suggestion)
+// offers 返回编辑 / 提交. Confirm the advisory once so the submission
+// proceeds; every other dialog shape stays unresolved for the caller.
+export function editorAdvisoryConfirmCode(url) {
+  const run = async address => {
+    const visible = el => Boolean(el?.getClientRects().length);
+    const normalize = el => (el.innerText || el.textContent).trim().replace(/\s+/g, " ");
+    const enabled = el => !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    const dialogs = () => [...document.querySelectorAll('[role="dialog"],[aria-modal=true]')].filter(visible);
+    const feedback = () => [...document.querySelectorAll('[class*=message-content],[role=alert]')].filter(visible);
+    if (location.href !== address || sellerVerification()) throw Error("Seller editor changed or verification is required");
+    const open = dialogs();
+    if (open.length !== 1) throw Error("Expected exactly one seller dialog to confirm");
+    const text = normalize(open[0]);
+    const controls = [...open[0].querySelectorAll("button")].filter(visible)
+      .map(element => ({ element, label: normalize(element) })).filter(({ label }) => label);
+    const labels = controls.map(({ label }) => label);
+    const back = labels.includes("返回编辑");
+    const submit = controls.find(({ label }) => label === "提交")?.element;
+    if (!/建议/.test(text) || labels.length !== 2 || !back || !submit || !enabled(submit))
+      throw Error("The seller dialog is not a confirmable advisory");
+    const previous = new Set(feedback().map(normalize));
+    submit.click();
+    for (let attempt = 0; attempt < 24; attempt++) {
+      if (sellerVerification()) return { verificationRequired: true, advisoryConfirmed: true };
+      const dialog = dialogs().map(normalize).join(" ").slice(0, 350);
+      if (dialog && dialog !== text) return { dialog, advisoryConfirmed: true };
+      const messages = feedback().map(normalize).filter(message => message && !previous.has(message));
+      if (messages.length || location.href !== address) {
+        const productLinks = feedback().filter(element => /提交成功|发布成功/.test(normalize(element)))
+          .flatMap(element => [...element.querySelectorAll("a[href]")])
+          .map(link => link.href);
+        return { messages, url: location.href, productLinks, advisoryConfirmed: true };
+      }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    return { messages: [], url: location.href, advisoryConfirmed: true };
+  };
+  return sellerVerification.toString() + "\nreturn await (" + run.toString() + ")(" +
+    JSON.stringify(url) + ");";
+}

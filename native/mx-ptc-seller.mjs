@@ -9,7 +9,7 @@ import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
 import { inspectWithPtc } from "./mx-ptc-inspect.mjs";
 import { runMxDraftReprice } from "./mx-ptc-reprice.mjs";
 import { readMxOrders } from "./mx-ptc-orders.mjs";
-import { editorSubmitCode, sellerListCode } from "./mx-seller-page.mjs";
+import { editorSubmitCode, editorAdvisoryConfirmCode, sellerListCode } from "./mx-seller-page.mjs";
 
 const sellerHome = () => process.env.PAGELENS_HOME || path.join(os.homedir(), ".pagelens");
 
@@ -118,7 +118,10 @@ async function publishDraft(send, { sourceId, draftId, offer }) {
       const current = await waitForListing(send, previous.productId || previous.productCandidateId || draftId);
       if (releasedStatus(current.status))
         return { ...previous, ...current, submitted: true, verified: true, changed: false };
-      return { ...previous, status: "submission_unconfirmed", verified: false, changed: false };
+      // An attempt that stopped at a seller dialog never dispatched, so the
+      // same draft can be submitted again; anything else stays reconciled.
+      if (previous.submitted || !previous.signal?.dialog)
+        return { ...previous, status: "submission_unconfirmed", verified: false, changed: false };
     }
     const tab = await tabs.open(link, [], false);
     await tabs.waitForUrl(tab, link);
@@ -137,6 +140,16 @@ async function publishDraft(send, { sourceId, draftId, offer }) {
     let signal;
     try { signal = (await call("run_js", { code: editorSubmitCode(link, ["提交审核"]) })).result; }
     catch (error) { signal = { error: error.message }; }
+    const advisories = [];
+    const advisoryDialog = candidate => candidate?.dialog &&
+      candidate.dialog.includes("建议") && candidate.dialog.includes("返回编辑");
+    for (let round = 0; round < 2 && advisoryDialog(signal); round++) {
+      let confirmed;
+      try { confirmed = (await call("run_js", { code: editorAdvisoryConfirmCode(link) })).result; }
+      catch (error) { signal = { ...signal, advisoryError: error.message }; break; }
+      advisories.push(signal.dialog);
+      signal = { ...confirmed, advisoryConfirmed: advisories };
+    }
     const productCandidateId = returnedProductId(signal, draftId);
     if (productCandidateId !== draftId) await writeState(statePath, { ...state, productCandidateId, signal });
     const current = await waitForListing(send, productCandidateId);
