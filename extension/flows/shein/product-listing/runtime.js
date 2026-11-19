@@ -3,6 +3,7 @@ import { sheinEditorPage } from "./editor-page.js";
 import { sheinVariantPage } from "./variant-page.js";
 import { sheinRowsPage } from "./rows-page.js";
 import { sheinStockPage } from "./stock-page.js";
+import { buildSheinImagePlan } from "./image-plan.js";
 import { getCdp } from "../../../lib/cdp.js";
 
 const sellerOrigin = "https://sellerhub.shein.com";
@@ -42,9 +43,10 @@ export function normalizeSheinListingInput(raw) {
   const variantGroups = array(groups).flatMap(group => {
     const name = clean(group?.name);
     const options = array(group?.options).flatMap(option => {
-      const source = clean(option?.value ?? option?.name ?? option);
+      const source = clean(option?.value ?? option?.name ?? option?.option ?? option);
       const value = clean(option?.sheinValue) || source;
-      return value ? [{ value, source, imagePath: clean(option?.imagePath) }] : [];
+      return value ? [{ value, source, imagePath: clean(option?.imagePath),
+        squareImagePath: clean(option?.squareImagePath), swatchImagePath: clean(option?.swatchImagePath) }] : [];
     });
     return name && options.length ? [{ name, options }] : [];
   });
@@ -74,6 +76,12 @@ export function normalizeSheinListingInput(raw) {
     brand: /^(?:无品牌|nobrand|unbranded)$/iu.test(brand) ? "" : brand,
     categoryPath,
     attributes: { ...object(raw?.attributes), ...object(seller.attributes) },
+    imagePath: clean(seller.imagePath ?? raw?.imagePath),
+    mainImages: array(seller.mainImages ?? raw?.mainImages).map(clean).filter(Boolean),
+    detailImages: array(seller.detailImages ?? raw?.detailImages).map(clean).filter(Boolean),
+    sharedGalleryImages: array(seller.sharedGalleryImages ?? raw?.sharedGalleryImages).map(clean).filter(Boolean),
+    squareImagePath: clean(seller.squareImagePath ?? raw?.squareImagePath),
+    swatchImagePath: clean(seller.swatchImagePath ?? raw?.swatchImagePath),
     variantGroups, skus, sites: array(seller.sites).map(clean).filter(Boolean), dimensions: object(seller.dimensions),
   };
 }
@@ -84,8 +92,8 @@ function pageOption(value, group) {
 }
 
 async function encodeImage({ file, name }) {
-  if (!file?.size || file.size > 8 * 1024 * 1024 || !/^image\/(?:jpeg|png)$/u.test(file.type)) {
-    throw new Error("请使用 8 MB 以内的 JPEG 或 PNG 图片。");
+  if (!file?.size || file.size > 8 * 1024 * 1024 || !/^image\/(?:jpeg|png|gif)$/u.test(file.type)) {
+    throw new Error("请使用 8 MB 以内的 JPEG、PNG 或 GIF 图片。");
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   let binary = "";
@@ -293,29 +301,29 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
       issues.push(...inventory.issues || []);
     } else issues.push({ label: "库存", code: inventory.code, message: inventory.message });
   }
-  const media = table.tables?.media || [];
-  const tasks = [];
-  const withRole = (...names) => images.filter(image => names.includes(image.role));
-  if (images.length && media.length === 1 && media[0].length) {
-    for (const image of withRole("detail", "main").slice(0, 5)) tasks.push({ role: "detail", options: media[0], image });
-    for (const role of ["square", "swatch"]) if (withRole(role).length === 1) {
-      tasks.push({ role, options: media[0], image: withRole(role)[0] });
-    }
+  const plan = buildSheinImagePlan({ product, variant, rows, images, tables: table.tables });
+  issues.push(...plan.issues);
+  const uploads = new Map();
+  for (const { role, options, image } of plan.tasks) {
+    const id = JSON.stringify([role, options]);
+    if (!uploads.has(id)) uploads.set(id, { role, options, images: [] });
+    uploads.get(id).images.push(image);
   }
-  for (const row of rows.filter(row => row.imagePath)) {
-    const matched = withRole("variant").filter(image => image.path === row.imagePath || !image.path && image.name === row.imagePath.split("/").at(-1));
-    if (matched.length === 1) tasks.push({ role: "variant", options: row.options, image: matched[0] });
-  }
-  if (images.length && !tasks.length) issues.push({ label: "商品图片", code: "MEDIA_MAPPING_REQUIRED", message: "未找到图片与规格的唯一对应关系。" });
-  for (const { role, options, image } of tasks) {
-    const label = options.join(" / ") + " · " + image.name;
-    report("上传并核对 SHEIN 图片");
-    let file;
-    try { file = await encodeImage(image); }
+  const mediaLabels = { detail: "细节图", square: "方形图", swatch: "色块图", variant: "SKU 图" };
+  for (const { role, options, images: selected } of uploads.values()) {
+    const label = options.join(" / ") + " · " + mediaLabels[role];
+    report("上传并核对 " + label);
+    let files;
+    try { files = await Promise.all(selected.map(encodeImage)); }
     catch (error) { issues.push({ label, code: "IMAGE_FORMAT", message: error.message }); continue; }
-    const uploaded = await pageCall(api, tab, sheinRowsPage, { ...pinned, kind: "upload", upload: { role, options, files: [file] } }, signal);
-    if (uploaded.ok) items.push({ label, status: "verified" });
-    else issues.push({ label, code: uploaded.code, message: uploaded.message });
+    const uploaded = await pageCall(api, tab, sheinRowsPage, {
+      ...pinned, kind: "upload", upload: { role, options, files },
+    }, signal);
+    if (uploaded.ok) {
+      items.push({ label: `${label}（${files.length} 张）`, status: uploaded.status || "verified" });
+    } else {
+      issues.push({ label, code: uploaded.code, message: uploaded.message });
+    }
   }
   await currentTab(tab.id, tab.url, api, signal);
   return outcome();

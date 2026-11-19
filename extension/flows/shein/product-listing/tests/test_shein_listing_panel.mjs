@@ -45,7 +45,47 @@ test("loads the selected JSON and only accesses manifest images contained in the
   const images = await readSheinProductImages(result.products[0]);
   assert.deepEqual(images.images.map(({ name, role }) => [name, role]), [["hero.jpg", "main"], ["hero.jpg", "variant"]]);
   assert.equal(images.images[0].file.name, "hero.jpg");
-  assert.deepEqual(images.issues, ["图片 absent.jpg · 目录中未找到"]);
+  assert.deepEqual(images.issues, ["图片 images/absent.jpg · 目录中未找到"]);
+});
+
+test("preserves separate color hero, square, swatch and SKU assets plus shared gallery paths", async () => {
+  const root = directory("Shirt", {
+    "product.json": file("product.json", JSON.stringify({
+      title: "Shirt",
+      detailImages: ["images/common.jpg"],
+      variantGroups: [{ name: "Color", options: [{ value: "Black", imagePath: "black/hero.jpg" }] }],
+      skus: [{ imagePath: "black/sku.jpg" }],
+      shein: {
+        sharedGalleryImages: ["images/common.jpg", "black/hero.jpg", "../other/private.jpg"],
+        variantGroups: [{ name: "Color", options: [
+          { value: "Black", imagePath: "black/hero.jpg", squareImagePath: "black/detail.jpg", swatchImagePath: "black/detail.jpg" },
+          { value: "White", imagePath: "white/hero.jpg", squareImagePath: "white/detail.jpg" },
+        ] }],
+        skus: [{ imagePath: "white/sku.jpg" }],
+      },
+    }), "application/json"),
+    images: directory("images", { "common.jpg": file("common.jpg", "shared", "image/jpeg") }),
+    black: directory("black", {
+      "hero.jpg": file("hero.jpg", "black", "image/jpeg"), "detail.jpg": file("detail.jpg", "detail black", "image/jpeg"),
+      "sku.jpg": file("sku.jpg", "sku black", "image/jpeg"),
+    }),
+    white: directory("white", {
+      "hero.jpg": file("hero.jpg", "white", "image/jpeg"), "detail.jpg": file("detail.jpg", "detail white", "image/jpeg"),
+      "sku.jpg": file("sku.jpg", "sku white", "image/jpeg"),
+    }),
+  });
+  const { products: [selected] } = await readSheinProductDirectory(root);
+  const result = await readSheinProductImages(selected);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.images.map(({ path, role }) => [path, role]), [
+    ["images/common.jpg", "detail"], ["images/common.jpg", "shared-gallery"], ["black/hero.jpg", "shared-gallery"],
+    ["black/hero.jpg", "variant"], ["black/detail.jpg", "variant-square"], ["black/detail.jpg", "variant-swatch"],
+    ["white/hero.jpg", "variant"], ["white/detail.jpg", "variant-square"],
+    ["black/sku.jpg", "variant"], ["white/sku.jpg", "variant"],
+  ]);
+  const heroes = result.images.filter(image => image.role === "variant" && image.name === "hero.jpg");
+  assert.deepEqual(await Promise.all(heroes.map(({ file }) => file.text())), ["black", "white"]);
+  assert.equal(result.images.find(image => image.role === "detail").file, result.images.find(image => image.role === "shared-gallery").file);
 });
 
 test("binds the current seller tab, requests approval only on action, and sends image Files only after consent", async t => {
@@ -66,7 +106,9 @@ test("binds the current seller tab, requests approval only on action, and sends 
       assert.equal(url, tab.url);
       assert.deepEqual(options, { userGesture: true, tabId: 13 });
     },
-    pickDirectory: async () => product("first", { title: "Shirt", imagePath: "images/hero.jpg" }, { "hero.jpg": image }),
+    pickDirectory: async () => product("first", { title: "Shirt", imagePath: "images/hero.jpg" }, {
+      "hero.jpg": image, "common.jpg": file("common.jpg", "details", "image/jpeg"),
+    }),
     openEditor: async spec => { calls.push(["open", spec]); tab = { ...tab, url: editor }; return { ok: true }; },
     inspect: async spec => { calls.push(["inspect", spec]); return { ok: true, fields: [{ label: "商品名", required: true }] }; },
     replay: async spec => {
@@ -96,12 +138,14 @@ test("binds the current seller tab, requests approval only on action, and sends 
   assert.deepEqual(calls[2][1].images, []);
   assert.deepEqual(calls[2][1].input.categoryPath, ["Clothing", "T-shirts"]);
   get("upload").checked = true;
-  get("json").value = '{"description":"Cotton t-shirt"}';
+  get("json").value = '{"description":"Cotton t-shirt","shein":{"sharedGalleryImages":["images/common.jpg"]}}';
+  get("json").dispatchEvent(new window.Event("input", { bubbles: true }));
   get("run").click();
   await tick();
   assert.equal(calls[3][1].input.title, "Shirt");
   assert.equal(calls[3][1].input.description, "Cotton t-shirt");
   assert.equal(calls[3][1].images[0].file.name, "hero.jpg");
+  assert.deepEqual(calls[3][1].images.map(({ role, path }) => [role, path]), [["main", "images/hero.jpg"], ["shared-gallery", "images/common.jpg"]]);
   assert.equal(get("upload").checked, false);
   assert.equal(get("status").dataset.state, "verified");
   assert.equal(get("results").textContent, "已核对 · 商品标题");

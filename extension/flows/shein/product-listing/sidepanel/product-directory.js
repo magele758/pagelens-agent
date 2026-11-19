@@ -2,9 +2,10 @@ const MAX_PRODUCTS = 20;
 const MAX_PRODUCT_SIZE = 512 * 1024;
 const MAX_IMAGES = 100;
 const IMAGE_ROLES = new Map([["main", "main"], ["gallery", "main"], ["detail", "detail"],
-  ["variant", "variant"], ["size-chart", "size-chart"]]);
+  ["variant", "variant"], ["variant-square", "variant-square"], ["variant-swatch", "variant-swatch"],
+  ["shared-gallery", "shared-gallery"], ["square", "square"], ["swatch", "swatch"], ["size-chart", "size-chart"]]);
 const localImagePath = value => typeof value === "string" && value.length <= 512 &&
-  /\.(?:png|jpe?g|webp)$/iu.test(value) && !/[\0\\:]/u.test(value) &&
+  /\.(?:png|jpe?g|gif)$/iu.test(value) && !/[\0\\:]/u.test(value) &&
   value.split("/").every(segment => segment && segment !== "." && segment !== "..");
 const array = value => Array.isArray(value) ? value : [];
 
@@ -68,19 +69,24 @@ export async function readSheinProductDirectory(root, { signal } = {}) {
 }
 
 export function productImagePaths(input) {
+  const variantImages = option => [
+    ["variant", option?.imagePath], ["variant-square", option?.squareImagePath], ["variant-swatch", option?.swatchImagePath],
+  ];
+  const groups = [...array(input.shein?.variantGroups), ...array(input.variantGroups)];
   const pairs = [
-    ["main", input.imagePath],
-    ...array(input.mainImages).map(path => ["main", path]),
-    ...array(input.detailImages).map(path => ["detail", path]),
-    ...array(input.imageFiles).map(row => [IMAGE_ROLES.get(row?.role), row?.path]),
-    ...array(input.variantGroups).flatMap(group => array(group?.options).map(option => ["variant", option?.imagePath])),
-    ...array(input.variant?.options).map(option => ["variant", option?.imagePath]),
-    ["variant", input.variant?.imagePath],
+    ["main", input.shein?.imagePath ?? input.imagePath],
+    ...array(input.shein?.mainImages ?? input.mainImages).map(path => ["main", path]),
+    ...array(input.shein?.detailImages ?? input.detailImages).map(path => ["detail", path]),
+    ...array(input.shein?.sharedGalleryImages ?? input.sharedGalleryImages).map(path => ["shared-gallery", path]),
+    ...groups.flatMap(group => array(group?.options).flatMap(variantImages)),
+    ...array(input.variant?.options).flatMap(variantImages),
+    ...variantImages(input.variant),
     ...array(input.skus).map(sku => ["variant", sku?.imagePath]),
     ...array(input.shein?.skus).map(sku => ["variant", sku?.imagePath]),
-    ["square", input.shein?.squareImagePath],
-    ["swatch", input.shein?.swatchImagePath],
+    ["square", input.shein?.squareImagePath ?? input.squareImagePath],
+    ["swatch", input.shein?.swatchImagePath ?? input.swatchImagePath],
     ["size-chart", input.sizeChartImagePath],
+    ...array(input.imageFiles).map(row => [IMAGE_ROLES.get(row?.role), row?.path]),
   ];
   return [...new Map(pairs.filter(([role, path]) => role && localImagePath(path))
     .map(([role, path]) => [`${role}:${path}`, { role, path }])).values()].slice(0, MAX_IMAGES);
@@ -90,20 +96,26 @@ export function productImagePaths(input) {
 export async function readSheinProductImages(product, { signal } = {}) {
   const images = [];
   const issues = [];
+  const files = new Map();
   for (const { role, path } of productImagePaths(product.input)) {
     signal?.throwIfAborted();
     const parts = path.split("/");
     const name = parts.pop();
-    try {
-      let directory = product.directory;
-      for (const segment of parts) directory = await directory.getDirectoryHandle(segment);
-      const entry = await directory.getFileHandle(name);
-      const file = await entry.getFile();
-      if (!file.size || !/^image\/(?:png|jpeg|webp)$/u.test(file.type)) throw new Error("图片格式无效。");
-      images.push({ role, file, name, path });
-    } catch (error) {
-      issues.push(`图片 ${name} · ${error.name === "NotFoundError" ? "目录中未找到" : error.message || "无法读取"}`);
+    if (!files.has(path)) {
+      try {
+        let directory = product.directory;
+        for (const segment of parts) directory = await directory.getDirectoryHandle(segment);
+        const entry = await directory.getFileHandle(name);
+        const file = await entry.getFile();
+        if (!file.size || !/^image\/(?:png|jpeg|gif)$/u.test(file.type)) throw new Error("图片格式无效。");
+        files.set(path, file);
+      } catch (error) {
+        files.set(path, null);
+        issues.push(`图片 ${path} · ${error.name === "NotFoundError" ? "目录中未找到" : error.message || "无法读取"}`);
+      }
     }
+    const file = files.get(path);
+    if (file) images.push({ role, file, name, path });
   }
   signal?.throwIfAborted();
   return { images, issues };

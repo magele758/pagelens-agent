@@ -58,18 +58,20 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
   }
   function sourceButton() {
     const section = one(scan(document, stockArea).filter(node => !node.parentElement.closest(stockArea)));
-    const all = button(section, "编辑库存").filter(active);
-    if (all.length === 1) return all[0];
-    const related = [...new Set(requests.flatMap(request => {
-      const row = one(scan(section, "tbody tr").filter(candidate => matchRow(candidate, request)));
-      return row ? button(row, "编辑库存").filter(active) : [];
-    }))];
-    return related.length === 1 && requests.every(request => related[0].closest("tr") && matchRow(related[0].closest("tr"), request))
-      ? related[0] : null;
+    const all = scan(section, 'button,[role="button"],a').filter(node =>
+      active(node) && /^(?:编辑库存|库存维护)$/u.test(text(node)));
+    const global = all.filter(node => !node.closest("tbody tr"));
+    if (global.length) return one(global);
+    const related = requests.map(request => one(all.filter(node => {
+      const row = node.closest("tbody tr");
+      return row && matchRow(row, request);
+    })));
+    return related.every(Boolean) ? related[0] : null;
   }
 
   function ownedPanel() {
-    const titles = scan(document, ".so-modal.so-modal-show .so-modal-panel .so-card-header.so-modal-title").filter(node => text(node) === "库存维护");
+    const titles = scan(document, ".so-modal.so-modal-show .so-modal-panel .so-card-header.so-modal-title")
+      .filter(node => /^(?:库存维护|编辑库存)$/u.test(text(node)));
     const panel = one(titles)?.closest(".so-modal-panel");
     return panel && noOtherOverlay(panel) ? panel : null;
   }
@@ -109,6 +111,7 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
   async function open() {
     const control = sourceButton();
     if (!control || !onPage() || !noOtherOverlay()) return null;
+    if (control.matches('a[href]')) control.addEventListener("click", event => event.preventDefault(), { once: true });
     control.click();
     const first = await waited(readModal);
     if (!first) return null;

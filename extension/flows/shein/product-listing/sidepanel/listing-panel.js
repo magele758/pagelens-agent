@@ -70,11 +70,22 @@ export function bindSheinListingPanel({
 
   const selectedProduct = () => products[Number(product.value)];
 
+  function renderUpload() {
+    const selected = selectedProduct();
+    let input = selected?.input;
+    if (selected && json.value.trim()) {
+      try { input = selectedInput(); } catch { /* Keep the directory image selection while editing. */ }
+    }
+    const row = get("upload-row");
+    row.hidden = !input || productImagePaths(input).length === 0;
+    if (row.hidden) upload.checked = false;
+  }
+
   function updateSelectedProduct() {
     const selected = selectedProduct();
     category.value = Array.isArray(selected?.input?.shein?.categoryPath) ? selected.input.shein.categoryPath.join(" > ") : "";
-    get("upload-row").hidden = !selected || productImagePaths(selected.input).length === 0;
     upload.checked = false;
+    renderUpload();
   }
 
   function selectedInput() {
@@ -153,7 +164,7 @@ export function bindSheinListingPanel({
     updateSelectedProduct();
     renderResults(loaded.issues);
   }));
-  json.addEventListener("input", renderTarget);
+  json.addEventListener("input", () => { renderTarget(); renderUpload(); });
   product.addEventListener("change", updateSelectedProduct);
 
   get("open").addEventListener("click", () => void run("正在打开商品发布…", async ({ signal, current }) => {
@@ -185,7 +196,7 @@ export function bindSheinListingPanel({
     upload.checked = false;
     const seller = await withSeller(signal);
     const selected = selectedProduct();
-    const files = uploadAllowed && selected ? await readSheinProductImages(selected, { signal }) : { images: [], issues: [] };
+    const files = uploadAllowed && selected ? await readSheinProductImages({ ...selected, input }, { signal }) : { images: [], issues: [] };
     const outcome = await replay({ ...seller, input, images: files.images, onStep(progress) {
       if (current()) report(typeof progress === "string" ? progress : progress?.label, "running");
     } });

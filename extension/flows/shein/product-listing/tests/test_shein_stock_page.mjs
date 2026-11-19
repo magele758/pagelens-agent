@@ -7,15 +7,17 @@ const href = "https://sellerhub.shein.com/#/spmp/commoditiesInfo?mode=add&last_p
 const categoryPath = ["家居&生活", "厨房&餐厅", "饮具", "真空瓶和保温杯"];
 const stock = (quantity, siteLabel = "美国", options = ["黑色"]) => ({ options, quantity, siteLabel });
 
-function mount(t, { save = true } = {}) {
+function mount(t, { save = true, rowControls = "" } = {}) {
+  const stockCell = id => rowControls === "anchor" ? `美国 -- <a id="${id}" href="/unrelated">编辑库存</a>` :
+    rowControls === "button" ? `美国 -- <button id="${id}"><span>编辑库存</span></button>` : "0";
   const dom = new JSDOM(`
     <div class="spmp_style__commodityCategoryItem--fixture"><div class="spmp_style__categoryInfo--fixture"></div></div>
     <button id="publish">发布商品</button><button id="draft">保存草稿</button><button id="other">确定</button>
     <div class="spmp_style__supplyInfoTable--fixture">
-      <button id="edit">编辑库存</button>
+      ${rowControls ? "" : '<button id="edit">编辑库存</button>'}
       <table><thead><tr><th>颜色</th><th>库存</th></tr></thead><tbody>
-        <tr><td><div>黑色</div><div>SKC：<span>fixture-black</span></div></td><td>0</td></tr>
-        <tr><td><div>白色</div><div>SKC：<span>fixture-white</span></div></td><td>0</td></tr>
+        <tr><td><div>黑色</div><div>SKC：<span>fixture-black</span></div></td><td>${stockCell("edit-black")}</td></tr>
+        <tr><td><div>白色</div><div>SKC：<span>fixture-white</span></div></td><td>${stockCell("edit-white")}</td></tr>
       </tbody></table>
     </div>`, { url: href, runScripts: "outside-only" });
   t.after(() => dom.window.close());
@@ -27,12 +29,12 @@ function mount(t, { save = true } = {}) {
   const remote = { "黑色:美国": "0", "黑色:墨西哥": "7", "白色:美国": "0", "白色:墨西哥": "8" };
   const actions = [];
   for (const id of ["publish", "draft", "other"]) document.getElementById(id).onclick = () => actions.push(id);
-  document.getElementById("edit").onclick = () => {
-    actions.push("open");
+  const openModal = event => {
+    actions.push(rowControls ? event.currentTarget.id : "open");
     const stockModal = document.createElement("div");
     stockModal.className = "so-modal so-modal-show";
     stockModal.innerHTML = `<div class="so-modal-mask"><section class="so-modal-panel">
-      <div class="so-card-header so-modal-title">库存维护</div>
+      <div class="so-card-header so-modal-title">${rowControls === "anchor" ? "编辑库存" : "库存维护"}</div>
       <div class="so-table">
       <div class="so-table-simple-header"><table><thead><tr><th>颜色</th><th>库存</th></tr></thead></table></div>
       <div class="so-table-simple-body"><table><tbody>
@@ -51,11 +53,30 @@ function mount(t, { save = true } = {}) {
     for (const control of stockModal.querySelectorAll("input")) control.oninput = () => actions.push(control.dataset.stock);
     document.body.append(stockModal);
   };
+  for (const id of rowControls ? ["edit-black", "edit-white"] : ["edit"]) document.getElementById(id).onclick = openModal;
   const run = async args => JSON.parse(JSON.stringify(await dom.window.eval(
     `(${sheinStockPage})(${JSON.stringify({ href, categoryPath, ...args })})`,
   )));
   return { run, remote, actions, document };
 }
+
+test("opens the exact SKU’s 编辑库存 anchor for a shared dialog and leaves unrelated actions untouched", async t => {
+  const { run, remote, actions, document } = mount(t, { rowControls: "anchor" });
+  const result = await run({ rows: [stock(7, "美国", ["白色"]), stock(3)] });
+  assert.equal(result.ok, true);
+  assert.deepEqual(actions, ["edit-white", "白色:美国", "黑色:美国", "confirm", "edit-white", "cancel"]);
+  assert.equal(document.location.href, href);
+  assert.equal(remote["白色:美国"], "7");
+  assert.equal(remote["黑色:美国"], "3");
+});
+
+test("handles both SKU rows from one shared 库存维护 dialog when each SKU has its own 编辑库存 button", async t => {
+  const { run, remote, actions } = mount(t, { rowControls: "button" });
+  const result = await run({ rows: [stock(2), stock(5, "美国", ["白色"])] });
+  assert.equal(result.ok, true);
+  assert.deepEqual(actions, ["edit-black", "黑色:美国", "白色:美国", "confirm", "edit-black", "cancel"]);
+  assert.deepEqual(remote, { "黑色:美国": "2", "黑色:墨西哥": "7", "白色:美国": "5", "白色:墨西哥": "8" });
+});
 
 test("writes only requested SKU and site, reopens the owned dialog for readback, and skips a redundant confirmation", async t => {
   const { run, remote, actions } = mount(t);
