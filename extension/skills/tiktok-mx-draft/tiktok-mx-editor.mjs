@@ -553,7 +553,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (src && copy.enTitle) {
       set(src, copy.enTitle);
       desc("product.publish.description.input_lang", copy.enDescription);
-      await pause(350);
+      await pause(800);
     }
     set(
       document.querySelector('[data-id="product.publish.product_name"]'),
@@ -891,6 +891,10 @@ export function mxEditor(bridge, runCode, skuWrites) {
     const { title, description, enTitle, enDescription } = copy;
     state = await setCopy(tab, { title, description, enTitle, enDescription, preserveImages: true });
     state = await restoreDetails(tab, state, copy, details);
+    if (!sameText(state.description, description) || state.title !== title) {
+      await new Promise(resolve => setTimeout(resolve, 450));
+      state = await setCopy(tab, { title, description, preserveImages: true });
+    }
     check(state, copy);
     phases.copyRead = Date.now();
     const commerce = await commercialState(tab, plan, true, force);
