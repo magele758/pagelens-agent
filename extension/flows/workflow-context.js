@@ -18,6 +18,7 @@ export function identifyWorkflowPage(raw) {
   const site = hostname.replace(/^(?:www|m)\./u, "");
   const context = (platform, surface, productId, sourceUrl) => ({ platform, surface, productId, sourceUrl });
   if (hostname === "seller.shopee.cn") return context("shopee", "seller");
+  if (origin === "https://sellerhub.shein.com") return context("shein", "seller");
   if (/^agentseller(?:-[a-z0-9]+)?\.temu\.com$/u.test(hostname)) return context("temu", "seller");
   if (site === "temu.com") {
     const id = pathname.match(/-g-(\d+)\.html$/u)?.[1] ||

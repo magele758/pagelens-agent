@@ -12,6 +12,9 @@ export const workflowPlatforms = [
     { id: "voucher-draft", name: "优惠券表单试填", description: "试填店铺固定金额券，核对券码、门槛和数量。" },
   ] },
   { id: "temu", name: "Temu", icon: "temu.png", features: [productCapture] },
+  { id: "shein", name: "SHEIN", icon: "shein.png", features: [
+    { id: "shein-product-listing", name: "商品上架", description: "读取当前类目的表单，用商品资料试填并核对结果。" },
+  ] },
   { id: "amazon", name: "Amazon", icon: "amazon.png", features: [productCapture] },
   { id: "tiktok-shop", name: "TikTok Shop", icon: "tiktok-shop.png", features: [
     { id: "tiktok-mx-draft", name: "墨西哥商品草稿", skillName: "TikTok 墨西哥商品草稿",

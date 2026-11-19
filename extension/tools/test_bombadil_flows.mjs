@@ -99,6 +99,13 @@ for (const width of [400, 900]) {
     assert.equal(document.getElementById('shopee-marketing-read').disabled, true, 'fixture is outside Shopee');
     click('shopee-marketing-back');
     assert.ok(workflow.open);
+    workflow.querySelector('#workflow-platform button[data-platform="shein"]').click();
+    workflowAction('shein-product-listing');
+    await until(() => document.getElementById('shein-listing-dialog').open, 'open SHEIN product listing');
+    await delay(0);
+    assert.equal(document.getElementById('shein-listing-run').disabled, true, 'fixture is outside SHEIN seller site');
+    click('shein-listing-back');
+    assert.ok(workflow.open);
     workflow.querySelector('#workflow-platform button[data-platform="tiktok-shop"]').click();
     assert.equal(workflow.querySelector('#workflow-platform [aria-pressed="true"]').dataset.platform, 'tiktok-shop');
     workflowAction('tiktok-mx-draft');

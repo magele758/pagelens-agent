@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { bindShopeeMarketingPanel } from "../flows/shopee/marketing-panel.js";
+import { shortcutsForPage } from "../flows/workflow-context.js";
 import { bindWorkflowCatalog } from "../sidepanel/workflow-catalog.js";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom");
@@ -46,9 +47,16 @@ test("selects a platform and opens the requested workflow without running it", a
   const openMarketing = bindShopeeMarketingPanel({ getTargetTab: async () => tab, onBack });
   let selectedSkill;
   let listingOpened = false;
+  let sheinListingOpened = false;
   let capturePlatform;
   let openLibrary = false;
   const openProductListing = () => { listingOpened = true; return true; };
+  const openSheinListing = (feature, platform) => {
+    assert.equal(feature.id, "shein-product-listing");
+    assert.equal(platform, "shein");
+    sheinListingOpened = true;
+    return true;
+  };
   const openTiktokDraft = feature => { selectedSkill = feature; return true; };
   const openProductCapture = (feature, platform) => {
     assert.equal(feature.id, "product-capture");
@@ -56,7 +64,7 @@ test("selects a platform and opens the requested workflow without running it", a
     return true;
   };
   const openProductLibrary = () => { openLibrary = true; };
-  openCatalog = bindWorkflowCatalog({ openProductListing, openMarketing, openTiktokDraft, openProductCapture, openProductLibrary });
+  openCatalog = bindWorkflowCatalog({ openProductListing, openSheinListing, openMarketing, openTiktokDraft, openProductCapture, openProductLibrary });
 
   const picker = byId("workflow-platform");
   const choosePlatform = id => picker.querySelector(`button[data-platform="${id}"]`).click();
@@ -69,7 +77,7 @@ test("selects a platform and opens the requested workflow without running it", a
   byId("btn-ptc-flow").click();
   assert.equal(byId("workflow-catalog-dialog").open, true);
   assert.deepEqual([...picker.querySelectorAll("button")].map(button => button.dataset.platform), [
-    "shopee", "temu", "amazon", "tiktok-shop", "zhfulfill",
+    "shopee", "temu", "shein", "amazon", "tiktok-shop", "zhfulfill",
   ]);
   assert.deepEqual(selected(document), ["shopee"]);
   choosePlatform("temu");
@@ -90,6 +98,12 @@ test("selects a platform and opens the requested workflow without running it", a
   byId("workflow-catalog-library").click();
   assert.equal(byId("workflow-catalog-dialog").open, false);
   assert.equal(openLibrary, true);
+  openCatalog();
+  choosePlatform("shein");
+  assert.equal(picker.querySelector('[data-platform="shein"] img').getAttribute("src"), "../flows/icons/shein.png");
+  assert.deepEqual(choices().map(item => item.dataset.workflow), ["shein-product-listing"]);
+  await launch("shein-product-listing");
+  assert.equal(sheinListingOpened, true);
   openCatalog();
   choosePlatform("shopee");
   assert.deepEqual(choices().map(item => item.dataset.workflow), [
@@ -121,6 +135,15 @@ test("selects a platform and opens the requested workflow without running it", a
   await launch("tiktok-mx-draft");
   assert.equal(selectedSkill.skillName, "TikTok 墨西哥商品草稿");
   assert.equal(byId("shopee-marketing-dialog").open, false);
+});
+
+test("shows the SHEIN listing shortcut only on the HTTPS seller site", () => {
+  const context = shortcutsForPage("https://sellerhub.shein.com/#/spmp/commdities/list");
+  assert.equal(context.page?.surface, "seller");
+  assert.deepEqual(context.features.map(feature => feature.id), ["shein-product-listing"]);
+  for (const url of ["http://sellerhub.shein.com/", "https://sellerhub.shein.com:444/", "https://sellerhub.shein.com.example.org/", "https://www.shein.com/"]) {
+    assert.equal(shortcutsForPage(url).features.length, 0, url);
+  }
 });
 
 test("restores a saved platform when the sidebar starts", t => {

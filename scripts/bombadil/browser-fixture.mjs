@@ -18,6 +18,7 @@ export async function browserFixture(name) {
   const styles = graph ? ['graph.css'] : [
     'styles.css', 'themes.css', 'sidechat.css', 'settings.css', 'workflow-catalog.css', 'product-capture.css',
     '../flows/shopee/marketing-panel.css', '../flows/shopee/product-listing/sidepanel/dialog.css',
+    '../flows/shein/product-listing/sidepanel/listing-panel.css',
   ];
   for (const file of styles) {
     const style = document.createElement('style');

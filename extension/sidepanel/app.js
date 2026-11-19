@@ -56,6 +56,8 @@ import { delegatePanel, trustPanel } from "./trust-runtime.js";
 import { bindWorkflowCatalog } from "./workflow-catalog.js";
 import { bindWorkflowShortcuts } from "./workflow-shortcuts.js";
 import { bindProductCapturePanel } from "./product-capture-panel.js";
+import { bindSheinListingPanel } from "../flows/shein/product-listing/sidepanel/listing-panel.js";
+import { inspectSheinListing, openSheinListingEditor, replaySheinListing } from "../flows/shein/product-listing/runtime.js";
 import { bindShopeeMarketingPanel } from "../flows/shopee/marketing-panel.js";
 import { bindPtcFlow } from "../flows/shopee/product-listing/sidepanel/flow-ui.js";
 import { skillCommandText } from "../lib/slash.js";
@@ -204,7 +206,15 @@ function wire() {
     },
   });
   const captureActions = bindProductCapturePanel({ getTargetTab: pickTargetTab, downloadText });
-  const workflowHandlers = { openProductListing, openMarketing, openTiktokDraft, ...captureActions };
+  const openSheinListing = bindSheinListingPanel({
+    getTargetTab: pickTargetTab,
+    isAgentBusy: () => state.busy,
+    onBack,
+    openEditor: openSheinListingEditor,
+    inspect: inspectSheinListing,
+    replay: replaySheinListing,
+  });
+  const workflowHandlers = { openProductListing, openSheinListing, openMarketing, openTiktokDraft, ...captureActions };
   openCatalog = bindWorkflowCatalog(workflowHandlers);
   bindWorkflowShortcuts({ getTargetTab: pickTargetTab, handlers: workflowHandlers, onTabAccess: refreshTab });
   try {
