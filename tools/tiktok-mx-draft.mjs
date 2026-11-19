@@ -720,14 +720,14 @@ export async function resolveCategory(tab, url, source, copy, dir) {
   }, url);
   const { chooseCategory, categorySearchQuery } = await import("./tiktok-mx-ptc.mjs");
   const planned = copy.category?.search?.trim();
-  const query = planned && /\p{Script=Han}/u.test(planned) && !/[A-Za-z0-9]/.test(planned)
+  const query = planned && [...planned].length === 1 && /\p{Script=Han}/u.test(planned)
     ? planned : (await categorySearchQuery(source)).query;
   const opened = await runCode(tab, sellerCategorySearchCode(url));
   const typed = await bridge("trusted_type", { tabId: tab, selector: opened.selector, clear: true, value: query });
   if (!typed?.ok) throw Error("Seller category search failed");
   const menu = await runCode(tab, sellerCategoryOptionsCode(url));
   const candidates = [...new Set([...(await suggestions()), ...(menu.choices || [])])];
-  if (!candidates.length) throw Error("Seller offered no category candidates");
+  if (!candidates.length) throw Error("Seller offered no category candidates for " + query);
   const { choice, ptc } = await chooseCategory(source, candidates);
   choice.search = query;
   const inMenu = (menu.choices || []).some(label => categoryPath(label) === categoryPath(choice.label));
