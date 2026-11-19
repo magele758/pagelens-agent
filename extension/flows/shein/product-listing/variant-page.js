@@ -27,7 +27,7 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
   const specRowSelector = '[class*="specContentRow--"]';
   const specLabelSelector = '[class*="specContentLabel--"]';
   const typeSelector = '[class*="specAttrSelect--"]';
-  const menuSelector = '.so-select-box-list';
+  const menuSelector = '.so-select-box-list,.so-select-options';
   const closedMenu = '.so-hidable-hidden,[aria-hidden="true"],[hidden]';
   const optionSelector = '[role="option"],.so-select-dropdown-item,.so-select-option';
   const trigger = select => select.querySelector('.so-select-result,.so-select-selection,.so-select-result-wrapper') || select;
@@ -52,8 +52,12 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
     const type = one(controls.filter(node => node.matches(typeSelector)));
     if (!type) return [];
     const valueControls = controls.filter(node => node !== type);
-    const values = one(valueControls.filter(select => emptyResult(select) &&
-      one(scan(select, '.so-select-input[placeholder="请选择或自定义"]'))));
+    const values = one(valueControls.filter(select => {
+      const result = results(select);
+      return result?.classList.contains('so-select-empty') && Boolean(
+        one(scan(result, '.so-select-input[placeholder="请选择或自定义"]')) ||
+        one(scan(result, '.so-input-placeholder.so-select-ellipsis').filter(node => text(node) === "请选择或自定义")));
+    }));
     const selected = valueControls.map(titleValue).filter(Boolean);
     const name = emptyResult(type) ? "" : titleValue(type) || withoutBadge(text(results(type)));
     return [{ row, label, type, values, name, selected }];
@@ -203,10 +207,14 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
       const style = getComputedStyle(menu);
       return !menu.closest(closedMenu) && style.opacity !== "0" && style.pointerEvents !== "none";
     });
-    return present.filter(menu => !present.some(parent => parent !== menu && parent.contains(menu)));
+    const showing = present.filter(menu => menu.classList.contains('so-hidable-show'));
+    const visibleMenus = showing.length ? showing : present;
+    return visibleMenus.filter(menu => !visibleMenus.some(parent => parent !== menu && parent.contains(menu)));
   }
 
   function optionLabel(node) {
+    const titled = clean(node?.querySelector('[class*="renderItemEllipsis--"][title]')?.getAttribute("title"));
+    if (titled) return titled;
     const english = node?.querySelector('[class*="attrValRenderItemEnText--"]');
     if (english) {
       const englishName = text(english);
@@ -222,6 +230,7 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
 
   async function closeMenu(select, menu) {
     if (!menu || !menus().includes(menu)) return true;
+    if (await stable(() => !menus().includes(menu) ? "closed" : "", 420, 60)) return true;
     if (!onPage() || one(menus()) !== menu || !enabled(trigger(select))) return false;
     trigger(select).click();
     return Boolean(await stable(() => !menus().includes(menu) ? "closed" : "", 650));

@@ -24,6 +24,8 @@ function fixture(t) {
         <div class="soui-select-result-wrapper"><div class="soui-select-result"><input type="text"></div></div>
       </div></div>
     </div>
+    <div class="spmp_style__specContentRow--test"></div>
+    <div class="so-form-item publish_site"><label><input type="checkbox">美国站</label></div>
     <button id="publish">发布商品</button><button id="save">保存草稿</button>
   </main>`, { url: href, runScripts: "outside-only" });
   t.after(() => dom.window.close());

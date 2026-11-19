@@ -27,6 +27,8 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
   };
   const pageMarkers = () => query(document, 'button,[role="button"]').some(node => text(node) === "发布商品") &&
     query(document, 'button,[role="button"]').some(node => text(node) === "保存草稿");
+  const fullEditor = () => query(document, '[class*="specContentRow--"]').length > 0 &&
+    query(document, '.so-form-item.publish_site input[type="checkbox"]').length > 0;
   const blocked = () => query(document, modal).length > 0;
   const categorySelector = '[class*="spmp_style__commodityCategoryItem--"] [class*="spmp_style__categoryInfo--"]';
   const readCategoryPath = () => text(one(query(document, categorySelector))).split(/\s*>\s*/u).filter(Boolean);
@@ -39,8 +41,26 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
   if (!isRoute()) return fail("PAGE_CHANGED", "SHEIN 新建商品页面已切换。");
   if (!["inspect", "fill"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 编辑操作。");
   if (!pageMarkers()) return fail("EDITOR_NOT_READY", "SHEIN 商品编辑器仍在加载。");
+  if (kind === "fill" && !fullEditor()) return fail("EDITOR_NOT_READY", "正在等待 SHEIN 规格和上架站点加载。");
   if (blocked()) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再继续。");
   if (kind === "fill" && !categoryMatches()) return fail("CATEGORY_CHANGED", "当前 SHEIN 商品分类与待填资料不一致，请核对。");
+
+  function dismissListingTips() {
+    for (const message of ["建议完善尺码数据", "拖动图片可进行排序"]) {
+      const matches = query(document, "button").filter(button => {
+        if (!/^关闭\s*(?:\d+s)?$/iu.test(text(button))) return false;
+        for (let area = button.parentElement, depth = 0; area && depth < 5; area = area.parentElement, depth++) {
+          const description = text(area);
+          if (description.length > 150 || area.matches("form,main,section,dialog,[aria-modal=true]")) break;
+          if (description.includes(message)) return true;
+        }
+        return false;
+      });
+      if (matches.length === 1 && editContext() && !blocked()) matches[0].click();
+    }
+  }
+
+  if (kind === "fill") dismissListingTips();
 
   function optionValue(node) {
     return text(node.querySelector('[class*="attrValRenderItem--"],.soui-select-dropdown-item-label,.soui-select-option-label')) || text(node);

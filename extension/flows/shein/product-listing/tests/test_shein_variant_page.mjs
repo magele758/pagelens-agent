@@ -37,11 +37,13 @@ function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondS
     const open = (role, choices, callback) => {
       if (menu?.isConnected) { menu.remove(); return; }
       menu = document.createElement('div');
-      menu.className = 'so-list so-hidable so-hidable-animation-240 so-select-box-list';
+      menu.className = 'so-list so-hidable so-hidable-animation-240 ' +
+        (role === 'type' ? 'so-select-options so-select-control-keyboard' : 'so-select-box-list');
       const current = menu;
       clicks.menus++;
       setTimeout(() => {
         menu.style.opacity = "1";
+        current.classList.add('so-hidable-show');
         const scroll = document.createElement('div');
         scroll.className = 'so-scroll-inner';
         for (const [display, value] of choices) {
@@ -49,7 +51,11 @@ function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondS
           item.className = 'so-checkinput so-checkinput-radio-container so-select-option so-select-option-ltr';
           if (role === 'type') {
             item.href = '#';
-            item.textContent = display;
+            const title = document.createElement('span');
+            title.className = 'salesGroupSelect__renderItemEllipsis--X';
+            title.title = `${value} ${display.slice(value.length).replace(' 重要', '').trim()}`;
+            title.textContent = display;
+            item.append(title);
           }
           else {
             const english = document.createElement('span');
@@ -58,7 +64,8 @@ function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondS
             item.append(value, english);
           }
           item.onclick = () => {
-            current.remove();
+            current.classList.remove('so-hidable-show');
+            setTimeout(() => current.remove(), 240);
             callback(value);
             render();
           };
@@ -92,7 +99,7 @@ function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondS
       }
       const empty = document.createElement('div');
       empty.className = 'so-select';
-      empty.innerHTML = '<div class="so-select-result so-select-empty"><input class="so-select-input" placeholder="请选择或自定义"></div>';
+      empty.innerHTML = '<div class="so-select-result so-select-empty"><div class="so-input-placeholder so-select-ellipsis"><span>请选择或自定义</span></div></div>';
       const colors = [["黑色 Black", "黑色"], ["白色 White", "白色"], ...(duplicateWhite ? [["白色 White", "白色"]] : [])];
       empty.firstChild.onclick = () => open("value", type === "颜色" ? colors : [["均码 One Size", "均码"]], value => values.push(value));
       row.append(empty);
