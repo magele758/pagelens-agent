@@ -391,14 +391,17 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
   const tab = await group.open(url, reuseSourceForCreate ? [drafts] : [], true);
   await waitForSourceTab(tab, url);
   let data;
-  try {
-    data = await js(tab, extract, id);
-  } catch (error) {
-    if (!/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed/i.test(error.message)) throw error;
-    mark("sourceReload");
-    await bridge("activate_tab", { tabId: tab });
-    await bridge("reload_tab", { tabId: tab });
-    data = await js(tab, extract, id);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      data = await js(tab, extract, id);
+      break;
+    } catch (error) {
+      if (attempt === 2 || !/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed/i.test(error.message)) throw error;
+      mark("sourceReload");
+      await bridge("activate_tab", { tabId: tab });
+      if (attempt === 1) await bridge("reload_tab", { tabId: tab });
+      await sleep(1200);
+    }
   }
   mark("sourceRead");
   if (!data.title || !data.gallery?.length)
@@ -667,7 +670,7 @@ async function rerun(url, yenToPeso) {
   let preflight;
   const dir = await prepare(url, true, () => {
     preflight = (async () => {
-      const edit = await open(expectedEdit);
+      const edit = await group.open(expectedEdit, [], true);
       const original = await runCode(edit, snapshotCode(true, false, true, copy.details?.length || 0));
       if (original.url !== expectedEdit || original.title !== registered.title)
         throw Error("Registered draft ID or title differs in the editor");

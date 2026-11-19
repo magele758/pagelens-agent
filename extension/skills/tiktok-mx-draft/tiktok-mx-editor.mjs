@@ -543,6 +543,14 @@ export function mxEditor(bridge, runCode, skuWrites) {
       }
       return null;
     };
+    const imgsOf = doc => { const a = []; doc?.forEach?.(n => { if (n.type?.name === "image") a.push(n); }); return a; };
+    const origEnImgs = copy.preserveImages
+      ? imgsOf(document.querySelector('[data-id="product.publish.description.input_lang"] .ProseMirror')?.pmViewDesc?.node)
+      : [];
+    const origEsImgs = copy.preserveImages
+      ? imgsOf(document.querySelector('[data-id="product.publish.description.local_lang"] .ProseMirror')?.pmViewDesc?.node)
+      : [];
+    const savedImgs = origEnImgs.length >= origEsImgs.length ? origEnImgs : origEsImgs;
     const desc = (id, val) => {
       const e = document.querySelector('[data-id="' + id + '"] .ProseMirror');
       if (!e) throw new Error("Missing description editor");
@@ -550,10 +558,10 @@ export function mxEditor(bridge, runCode, skuWrites) {
       const enEd = copy.preserveImages && id.endsWith(".local_lang")
         ? document.querySelector('[data-id="product.publish.description.input_lang"] .ProseMirror')
         : null;
-      const imgsOf = doc => { const a = []; doc?.forEach?.(n => { if (n.type?.name === "image") a.push(n); }); return a; };
-      const enImgs = imgsOf(enEd?.pmViewDesc?.node);
+      const liveEnImgs = imgsOf(enEd?.pmViewDesc?.node);
+      const refImgs = savedImgs.length > liveEnImgs.length ? savedImgs : liveEnImgs;
       const curImgs = imgsOf(view?.state?.doc);
-      const needImgSync = Boolean(view?.state?.schema.nodes.image && enImgs.length > curImgs.length);
+      const needImgSync = Boolean(copy.preserveImages && view?.state?.schema.nodes.image && refImgs.length > curImgs.length);
       if (
         !needImgSync &&
         e.innerText.replace(/\s+/g, " ").trim() ===
@@ -570,7 +578,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
           view.focus();
           tr.replaceWith(0, doc.content.size, [
             ...paragraphs,
-            ...enImgs.map(n => schema.nodes.image.create(n.attrs)),
+            ...refImgs.map(n => schema.nodes.image.create(n.attrs)),
             schema.nodes.paragraph.create(),
           ]);
           view.dispatch(tr);
