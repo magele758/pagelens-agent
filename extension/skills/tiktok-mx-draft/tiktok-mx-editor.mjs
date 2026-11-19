@@ -79,7 +79,7 @@ export function snapshotCode(withCommerce, allowEmptyDescription, settle = false
   const numbers = withCommerce ? commerceScript(sellerRead).replace(/^return await /, "") : "null";
   return `let seen=0;for(let i=0;i<100;i++){
     if(document.querySelector('${titleSelector}')?.value && (document.querySelector('${localDesc} .ProseMirror')?.textContent.trim() || (${allowEmptyDescription} && i>=12 && document.querySelector('${localDesc} .ProseMirror')))){
-      const state=(${formState.toString()})();if(${expectedDetails}>0&&state.detailImages<${expectedDetails}){const pm=document.querySelector('${localDesc} .ProseMirror');if(pm){pm.scrollTop=pm.scrollHeight;[...pm.children].slice(-4).forEach(n=>n.scrollIntoView?.({block:'nearest'}));}}state.salesAndShipping=await ${numbers};
+      const state=(${formState.toString()})();if(${expectedDetails}>0&&state.detailImages<${expectedDetails}){const pm=document.querySelector('${localDesc} .ProseMirror');if(pm){for(const n of pm.children)n.scrollIntoView?.({block:'center'});}}state.salesAndShipping=await ${numbers};
       if(!${settle} || state.captcha || (state.category && state.gallery && state.enTitle && state.salesAndShipping?.skus.length && state.detailImages>=${expectedDetails}) || ++seen>=(${expectedDetails}>0?35:10))return state;
     }
     await new Promise(r=>setTimeout(r,80));
@@ -617,7 +617,7 @@ export function mxEditor(bridge, runCode, skuWrites) {
     if (state.captcha || !details.length || state.detailImages >= details.length || state.gallery !== copy.gallery.length)
       return state;
     if (state.detailImages > 0) {
-      state = await runCode(tab, "const ed=document.querySelector('" + localDesc + " .ProseMirror');for(let i=0;i<15;i++){if(ed){ed.scrollTop=(i%2?0:ed.scrollHeight);[...ed.children].slice(-4).forEach(n=>n.scrollIntoView?.({block:'nearest'}));}const s=(" + formState.toString() +
+      state = await runCode(tab, "const ed=document.querySelector('" + localDesc + " .ProseMirror');for(let i=0;i<15;i++){if(ed){const ch=[...ed.children];if(ch.length)ch[(i*3)%ch.length].scrollIntoView?.({block:'center'});for(const n of ch)n.scrollIntoView?.({block:'nearest'});}const s=(" + formState.toString() +
         ")(); if(s.detailImages >= " + details.length + " || s.detailImages === 0) return s; await new Promise(r=>setTimeout(r,200))} return (" + formState.toString() + ")()");
       if (state.detailImages >= details.length) return state;
     }
