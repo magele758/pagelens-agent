@@ -18,18 +18,41 @@ async function productFile(directory) {
   }
 }
 
-export function parseSheinProductJSON(value) {
+function parseProductFile(value) {
   let data;
   try {
     data = JSON.parse(value);
   } catch {
-    throw new Error("商品 JSON 格式有误。");
+    throw new Error("商品资料文件无法读取，请重新导出商品资料。");
   }
-  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("请填写一个商品 JSON 对象。");
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("商品资料格式有误，请重新导出。");
   return data;
 }
 
-/** Read the selected manifest or the immediate product folders. */
+async function photoOnlyProduct(root, signal) {
+  const paths = [];
+  async function scan(directory, prefix) {
+    for await (const entry of directory.values()) {
+      signal?.throwIfAborted();
+      if (paths.length === MAX_IMAGES) break;
+      const path = prefix + entry.name;
+      if (entry.kind === "file" && !entry.name.startsWith(".") && localImagePath(path)) paths.push(path);
+    }
+  }
+  await scan(root, "");
+  if (paths.length < MAX_IMAGES) {
+    let images;
+    try { images = await root.getDirectoryHandle("images"); }
+    catch (error) { if (!["NotFoundError", "TypeMismatchError"].includes(error.name)) throw error; }
+    if (images) await scan(images, "images/");
+  }
+  if (!paths.length) return null;
+  paths.sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
+  const imagePath = paths.find(path => /^(?:主图|main|hero|cover)(?=[\d_. -])/iu.test(path.split("/").at(-1))) || paths[0];
+  return { directory: root, title: root.name, input: { title: root.name, imagePath, detailImages: paths.filter(path => path !== imagePath) } };
+}
+
+/** Read PageLens product exports, or images in the selected single-product folder. */
 export async function readSheinProductDirectory(root, { signal } = {}) {
   signal?.throwIfAborted();
   const candidates = [];
@@ -56,13 +79,17 @@ export async function readSheinProductDirectory(root, { signal } = {}) {
     signal?.throwIfAborted();
     try {
       const file = await handle.getFile();
-      if (!file.size || file.size > MAX_PRODUCT_SIZE) throw new Error("product.json 为空或超过 512 KB。");
-      const input = parseSheinProductJSON(await file.text());
-      if (typeof input.title !== "string" || !input.title.trim()) throw new Error("product.json 缺少商品标题。");
+      if (!file.size || file.size > MAX_PRODUCT_SIZE) throw new Error("商品资料文件为空或超过 512 KB。");
+      const input = parseProductFile(await file.text());
+      if (typeof input.title !== "string" || !input.title.trim()) throw new Error("商品资料缺少标题。");
       products.push({ directory, input, title: input.title.trim() });
     } catch (error) {
       issues.push(`${directory.name} · ${error.message || "读取失败"}`);
     }
+  }
+  if (!candidates.length) {
+    const photoProduct = await photoOnlyProduct(root, signal);
+    if (photoProduct) products.push(photoProduct);
   }
   signal?.throwIfAborted();
   return { name: root.name, products, issues };

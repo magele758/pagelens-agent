@@ -1,6 +1,6 @@
 import { requireHostUrl } from "../../../../lib/optional-permissions.js";
 import { $ } from "../../../../sidepanel/dom.js";
-import { parseSheinProductJSON, productImagePaths, readSheinProductDirectory, readSheinProductImages } from "./product-directory.js";
+import { productImagePaths, readSheinProductDirectory, readSheinProductImages } from "./product-directory.js";
 
 function isSheinTab(tab) {
   try {
@@ -13,7 +13,7 @@ function isSheinTab(tab) {
 
 async function pickSheinDirectory() {
   if (typeof window.showDirectoryPicker !== "function") {
-    throw new Error("当前 Chrome 无法打开目录选择器，可以在此面板填写商品 JSON。");
+    throw new Error("当前 Chrome 无法打开目录选择器，可以直接输入商品描述。");
   }
   return window.showDirectoryPicker({ id: "pagelens-shein-products", mode: "read" });
 }
@@ -29,7 +29,7 @@ async function currentTabAccess(tab) {
 
 export function bindSheinListingPanel({
   getTargetTab, isAgentBusy, onBack, pickDirectory = pickSheinDirectory,
-  authorize = requireHostUrl, probeAccess = currentTabAccess, openEditor, inspect, replay,
+  authorize = requireHostUrl, probeAccess = currentTabAccess, replay,
 }) {
   const get = name => $(`shein-listing-${name}`);
   const dialog = get("dialog");
@@ -39,71 +39,61 @@ export function bindSheinListingPanel({
   const product = get("product");
   const category = get("category");
   const upload = get("upload");
-  const json = get("json");
+  const assist = get("ai");
+  const description = get("description");
+  const notes = () => description.value.trim().slice(0, 1800);
   const stop = get("stop");
-  const buttons = [get("open"), get("inspect"), get("run")];
   let targetTab;
   let products = [];
   let operation;
   let revision = 0;
+  const customerText = value => typeof value === "string" ? value.replaceAll("试填", "填写") : "";
 
   function report(message = "", state = "") {
-    status.textContent = message;
+    status.textContent = customerText(message);
     status.dataset.state = state;
   }
 
   function renderTarget() {
     const supported = isSheinTab(targetTab);
-    target.textContent = supported ? "当前标签 · SHEIN 商家后台" : "请打开已登录的 SHEIN 商家后台。";
+    target.hidden = supported || !targetTab;
+    target.textContent = "切回已登录的 SHEIN 商家后台后即可开始上品。";
     get("link").hidden = supported;
     get("source").disabled = Boolean(operation);
-    for (const button of buttons) button.disabled = Boolean(operation) || !supported;
-    get("run").disabled ||= !products.length && !json.value.trim();
+    get("run").disabled = Boolean(operation) || !supported || (!selectedProduct() && !notes());
     stop.hidden = !operation;
+    stop.disabled = Boolean(operation?.signal.aborted);
   }
 
   function renderResults(lines = []) {
-    const rows = lines.filter(line => typeof line === "string" && line.trim()).slice(0, 90);
+    const rows = [...new Set(lines.map(customerText).filter(line => line.trim()))].slice(0, 90);
     results.hidden = !rows.length;
     results.replaceChildren(...rows.map(line => Object.assign(document.createElement("li"), { textContent: line })));
   }
 
   const selectedProduct = () => products[Number(product.value)];
 
-  function renderUpload() {
-    const selected = selectedProduct();
-    let input = selected?.input;
-    if (selected && json.value.trim()) {
-      try { input = selectedInput(); } catch { /* Keep the directory image selection while editing. */ }
-    }
-    const row = get("upload-row");
-    row.hidden = !input || productImagePaths(input).length === 0;
-    if (row.hidden) upload.checked = false;
+  function renderCategory(path) {
+    const parts = Array.isArray(path) ? path : typeof path === "string" ? path.split(/[>›＞]/u) : [];
+    const trail = parts.filter(part => typeof part === "string" && part.trim()).map(part => part.trim()).join(" › ");
+    category.hidden = !trail;
+    category.textContent = trail ? `类目 ${trail}` : "";
   }
 
   function updateSelectedProduct() {
-    const selected = selectedProduct();
-    category.value = Array.isArray(selected?.input?.shein?.categoryPath) ? selected.input.shein.categoryPath.join(" > ") : "";
+    const input = selectedProduct()?.input;
+    renderCategory(input?.shein?.categoryPath ?? input?.categoryPath);
     upload.checked = false;
-    renderUpload();
+    assist.checked = false;
+    get("upload-row").hidden = !input || productImagePaths(input).length === 0;
+    renderTarget();
   }
 
-  function selectedInput() {
-    const directoryInput = selectedProduct()?.input ?? {};
-    const supplement = json.value.trim() ? parseSheinProductJSON(json.value) : {};
-    const combined = { ...directoryInput, ...supplement };
-    for (const key of ["attributes", "shein"]) {
-      if (directoryInput[key] && supplement[key] && typeof directoryInput[key] === "object" && typeof supplement[key] === "object") {
-        combined[key] = { ...directoryInput[key], ...supplement[key] };
-      }
-    }
-    if (typeof combined.title !== "string" || !combined.title.trim()) throw new Error("请选择商品目录，或在 JSON 中填写 title。");
-    if (category.value.trim()) {
-      const categoryPath = category.value.split(/[>›＞]/u).map(part => part.trim()).filter(Boolean);
-      combined.categoryPath = categoryPath;
-      combined.shein = { ...combined.shein, categoryPath };
-    }
-    return combined;
+  function buildInput(selected, operatorNotes) {
+    if (selected?.input) return operatorNotes ? { ...selected.input, operatorNotes } : selected.input;
+    if (!operatorNotes) throw new Error("请选择商品目录或输入商品描述。");
+    const lead = operatorNotes.split(/[。\r\n]/u, 1)[0].trim();
+    return { title: (lead || operatorNotes).slice(0, 160), description: operatorNotes, operatorNotes };
   }
 
   async function run(label, action) {
@@ -122,7 +112,10 @@ export function bindSheinListingPanel({
         error.name === "AbortError" ? "" : "needs-review");
     } finally {
       operation = undefined;
-      if (dialog.open) renderTarget();
+      if (dialog.open) {
+        if (signal.aborted) report("操作已停止。");
+        renderTarget();
+      }
     }
   }
 
@@ -143,9 +136,11 @@ export function bindSheinListingPanel({
 
   get("pick").addEventListener("click", () => void run("正在读取商品目录…", async ({ signal, current }) => {
     const directory = await pickDirectory();
-    if (!directory || !current()) return;
+    if (!current()) return;
+    if (!directory) return report();
     const loaded = await readSheinProductDirectory(directory, { signal });
     if (!current()) return;
+    const hadSelection = Boolean(selectedProduct());
     products = loaded.products;
     product.replaceChildren(...products.map((entry, index) =>
       Object.assign(document.createElement("option"), { value: index, textContent: entry.title })));
@@ -155,68 +150,58 @@ export function bindSheinListingPanel({
     if (loaded.products.length) {
       summary.textContent = products.length === 1 ? products[0].title : `${loaded.name} · ${products.length} 件商品`;
       get("pick").textContent = "更换商品目录";
-      json.value = "";
+      if (hadSelection) description.value = "";
       report(loaded.issues.length ? "已导入可读取的商品。" : "");
     } else {
       get("pick").textContent = "选择商品目录";
-      report("目录中没有可用的商品资料，请选择包含 product.json 的商品目录。", "needs-review");
+      report("目录中没有可读取的商品资料。请选择商品目录，或输入商品描述。", "needs-review");
     }
     updateSelectedProduct();
     renderResults(loaded.issues);
   }));
-  json.addEventListener("input", () => { renderTarget(); renderUpload(); });
-  product.addEventListener("change", updateSelectedProduct);
-
-  get("open").addEventListener("click", () => void run("正在打开商品发布…", async ({ signal, current }) => {
-    const outcome = await openEditor(await withSeller(signal));
-    if (!current()) return;
-    if (!outcome?.ok) return report(outcome?.message || "未能打开商品发布页。", "needs-review");
-    report(outcome.message || "已打开商品发布页。", "verified");
-  }));
-
-  get("inspect").addEventListener("click", () => void run("正在读取当前表单…", async ({ signal, current }) => {
-    const outcome = await inspect(await withSeller(signal));
-    if (!current()) return;
-    if (!outcome?.ok) return report(outcome?.message || "未能读取当前表单。", "needs-review");
-    if (outcome.stage === "category" || Array.isArray(outcome.options) && outcome.options.some(Array.isArray)) {
-      renderResults([
-        ...(outcome.selectedPath?.length ? [`已选类目 · ${outcome.selectedPath.join(" › ")}`] : []),
-        ...(outcome.options || []).map((options, index) => `第 ${index + 1} 级 · ${options.slice(0, 8).join("、")}${options.length > 8 ? `等 ${options.length} 项` : ""}`),
-      ]);
-      return report(outcome.message || "已读取类目。请填写完整路径，或直接在 SHEIN 选择。", "verified");
-    }
-    const fields = outcome.fields || [];
-    renderResults(fields.map(field => `${field.label || field.key}${field.required ? "（必填）" : ""}`));
-    report(outcome.message || `已识别 ${fields.length} 个表单字段。`, "verified");
-  }));
+  description.addEventListener("input", renderTarget);
+  product.addEventListener("change", () => {
+    description.value = "";
+    report();
+    renderResults();
+    updateSelectedProduct();
+  });
 
   get("run").addEventListener("click", () => void run("正在核对商品资料…", async ({ signal, current }) => {
-    const input = selectedInput();
+    const selected = selectedProduct();
+    const input = buildInput(selected, notes());
     const uploadAllowed = upload.checked;
+    const allowAI = assist.checked;
     upload.checked = false;
     const seller = await withSeller(signal);
-    const selected = selectedProduct();
-    const files = uploadAllowed && selected ? await readSheinProductImages({ ...selected, input }, { signal }) : { images: [], issues: [] };
-    const outcome = await replay({ ...seller, input, images: files.images, onStep(progress) {
-      if (current()) report(typeof progress === "string" ? progress : progress?.label, "running");
-    } });
+    const files = selected && (uploadAllowed || allowAI) ? await readSheinProductImages(selected, { signal }) : { images: [], issues: [] };
+    const outcome = await replay({ ...seller, input, images: uploadAllowed ? files.images : [], allowAI,
+      referenceImages: allowAI ? files.images : [], onStep(progress) {
+        if (!current()) return;
+        if (progress?.categoryPath) renderCategory(progress.categoryPath);
+        report(typeof progress === "string" ? progress : progress?.label, "running");
+      },
+    });
     if (!current()) return;
-    const filled = (outcome?.items || []).filter(item => item?.label && ["filled", "verified", "unchanged"].includes(item.status));
+    if (outcome?.categoryPath) renderCategory(outcome.categoryPath);
     const issues = (outcome?.issues || []).map(issue => typeof issue === "string" ? issue :
       [issue?.label, issue?.message].filter(Boolean).join(" · "));
-    renderResults([...files.issues, ...issues, ...filled.map(item => `已核对 · ${item.label}`)]);
+    renderResults([...files.issues, ...issues]);
     const state = outcome?.ok && !issues.length && !files.issues.length ? "verified" : "needs-review";
-    report(outcome?.message || (state === "verified" ? `试填完成，已核对 ${filled.length} 项。` : `试填待核对，已核对 ${filled.length} 项。`), state);
+    report(state === "verified" ? "商品资料已填写，请在 SHEIN 核对并发布。" :
+      outcome?.message || "还有需要处理的问题，请查看下方提示。", state);
   }));
 
   stop.addEventListener("click", () => {
     operation?.abort();
-    report("操作已停止。");
+    report("正在停止…", "running");
+    renderTarget();
   });
   function close() {
     revision++;
     operation?.abort();
     upload.checked = false;
+    assist.checked = false;
     if (dialog.open) dialog.close();
   }
   get("close").addEventListener("click", close);

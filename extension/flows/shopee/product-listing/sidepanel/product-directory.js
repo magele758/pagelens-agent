@@ -1,5 +1,7 @@
 import { loadSettings } from "../../../../lib/storage.js";
+import { requireOptionalFeature } from "../../../../lib/optional-permissions.js";
 import { parseSizeChartImage, resolveSizeChartModel } from "../../../../lib/size-chart.mjs";
+import { createListingAdvisor } from "../../../shared/listing/listing-advisor.js";
 
 const absolute = /^(?:\/|[A-Za-z]:[\\/])/u;
 
@@ -30,6 +32,20 @@ export async function loadProductDirectory(path, { send = readFromHost } = {}) {
   }
   const loaded = await send({ op: "fs", action: "loadProductDirectory", path: path.trim() }, { interactive: false });
   return validateProductDirectory(loaded);
+}
+
+export async function chooseShopeeProductDirectory({
+  authorize = requireOptionalFeature, choose = () => chrome.runtime.sendMessage({ type: "pl.ptc.chooseDirectory" }),
+} = {}) {
+  const denied = await authorize("nativeMessaging", { userGesture: true });
+  if (denied) throw new Error(denied);
+  const selected = await choose();
+  if (selected?.ok === true && selected.cancelled) return null;
+  const loaded = validateProductDirectory(selected);
+  if (typeof selected.directoryName !== "string" || !selected.directoryName.trim()) {
+    throw new Error("本机助手未返回商品目录名称。");
+  }
+  return { ...loaded, directoryName: selected.directoryName };
 }
 
 export function validateProductDirectory(loaded) {
@@ -84,6 +100,24 @@ export async function readProductImage({ root, folder, path, asset, signal, send
 
 export function readSizeChartImage(args) {
   return readProductImage({ ...args, asset: "sizeChart" });
+}
+
+export function directoryAttributeAdvice(product, {
+  root, signal, readImage = readProductImage, getSettings = loadSettings, createAdvisor = createListingAdvisor,
+} = {}) {
+  let advisor;
+  async function prepare() {
+    const { folder, input } = product;
+    const settings = await getSettings();
+    const referenceImages = [];
+    if (input.imagePath) {
+      const image = await readImage({ root, folder, path: input.imagePath, asset: "main", signal });
+      const blob = await (await fetch(image, { signal })).blob();
+      referenceImages.push({ role: "main", file: blob });
+    }
+    return createAdvisor({ settings, product: input, referenceImages, signal });
+  }
+  return async fields => (await (advisor ??= prepare())).fields(fields);
 }
 
 export async function completeDirectorySizeChartInput(product, {

@@ -9,6 +9,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     !element.closest('[hidden],[inert],[aria-hidden="true"]') && getComputedStyle(element).visibility !== "hidden");
   const control = 'input,textarea,select,[contenteditable="true"],[contenteditable="plaintext-only"]';
   const labels = 'label,[data-field-label],[class*="Form_itemLabelContent_"],[class*="STF_label_"]';
+  const formItem = '[data-testid="beast-core-form-item"],[class*="Form_item_"]';
   const modals = 'dialog[open],[role="alertdialog"],[aria-modal="true"],[data-testid="beast-core-modal-container"]';
   const csselect = '[class*="ST_outerWrapper_"],[role="combobox"],[aria-haspopup="listbox"],[class*="colour-spec-select_colorSpecSelect__"]';
   const root = document.getElementById("page_container_id");
@@ -134,7 +135,7 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     const id = titleKey || holder?.id;
     if (!id || !titleKey && Object.hasOwn(titleLabels, id) || input.matches(':disabled,[readonly]') ||
         input.closest('[aria-disabled="true"],[aria-readonly="true"]')) return null;
-    const section = input.closest('[data-testid="beast-core-form-item"],[class*="Form_item_"]');
+    const section = input.closest(formItem);
     const sku = skuId(id);
     if (sku && input.closest('[data-placeholder="true"],[class*="skeleton" i]')) return null;
     const label = names[id] || shipping[sku?.[2]] || skuNames[sku?.[2]] ||
@@ -180,11 +181,50 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     const matches = inputs.filter(visibleField).map(input => fromField(input)).filter(item => item?.field.key === id);
     return matches.length === 1 ? matches[0] : null;
   };
-  function issues() {
-    const errors = root.querySelectorAll('[aria-invalid="true"],[data-testid*="error"],[role="alert"],[class*="Form_error_"],[class*="itemError_"]');
+  function validation(entries, media) {
+    const errors = root.querySelectorAll('[aria-invalid="true"],[data-invalid="true"],[data-testid*="error"],[role="alert"],[class*="Form_error_"],[class*="itemError_"]');
     const notifications = [...document.querySelectorAll('[role="alert"],[data-testid*="toast"],[class*="Toast_content"]')]
       .filter(el => /失败|错误|未成功|有误|超出|没有权限|error|failed|invalid/iu.test(clean(el.textContent)));
-    return [...new Set([...errors, ...notifications].filter(visible).map(el => clean(el.textContent, 160) || nearby(el)).filter(Boolean))].slice(0, 35);
+    const present = [...new Set([...errors, ...notifications])].filter(visible);
+    if (!present.length) return [];
+
+    const owners = entries.map(({ input, field }) => ({
+      input, holder: holderFor(input) || input, key: field.key, label: field.label, kind: field.kind,
+    }));
+    // The dropdown adapter reads these controls separately. Use only unique platform attribute IDs to associate their errors.
+    for (const holder of root.querySelectorAll('[id^="productProperties"]')) {
+      if (!/^productProperties\[\d+\]$/u.test(holder.id) || document.querySelectorAll(`[id="${holder.id}"]`).length !== 1) continue;
+      const candidates = [...holder.querySelectorAll("input")].filter(input => visible(input) && input.closest(csselect));
+      if (candidates.length === 1 && !owners.some(owner => owner.key === holder.id)) {
+        owners.push({ input: candidates[0], holder, key: holder.id, label: nearby(candidates[0]), kind: "select" });
+      }
+    }
+    const uploadLabels = { main: "商品轮播图", detail: "详情图", "size-chart": "尺码图", variant: "规格图" };
+    for (const upload of media) {
+      const holder = document.getElementById(upload.key);
+      if (holder && root.contains(holder)) {
+        const label = upload.variant ? `${upload.variant}规格图` : uploadLabels[upload.role];
+        owners.push({ holder, key: upload.key, label, kind: "upload" });
+      }
+    }
+    const referenceIds = input => [input?.getAttribute("aria-describedby"), input?.getAttribute("aria-errormessage")]
+      .filter(Boolean).flatMap(value => value.split(/\s+/u));
+    const rows = present.map(error => {
+      const item = error.closest(formItem);
+      const direct = owners.filter(({ input }) => input === error || error.id && referenceIds(input).includes(error.id));
+      const local = direct.length || !root.contains(error) ? direct : owners.filter(({ input, holder }) =>
+        holder.contains(error) || error.contains(input || holder) || item && (input || holder).closest(formItem) === item);
+      const owner = local.length === 1 ? local[0] : null;
+      const detail = owner && (owner.input === error || owner.holder === error) ?
+        referenceIds(owner.input).map(id => document.getElementById(id)).filter(el => visible(el) && root.contains(el))
+          .map(el => clean(el.textContent, 160)).find(Boolean) : "";
+      const message = detail || (!error.matches(control) ? clean(error.textContent, 160) : "") ||
+        clean(error.getAttribute("aria-label"), 160) || (owner ? "当前控件校验未通过" : nearby(error));
+      return message ? {
+        ...(owner && { key: owner.key, ...(owner.label && { label: translated(owner.label) }), kind: owner.kind }), message,
+      } : null;
+    }).filter(Boolean);
+    return [...new Map(rows.map(row => [JSON.stringify([row.key, row.message]), row])).values()].slice(0, 35);
   }
 
   function uploads() {
@@ -278,7 +318,10 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     const skuRows = rows.size ? [...rows].map(([id, labels]) => ({ id, labels })) : null;
     const hasApparelSizes = [...root.querySelectorAll('button,[role="button"]')].some(button =>
       visible(button) && /^\+?\s*添加尺码表$/u.test(clean(button.textContent)));
-    return { ok: true, fields: list.slice(0, 400), skuRows, uploads: uploads(), issues: issues(), hasApparelSizes,
+    const media = uploads();
+    const findings = validation(uniqueFields, media);
+    return { ok: true, fields: list.slice(0, 400), skuRows, uploads: media, validation: findings,
+      issues: [...new Set(findings.map(finding => finding.message))], hasApparelSizes,
       truncated: list.length > 400 };
   }
   if (kind === "upload-target") {

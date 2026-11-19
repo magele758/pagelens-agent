@@ -36,9 +36,8 @@
 .shein-listing-source > button { justify-self: start; }
 .shein-listing-hint { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .shein-listing-product { display: grid; gap: 4px; font-size: 12px; }
-.shein-listing-source summary { cursor: pointer; }
 
-.shein-listing-source textarea, .shein-listing-source select, #shein-listing-category {
+.shein-listing-source textarea, .shein-listing-source select {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
@@ -49,9 +48,10 @@
   border-radius: 6px;
 }
 
-.shein-listing-source textarea { margin-top: 6px; resize: vertical; font-family: ui-monospace, monospace; }
+.shein-listing-source textarea { resize: vertical; font: inherit; }
 .shein-listing-upload { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; }
 .shein-listing-upload input { flex: none; width: auto; margin: 2px 0 0; accent-color: var(--accent); }
+.shein-listing-category { margin: 0 0 10px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .shein-listing-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .shein-listing-results {

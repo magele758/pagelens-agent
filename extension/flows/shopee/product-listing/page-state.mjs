@@ -17,7 +17,7 @@ export function readPage(category) {
   }
 
   const out = {
-    url: location.href, modal: null, validation: [], category: null, recommendation: null, recommendations: [],
+    url: location.href, modal: null, validation: [], unscopedValidation: [], category: null, recommendation: null, recommendations: [],
     categoryReady: false, fields: {}, attributes: [], options: [], optionSearch: null,
     image: { count: null, cover: false, selector: null },
     variant: { enable: null, options: [], rows: [] },
@@ -96,6 +96,10 @@ export function readPage(category) {
   }
 
   const opened = [];
+  const attributeRows = new Set();
+  const validationMarker = '[aria-invalid=true],.eds-form-item__error,.eds-message--error,[role=alert]';
+  const validationText = el => clean(el.textContent || el.getAttribute('aria-label') ||
+    labelNode(el.closest('.edit-row'))?.textContent);
   for (const row of all('.edit-row', one(panels[1]))) {
     const label = labelNode(row);
     if (!label) continue;
@@ -106,11 +110,14 @@ export function readPage(category) {
     const required = Boolean(label.querySelector('.mandatory') || /^\s*[＊*]/u.test(label.textContent) ||
       controls.some(el => el.matches('[required],[aria-required=true]')));
     if (!control && !required) continue;
+    attributeRows.add(row);
     const selection = control?.querySelector('.eds-selector__inner,.scroll-selector-content') ?? control;
     if (control && (control.getAttribute('aria-expanded') === 'true' || control.closest('.eds-select.is-show'))) {
       opened.push(labelText(label));
     }
-    out.attributes.push({ label: labelText(label), required, selector: selectorOf(control),
+    const error = shown(validationMarker, row).map(validationText).filter(Boolean).join(' · ').slice(0, 220);
+    out.attributes.push({ label: labelText(label), required, selector: selectorOf(control), error,
+      type: control?.matches('.eds-selector') ? 'select' : control?.matches('input[type=file]') ? 'upload' : 'unsupported',
       value: selection?.matches('.placeholder') ? '' : clean(value(selection)).replace(/^请选择$/u, '') });
   }
   out.categoryReady = Boolean(out.category && (!wanted || out.category === wanted) &&
@@ -180,9 +187,10 @@ export function readPage(category) {
     shown('.eds-popper:has(.pulse-popover-button)').at(-1);
   if (modal) out.modal = { text: clean(modal.innerText ?? modal.textContent).slice(0, 200) || '页面弹窗' };
   out.missingRequired = Number(document.body.innerText?.match(/仍有\s*(\d+)\s*个必填字段为空/u)?.[1] ?? 0);
-  out.validation = [...new Set(shown('[aria-invalid=true],.eds-form-item__error,.eds-message--error,[role=alert]')
-    .map(el => clean(el.textContent || el.getAttribute('aria-label') || labelNode(el.closest('.edit-row'))?.textContent))
-    .filter(Boolean))].slice(0, 12);
+  const validationNodes = shown(validationMarker);
+  const validation = nodes => [...new Set(nodes.map(validationText).filter(Boolean))].slice(0, 12);
+  out.validation = validation(validationNodes);
+  out.unscopedValidation = validation(validationNodes.filter(node => !attributeRows.has(node.closest('.edit-row'))));
   return out;
 }
 

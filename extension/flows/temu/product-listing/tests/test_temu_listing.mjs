@@ -62,6 +62,99 @@ const input = {
 }
 
 {
+  const style = { key: "productProperties[43]", label: "款式", kind: "select", required: true, options: [], locator: {} };
+  const unverifiedFacts = { key: "productProperties[45]", label: "副材质", kind: "select", required: true, options: [], locator: {} };
+  const sameLabel = { ...style, key: "productProperties[44]", required: false, value: "运动" };
+  const fields = structuredClone([title, { ...material, value: "旧材质" }, price, sameLabel]);
+  const state = { ok: true, fields, uploads: [{ role: "main", key: "album" }], issues: [], validation: [] };
+  const calls = [];
+  let modelCalls = 0;
+  let uploaded = false;
+  const receipt = await replayTemuListing({
+    tabId: 1,
+    input: { ...input, listingAttributes: { [material.key]: "不锈钢" }, skus: [{ options: { Color: "红色", Size: "Small" } }] },
+    async call(tool, args) {
+      calls.push([tool, args]);
+      if (tool === "temu_category") return { ok: true, href: editor };
+      if (tool === "temu_editor_state") return structuredClone(state);
+      if (tool === "temu_write" && args.key === title.key) {
+        fields[0].value = args.value;
+        return { ok: true, status: "filled" };
+      }
+      if (tool === "temu_select" && args.key === material.key && !uploaded) {
+        return { ok: false, code: "READBACK_MISMATCH", message: "旧材质未通过校验" };
+      }
+      if (tool === "temu_upload") {
+        uploaded = true;
+        fields.push({ ...style, value: "" }, { ...unverifiedFacts, value: "" });
+        state.validation = [{ key: material.key, kind: "select", message: "旧材质未通过校验" },
+          { key: price.key, kind: "text", message: "请输入申报价" }];
+        return { ok: true, status: "verified" };
+      }
+      assert.ok(uploaded, "the recovery pass starts after media");
+      if (tool === "temu_field_options") {
+        assert.equal(args.forceLive, true);
+        const approved = new Map([[material.key, { value: "m1", label: "不锈钢" }], [style.key, { value: "s1", label: "休闲" }]]);
+        assert.ok(approved.has(args.key), "protect price and unknown material from recovery");
+        return { ok: true, options: [approved.get(args.key)] };
+      }
+      if (tool === "temu_select" && [material.key, style.key].includes(args.key)) {
+        const field = fields.find(field => field.key === args.key);
+        field.value = args.query;
+        state.validation = state.validation.filter(row => row.key !== args.key);
+        return { ok: true, status: "filled" };
+      }
+      throw new Error("unexpected action: " + tool);
+    },
+    async suggestFields(_product, { fields }) {
+      modelCalls++;
+      assert.ok(uploaded);
+      assert.deepEqual(fields.map(field => field.key), [style.key]);
+      return { values: { [style.key]: "s1", [price.key]: "999", [unverifiedFacts.key]: "金属" } };
+    },
+  });
+  assert.equal(modelCalls, 1);
+  assert.equal(receipt.status, "needs-review");
+  assert.ok(receipt.items.some(item => item.key === style.key && item.status === "filled"));
+  assert.ok(!receipt.items.some(item => item.key === material.key && item.status === "needs-review"));
+  assert.ok(!receipt.issues.some(issue => issue.key === material.key));
+  assert.ok(receipt.issues.some(issue => issue.key === price.key && issue.code === "VALIDATION"));
+  assert.ok(receipt.missing.some(field => field.key === unverifiedFacts.key));
+  assert.deepEqual(calls.filter(([tool, args]) => tool === "temu_select" && args.key === material.key)
+    .map(([, args]) => args.value), ["不锈钢", "m1"]);
+}
+
+{
+  const field = { key: "productProperties[12]", label: "风格", kind: "text", required: true, value: "" };
+  const state = { ok: true, fields: [{ ...title, value: "Water Bottle" }], uploads: [{ role: "main", key: "album" }], issues: [], validation: [] };
+  let repairs = 0;
+  const receipt = await replayTemuListing({
+    tabId: 1, input: { ...input, skus: [], listingAttributes: { [field.key]: "休闲" } },
+    async call(tool, args) {
+      if (tool === "temu_category") return { ok: true, href: editor };
+      if (tool === "temu_editor_state") return structuredClone(state);
+      if (tool === "temu_upload") {
+        state.fields.push(field);
+        state.validation = [{ key: field.key, kind: "text", message: "属性仍需核对" }];
+        return { ok: true, status: "verified" };
+      }
+      if (tool === "temu_write" && args.key === title.key) return { ok: true, status: "unchanged" };
+      if (tool === "temu_write" && args.key === field.key) {
+        repairs++;
+        assert.equal(args.value, "休闲");
+        field.value = args.value;
+        return { ok: true, status: "filled" };
+      }
+      throw new Error("unexpected action: " + tool);
+    },
+  });
+  assert.equal(repairs, 1);
+  assert.equal(receipt.status, "needs-review");
+  assert.ok(receipt.issues.some(issue => issue.key === field.key && issue.message === "属性仍需核对"));
+  assert.ok(receipt.items.some(item => item.key === field.key && item.status === "needs-review"));
+}
+
+{
   let failed = false;
   const result = await replayTemuListing({
     tabId: 1, input,
@@ -146,6 +239,32 @@ const input = {
   assert.equal(submits, 0);
   const otherScope = await run({ kind: "write", href: editor.replace("9461", "9462"), key: title.key, value: "Other" });
   assert.equal(otherScope.code, "PAGE_CHANGED");
+  dom.window.close();
+}
+
+{
+  const dom = new JSDOM(`<main id="page_container_id">
+    <div id="productEnName"><textarea></textarea></div>
+    <div data-testid="beast-core-form-item"><label>风格</label><div id="productProperties[42]">
+      <div class="ST_outerWrapper_1"><input aria-invalid="true" aria-describedby="first-error"></div>
+      <span id="first-error" class="Form_error_1">请选择此规格的风格</span>
+    </div></div>
+    <div data-testid="beast-core-form-item"><label>风格</label><div id="productProperties[43]">
+      <div class="ST_outerWrapper_2"><input></div>
+    </div></div>
+    <div id="noCostumeCarouselImgsI18n.common"><div class="upload-trigger_wrap__test">素材中心</div>
+      <span class="Form_error_2">图片数量不足</span>
+    </div>
+  </main><div role="alert">提交失败</div>`, { url: editor, runScripts: "outside-only" });
+  dom.window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const run = request => dom.window.eval(`(${temuEditorPage.toString()})(${JSON.stringify({ href: editor, ...request })})`);
+  const state = JSON.parse(JSON.stringify(await run({ kind: "inspect" })));
+  assert.deepEqual(state.validation, [
+    { key: "productProperties[42]", label: "风格", kind: "select", message: "请选择此规格的风格" },
+    { key: "noCostumeCarouselImgsI18n.common", label: "商品轮播图", kind: "upload", message: "图片数量不足" },
+    { message: "提交失败" },
+  ]);
+  assert.deepEqual(state.issues, state.validation.map(finding => finding.message));
   dom.window.close();
 }
 

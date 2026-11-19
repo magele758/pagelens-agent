@@ -932,7 +932,7 @@
       <h2 id="shein-listing-title"><img alt="" width="18" height="18" src="../flows/icons/shein.png" />SHEIN 商品上架</h2>
       <button type="button" id="shein-listing-close" class="icon-btn" aria-label="关闭商品上架">×</button>
     </header>
-    <p id="shein-listing-target" class="ptc-target"></p>
+    <p id="shein-listing-target" class="ptc-target" hidden></p>
     <a id="shein-listing-link" href="https://sellerhub.shein.com/#/spmp/commdities/list" target="_blank" rel="noopener" hidden>打开 SHEIN 商品列表</a>
     <fieldset id="shein-listing-source" class="shein-listing-source">
       <legend>商品资料</legend>
@@ -942,26 +942,24 @@
         目录中的商品
         <select id="shein-listing-product"></select>
       </label>
-      <label class="shein-listing-product">
-        商品类目路径
-        <input type="text" id="shein-listing-category" placeholder="选填，用 &gt; 分隔类目层级" />
+      <label class="shein-listing-product" for="shein-listing-description">
+        商品描述（选填）
+        <textarea id="shein-listing-description" rows="3" maxlength="1800" placeholder="例如，350 毫升白色陶瓷马克杯"></textarea>
       </label>
-      <details id="shein-listing-data">
-        <summary>输入或补充 JSON</summary>
-        <textarea id="shein-listing-json" rows="4" spellcheck="false" aria-label="商品 JSON" placeholder='{"title":"商品名称"}'></textarea>
-      </details>
       <label class="shein-listing-upload" id="shein-listing-upload-row" hidden>
-        <input type="checkbox" id="shein-listing-upload" />本次试填上传目录中的商品图片
+        <input type="checkbox" id="shein-listing-upload" />上传所选商品图片到 SHEIN
+      </label>
+      <label class="shein-listing-upload">
+        <input type="checkbox" id="shein-listing-ai" />允许已配置的 AI 分析商品资料和图片
       </label>
     </fieldset>
+    <p id="shein-listing-category" class="shein-listing-category" hidden></p>
     <div class="shein-listing-actions">
-      <button type="button" class="secondary" id="shein-listing-open">打开商品发布</button>
-      <button type="button" class="secondary" id="shein-listing-inspect">读取表单</button>
-      <button type="button" class="primary" id="shein-listing-run">开始试填</button>
+      <button type="button" class="primary" id="shein-listing-run" disabled>开始上品</button>
       <button type="button" class="secondary" id="shein-listing-stop" hidden>停止</button>
     </div>
-    <p id="shein-listing-status" class="ptc-status" role="status"></p>
-    <ul id="shein-listing-results" class="shein-listing-results" aria-label="填表结果及待核对项" hidden></ul>
+    <p id="shein-listing-status" class="ptc-status" role="status" aria-atomic="true"></p>
+    <ul id="shein-listing-results" class="shein-listing-results" aria-label="待处理的问题" hidden></ul>
   </dialog>
   <dialog id="product-capture-dialog" aria-labelledby="product-capture-title">
     <header class="ptc-heading">

@@ -1,5 +1,5 @@
 /** Runs in the seller page. Keep the injected function self-contained. */
-export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, brand } = {}) {
+export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, brand, keyword, preferredPath, storeKey } = {}) {
   const clean = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const route = url => url.pathname === "/" && /^#\/(?:spmc\/commodities-category|spmp\/commoditiesCategory)\/followsales-pro\/list\/?(?:\?|$)/u.test(url.hash);
   const onPage = () => window === window.top && href === location.href &&
@@ -28,9 +28,11 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
   const receiptSelector = '[class*="bottomAlert-"]';
   const selectedRow = node => node.matches('[class*="spmc_selected_"]');
   const brandField = () => one(matches(document, 'input[placeholder="请选择品牌"]', enabled));
+  const categorySearchSelector = '[class*="spmc_cascader_"] .soui-cascader-result-wrapper .soui-cascader-result-text-wrapper input';
+  const categoryOptionSelector = '.soui-cascader-filter-option.soui-cascader-option';
 
   if (!onPage()) return fail("PAGE_CHANGED", "SHEIN 商品分类页已切换。");
-  if (!["inspect", "select", "advance"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 分类操作。");
+  if (!["inspect", "select", "advance", "search"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 分类操作。");
   const requested = Array.isArray(categoryPath) ? categoryPath.map(clean) : [];
   if (categoryPath != null && (!Array.isArray(categoryPath) || requested.length > 8 ||
       categoryPath.some((value, index) => typeof value !== "string" || !requested[index] || requested[index].length > 90)) ||
@@ -41,6 +43,17 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
     return fail("BRAND_INVALID", "商品品牌须与 SHEIN 页面显示的名称一致。");
   }
   const requestedBrand = clean(brand);
+  const query = typeof keyword === "string" ? clean(keyword) : "";
+  if (kind === "search" && (!query || query.length > 70 || /[\u0000-\u001f\u007f]/u.test(query))) {
+    return fail("CATEGORY_SEARCH_INVALID", "请输入可用于 SHEIN 搜索的分类关键词。");
+  }
+
+  function currentStore() {
+    const id = /^(?:(?:半托管|全托管|跨境|自运营|本地)\s*)?店铺\s*[:：]?\s*(GS\d{4,20})$/iu;
+    const identities = new Set(texts(document, value => id.test(value)).map(node => id.exec(label(node))?.[1]?.toUpperCase()));
+    return identities.size === 1 ? [...identities][0] : "";
+  }
+  const storeMatches = () => storeKey == null || (typeof storeKey === "string" && storeKey.toUpperCase() === currentStore());
 
   async function waitFor(read, timeout = 1500) {
     const deadline = Date.now() + timeout;
@@ -59,7 +72,7 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
     const footer = one(matches(document, receiptSelector, node => texts(node, value => selectedLabel.test(value)).length > 0));
     const next = nextButton();
     if (!anchor || !panels || !footer || !next || !texts(document, exact("发布商品")).length) return null;
-    return { panels, footer, next, scope: panels.closest(wrapperSelector) };
+    return { anchor, panels, footer, next, scope: panels.closest(wrapperSelector) };
   }
 
   function categoryColumns({ panels }) {
@@ -90,8 +103,10 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
     const columns = categoryColumns(page);
     const path = selectedPath(page, expected, columns);
     const currentBrand = clean(brandField()?.value);
+    const activeStore = currentStore();
     return { ok: true, status: path.length ? "selected" : "ready", selectedPath: path,
       options: columns.map(({ options }) => options.map(({ name }) => name)), canAdvance: Boolean(path.length && enabled(page.next)),
+      ...(activeStore && { storeKey: activeStore }),
       ...(currentBrand && { brand: currentBrand }) };
   }
 
@@ -99,6 +114,7 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
   if (!page) return fail(blocked() ? "MODAL_BLOCKED" : !onPage() ? "PAGE_CHANGED" : "CATEGORY_PAGE_MISSING",
     "未读取到 SHEIN 的手动选类目区域，请核对页面或关闭弹窗。");
   if (kind === "inspect") return view(page);
+  if (kind === "search") return searchCategory(page);
 
   if (kind === "select") {
     const entries = selectedPath(page, requested).length ? [] : [...requested.entries()];
@@ -148,6 +164,105 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
   if (!state.canAdvance || !onPage() || blocked()) return fail("NEXT_UNAVAILABLE", "SHEIN 尚未允许进入下一步。");
   page.next.click();
   return { ...state, status: "clicked" };
+
+  function searchInput({ anchor, footer }) {
+    for (let region = anchor.parentElement, depth = 0; region && region !== document.body && depth < 6;
+      region = region.parentElement, depth++) {
+      const inputs = matches(region, categorySearchSelector, node =>
+        enabled(node) && !node.readOnly && !footer.contains(node) && /^(?:text|search)$/u.test(node.type));
+      if (inputs.length) return one(inputs);
+    }
+    return null;
+  }
+
+  function pathFromResult(value) {
+    const names = clean(value).split(/\s*[>/›＞]\s*/u);
+    return names.length >= 2 && names.length <= 8 && names.every(name => name && name.length <= 90 &&
+      !/手动选择分类|未找到合适分类|点击申请|确认\s*,?\s*下一步/u.test(name)) ? names : null;
+  }
+
+  function resultRows(region) {
+    return matches(region, categoryOptionSelector, node => enabled(node) &&
+      !node.closest('[class*="_disabled_"],.soui-cascader-option-disabled,[data-leaf="false"],[data-is-leaf="false"]'))
+      .flatMap(node => {
+        const inner = one(matches(node, '.soui-cascader-option-inner', () => true));
+        const path = pathFromResult(label(inner));
+        return path ? [{ node, path }] : [];
+      });
+  }
+
+  function searchSnapshot(input) {
+    const controlledId = input.getAttribute("aria-controls") || input.getAttribute("aria-owns");
+    const controlled = controlledId && document.getElementById(controlledId);
+    const usable = scope => visible(scope) && getComputedStyle(scope).pointerEvents !== "none" &&
+      getComputedStyle(scope).opacity !== "0";
+    if (usable(controlled)) return { region: controlled, rows: resultRows(controlled) };
+    const hint = one(matches(document, '.category_footer_tips', node => /^未找到合适的?分类\s*[?？]?(?:\s*点击申请)?$/u.test(label(node))));
+    const nearest = hint?.parentElement;
+    for (let region = nearest, depth = 0; region && region !== document.body && depth < 5;
+      region = region.parentElement, depth++) {
+      if (!usable(region) || region.querySelector(panelsSelector) || region.querySelector(receiptSelector)) break;
+      const rows = resultRows(region);
+      if (rows.length) return { region, rows };
+    }
+    return usable(nearest) ? { region: nearest, rows: [] } : null;
+  }
+
+  async function searchCategory(original) {
+    if (!storeMatches()) return fail("CATEGORY_STORE_CHANGED", "当前 SHEIN 店铺已切换，请重新开始商品流程。");
+    const input = searchInput(original);
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (!input || !set) return fail("CATEGORY_SEARCH_UNAVAILABLE", "未定位到手动选择分类区域的搜索框。");
+    const existing = searchSnapshot(input);
+    const sameQuery = clean(input.value) === query;
+    const previousState = rows => rows.map(({ node, path }) => [path, (node.innerHTML || "").slice(0, 600)]);
+    const initial = JSON.stringify(previousState(existing?.rows ?? []));
+    if (!sameQuery || !existing) {
+      input.focus({ preventScroll: true });
+      if (!onPage() || blocked() || !storeMatches() || !enabled(input)) return fail("PAGE_CHANGED", "SHEIN 分类搜索框已变化。");
+      set.call(input, query);
+      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    }
+    let lastKey = null;
+    let since = 0;
+    const found = await waitFor(() => {
+      if (!storeMatches() || !enabled(input) || clean(input.value) !== query) return null;
+      const snapshot = searchSnapshot(input);
+      if (!snapshot || snapshot.region.matches('[aria-busy="true"]') || !snapshot.rows.length) return null;
+      const key = JSON.stringify(previousState(snapshot.rows));
+      const fresh = sameQuery || snapshot.region !== existing?.region || key !== initial ||
+        snapshot.rows.some(({ node }, index) => node !== existing?.rows[index]?.node);
+      if (!fresh) return null;
+      if (key !== lastKey) { lastKey = key; since = Date.now(); }
+      return Date.now() - since >= 180 ? snapshot : null;
+    }, 2500);
+    if (!onPage() || blocked() || !storeMatches()) return fail("PAGE_CHANGED", "SHEIN 分类页或店铺已变化。");
+    if (!found) return fail("CATEGORY_SEARCH_NO_MATCH", `SHEIN 未回显与「${query}」对应的可用分类。`);
+    const current = searchSnapshot(input);
+    if (!current || current.region !== found.region || clean(input.value) !== query) {
+      return fail("CATEGORY_SEARCH_CHANGED", "SHEIN 分类搜索结果已变化，请重试。");
+    }
+    const approved = current.rows.filter(({ node, path }) => found.rows.some(row =>
+      row.node === node && JSON.stringify(row.path) === JSON.stringify(path)));
+    const preferred = Array.isArray(preferredPath) ? JSON.stringify(preferredPath.map(clean)) : "";
+    const target = approved.find(({ path }) => JSON.stringify(path) === preferred) || approved[0];
+    if (!target || !enabled(target.node)) return fail("CATEGORY_SEARCH_CHANGED", "SHEIN 分类搜索结果已变化，请重试。");
+    target.node.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    if (!onPage() || blocked() || !storeMatches() || !enabled(target.node)) return fail("PAGE_CHANGED", "SHEIN 分类结果已变化。");
+    target.node.click();
+    const confirmed = await waitFor(() => {
+      if (!storeMatches()) return null;
+      const current = layout();
+      return current && selectedPath(current, target.path).length ? current : null;
+    }, 2500);
+    if (!confirmed) return fail("CATEGORY_NOT_CONFIRMED", "SHEIN 未回显搜索结果对应的末级分类，请在分类页核对。");
+    if (requestedBrand) {
+      const result = await selectBrand(requestedBrand);
+      if (!result.ok) return result;
+    }
+    const receipt = layout();
+    return receipt && storeMatches() ? view(receipt, target.path) : fail("PAGE_CHANGED", "SHEIN 分类页或店铺已变化。");
+  }
 
   async function selectBrand(wanted) {
     const menuSelector = '[role="listbox"],[class*="select-dropdown" i],[class*="select_menu" i]';

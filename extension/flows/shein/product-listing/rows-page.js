@@ -171,6 +171,23 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
   const missingSwatch = cell => /请上传色块图/u.test(clean(cell?.innerText || cell?.textContent));
   const remoteImage = image => /^(?:https?:)?\/\//iu.test(image.currentSrc || image.getAttribute("src") || "") &&
     image.complete && image.naturalWidth > 0;
+  const mediaIssue = /^(?:请(?:先)?上传|至少上传|最多上传|上传失败|图片(?:大小|尺寸|比例|格式).*(?:不符|错误|超出))/u;
+  function imageValidation() {
+    return ["media", "supply"].flatMap(role => {
+      const table = refs[role]();
+      const headers = columns(table);
+      return tableRows(table).flatMap(row => headers.flatMap((header, index) => {
+        if (!/^(?:细节图|方形图|色块图|SKU图)/u.test(header)) return [];
+        const cell = row.cells[index];
+        const messages = [...cell?.querySelectorAll("span,div,p,[role=alert]") || []].filter(visible)
+          .map(node => clean(node.innerText || node.textContent))
+          .filter(message => message.length <= 70 && mediaIssue.test(message));
+        const options = partition(table, row, headers);
+        const label = [...options, header.split(" ")[0]].join(" · ");
+        return [...new Set(messages)].map(message => ({ label, code: "IMAGE_VALIDATION", message }));
+      }));
+    });
+  }
   const state = () => {
     const tables = Object.fromEntries(Object.entries(refs).map(([key, find]) => {
       const table = find();
@@ -187,7 +204,7 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     }) : [];
     return { ...tables, swatchRequired, swatches };
   };
-  if (kind === "inspect") return { ok: true, tables: state() };
+  if (kind === "inspect") return { ok: true, tables: state(), validation: imageValidation() };
 
   if (kind === "upload") {
     const { role, options, files } = upload || {};

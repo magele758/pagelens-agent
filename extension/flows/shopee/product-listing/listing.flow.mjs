@@ -1,4 +1,5 @@
 import { normalizeSizeChart } from '../../../lib/size-chart.mjs';
+import { recoverListingFields } from '../../shared/listing/adaptive-fields.js';
 
 export const id = 'shopee-listing';
 export const version = 1;
@@ -249,6 +250,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   let skuRows;
   let sizeChartReceipt;
   const category = norm(input.category);
+  const allowAttributeAdvice = input.completeMissingAttributes === true;
   const uploadedOptions = new Set();
   const native = async (tool, args) => {
     signal?.throwIfAborted();
@@ -276,7 +278,10 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       originalUrl && current.url !== originalUrl) throw new Pause('page-changed', { url: url.origin + url.pathname });
     originalUrl = current.url;
     if (current.modal) throw new Pause('modal', current.modal);
-    if (current.validation?.length) throw new Pause('page-validation', current.validation);
+    const recoverablePhase = allowAttributeAdvice && ['bind-page', 'basic', 'category', 'category-attributes'].includes(step);
+    const validation = recoverablePhase && Array.isArray(current.unscopedValidation) ?
+      current.unscopedValidation : current.validation;
+    if (validation?.length) throw new Pause('page-validation', validation);
     state = current;
     return state;
   };
@@ -317,6 +322,62 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   const clickAttribute = async (label, selector) => {
     const target = await unique(selector);
     await native('flow_control_click', { action: 'attribute-trigger', selector, category, label, text: target.text });
+  };
+  const menuOpen = (current = state) => Boolean(current.options.length || current.optionSearch);
+  const currentAttribute = label => {
+    const matches = state.attributes.filter(field => field.label === label);
+    if (matches.length !== 1) throw new Pause('attribute-changed', { label });
+    return matches[0];
+  };
+  const openAttribute = async label => {
+    if (menuOpen() && state.optionOwner !== label) throw new Pause('unexpected-open-menu', { label });
+    if (!menuOpen()) {
+      await clickAttribute(label, currentAttribute(label).selector);
+      await pause(200);
+      await readUntil(current => current.optionOwner === label && menuOpen(current), 1300);
+    }
+    if (menuOpen() && state.optionOwner !== label) throw new Pause('unexpected-open-menu', { label });
+  };
+  const closeAttribute = async label => {
+    if (!menuOpen()) return;
+    if (state.optionOwner !== label) throw new Pause('unexpected-open-menu', { label });
+    await native('press_keys', { keys: ['Escape'] });
+    await pause(180);
+    await read();
+    if (!menuOpen()) return;
+    if (state.optionOwner !== label) throw new Pause('unexpected-open-menu', { label });
+    await clickAttribute(label, currentAttribute(label).selector);
+    await readUntil(current => !menuOpen(current), 650);
+    if (menuOpen()) throw new Pause('unexpected-open-menu', { label });
+  };
+  const setAttribute = async (label, choice, { preserve = false } = {}) => {
+    const field = currentAttribute(label);
+    if (field.value === choice) {
+      if (menuOpen() && state.optionOwner === label) await closeAttribute(label);
+      return 'unchanged';
+    }
+    if (preserve && field.value && !field.error) throw new Pause('attribute-changed', { label });
+    await openAttribute(label);
+    const matching = current => current.optionOwner === label && current.options.some(({ text }) => text === choice);
+    if (!matching(state) && state.optionSearch && state.optionOwner === label) {
+      await fill({ selector: state.optionSearch }, choice);
+      await readUntil(matching, 2300);
+    } else if (!matching(state)) {
+      await readUntil(matching);
+    }
+    const matches = state.optionOwner === label ? state.options.filter(({ text }) => text === choice) : [];
+    if (matches.length !== 1) {
+      await closeAttribute(label);
+      throw new Pause('attribute-option-changed', { label, choice });
+    }
+    await native('flow_control_click', {
+      action: 'attribute-option', selector: matches[0].selector, category, label, text: choice,
+    });
+    await pause(180);
+    await readUntil(current => current.attributes.find(attribute => attribute.label === label)?.value === choice);
+    if (currentAttribute(label).value !== choice) throw new Pause('attribute-readback', { label, choice });
+    await closeAttribute(label);
+    return 'verified';
   };
   const expected = (key, value, normalize = (actual, desired) => String(actual) === String(desired)) => {
     if (!state.fields[key] || !normalize(state.fields[key].value, value)) throw new Pause('readback-mismatch', { key });
@@ -369,53 +430,60 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       await readUntil(current => requestedAttributes.every(label =>
         current.attributes.some(field => field.label === label && field.selector)), 4800);
     }
-    for (const { label, required, value } of state.attributes) {
-      if (required && !value && !Object.hasOwn(supplied, label)) throw new Pause('required-attribute-missing', { label });
-    }
+    const missing = () => state.attributes.find(field => field.required && !field.value && !Object.hasOwn(supplied, field.label));
+    if (!allowAttributeAdvice && missing()) throw new Pause('required-attribute-missing', { label: missing().label });
+    const staleChoices = new Map();
     for (const [label, choice] of Object.entries(supplied)) {
-      const fields = state.attributes.filter((field) => field.label === label);
-      if (fields.length !== 1) throw new Pause('attribute-changed', { label });
-      const field = fields[0];
-      const alreadyOpen = Boolean(state.options.length || state.optionSearch);
-      if (field.value === choice) {
-        if (alreadyOpen && state.optionOwner === label) {
-          await clickAttribute(label, field.selector);
-          await pause(180);
-          await readUntil((current) => !current.options.length && !current.optionSearch);
-        }
-        continue;
+      try { await setAttribute(label, choice); }
+      catch (error) {
+        if (!allowAttributeAdvice || error.code !== 'attribute-option-changed') throw error;
+        const field = currentAttribute(label);
+        if (field.value && !field.error) throw error;
+        staleChoices.set(label, error);
       }
-      if (alreadyOpen && state.optionOwner !== label) throw new Pause('unexpected-open-menu', { label });
-      if (!alreadyOpen) {
-        await clickAttribute(label, field.selector);
-        await pause(200);
-      }
-      await readUntil((current) => current.options.some(({ text }) => text === choice));
-      let matches = state.options.filter(({ text }) => text === choice);
-      if (!matches.length && state.optionSearch) {
-        await fill({ selector: state.optionSearch }, choice);
-        await native('wait_for', { text: choice, timeoutMs: 2300 });
-        await readUntil((current) => current.options.some(({ text }) => text === choice));
-        matches = state.options.filter(({ text }) => text === choice);
-      }
-      if (matches.length !== 1) throw new Pause('attribute-option-changed', { label, choice });
-      await native('flow_control_click', {
-        action: 'attribute-option', selector: matches[0].selector, category, label, text: choice,
+    }
+
+    if (allowAttributeAdvice) {
+      const snapshot = () => {
+        if (norm(state.category) !== category) throw new Pause('different-category', { actual: state.category });
+        return { ok: true, fields: state.attributes.filter(field => field.type === 'select' && field.selector &&
+          !/品牌|\bbrand\b/iu.test(field.label) && (!Object.hasOwn(supplied, field.label) || staleChoices.has(field.label)) &&
+          state.attributes.filter(other => other.label === field.label).length === 1)
+          .map(field => ({ key: field.label, label: field.label, section: 'category-attributes',
+            type: field.type, value: field.value, required: field.required,
+            error: field.error || (staleChoices.has(field.label) ? '原选项已不在当前下拉中' : undefined) })) };
+      };
+      await recoverListingFields({
+        scope: { platform: 'shopee', store: input.shopId, categoryPath: category.split(' > ') },
+        snapshot: snapshot(), signal,
+        read: async () => { await read(); return snapshot(); },
+        async readOptions(field) {
+          await openAttribute(field.label);
+          const choices = state.optionOwner === field.label ? state.options.map(item => item.text) : [];
+          await closeAttribute(field.label);
+          return choices;
+        },
+        async suggest(fields) {
+          return (await native('flow_attribute_advice', { fields })).values;
+        },
+        async apply(values) {
+          const issues = [];
+          for (const [label, choice] of Object.entries(values)) {
+            try {
+              await setAttribute(label, choice, { preserve: true });
+              staleChoices.delete(label);
+            }
+            catch (error) {
+              if (error.code !== 'attribute-option-changed') throw error;
+              issues.push({ key: label, code: 'OPTION_MISSING' });
+            }
+          }
+          return { ok: true, issues };
+        },
       });
-      await pause(180);
-      await readUntil((current) => current.attributes.find((attribute) => attribute.label === label)?.value === choice);
-      if (state.attributes.find((after) => after.label === label)?.value !== choice) throw new Pause('attribute-readback', { label, choice });
-      if (state.options.length || state.optionSearch) {
-        await native('press_keys', { keys: ['Escape'] });
-        await pause(180);
-        await read();
-        if (state.options.length || state.optionSearch) {
-          const live = state.attributes.find((after) => after.label === label);
-          if (!live?.selector || state.optionOwner && state.optionOwner !== label) throw new Pause('unexpected-open-menu', { label });
-          await clickAttribute(label, live.selector);
-          await readUntil((current) => !current.options.length && !current.optionSearch, 650);
-        }
-      }
+      if (staleChoices.size) throw staleChoices.values().next().value;
+      if (missing()) throw new Pause('required-attribute-missing', { label: missing().label });
+      if (state.validation?.length) throw new Pause('page-validation', state.validation);
     }
 
     checkpoint('image');

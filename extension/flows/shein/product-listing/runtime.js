@@ -5,6 +5,9 @@ import { sheinRowsPage } from "./rows-page.js";
 import { sheinStockPage } from "./stock-page.js";
 import { buildSheinImagePlan } from "./image-plan.js";
 import { prepareSheinSwatch } from "./swatch-image.js";
+import { resolveSheinCategory } from "./category-search.js";
+import { createListingFieldCache, recoverListingFields } from "../../shared/listing/adaptive-fields.js";
+import { createListingAdvisor } from "../../shared/listing/listing-advisor.js";
 import { getCdp } from "../../../lib/cdp.js";
 
 const sellerOrigin = "https://sellerhub.shein.com";
@@ -220,16 +223,18 @@ export async function inspectSheinListing({ tabId, url, signal, api = chrome } =
   return fail("WORKFLOW_PAGE_REQUIRED", "请先打开 SHEIN 商品发布页，再读取当前分类或表单。");
 }
 
-export async function replaySheinListing({ tabId, url, input, images = [], signal, onStep, useActiveTab, api = chrome } = {}) {
+export async function replaySheinListing({ tabId, url, input, images = [], referenceImages = images, allowAI = false,
+  settings, signal, onStep, useActiveTab, api = chrome } = {}) {
   const product = normalizeSheinListingInput(input);
-  const report = label => onStep?.({ label });
+  const advisor = allowAI ? createListingAdvisor({ settings, product: input, referenceImages, signal }) : null;
+  const report = label => onStep?.({ label, categoryPath: product.categoryPath });
   const fields = [];
   const items = [];
   const issues = [];
   let tab = await currentTab(tabId, url, api, signal);
   const outcome = (error, label) => {
     if (error) issues.push({ label, code: error.code, message: error.message });
-    return { ok: !error, url: tab.url, fields, items, issues };
+    return { ok: !error, url: tab.url, categoryPath: product.categoryPath, fields, items, issues };
   };
 
   if (!["category", "editor"].includes(route(tab.url))) {
@@ -240,15 +245,16 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
   }
   if (route(tab.url) === "category") {
     report("核对 SHEIN 商品类目");
-    const expected = { categoryPath: product.categoryPath, brand: product.brand };
-    const category = await pageCall(api, tab, sheinCategoryPage, {
-      ...expected, kind: product.categoryPath.length ? "select" : "inspect",
-    }, signal);
+    const categoryPage = request => pageCall(api, tab, sheinCategoryPage, request, signal);
+    const category = product.categoryPath.length
+      ? await categoryPage({ kind: "select", categoryPath: product.categoryPath, brand: product.brand })
+      : await resolveSheinCategory({ callPage: categoryPage, input, suggestKeywords: advisor?.categoryKeywords,
+        storage: api.storage?.local, signal });
     if (!category.ok) return outcome(category, "商品类目");
     if (!category.selectedPath?.length || !category.canAdvance) {
-      return outcome(fail("CATEGORY_NOT_CONFIRMED", "请在 SHEIN 选择末级类目，或在 PageLens 填写完整分类路径。"), "商品类目");
+      return outcome(fail("CATEGORY_NOT_CONFIRMED", "请在 SHEIN 选择商品的末级类目后继续。"), "商品类目");
     }
-    const advanced = await pageCall(api, tab, sheinCategoryPage, { ...expected, kind: "advance" }, signal);
+    const advanced = await categoryPage({ kind: "advance", categoryPath: category.selectedPath, brand: product.brand });
     if (!advanced.ok) return outcome(advanced, "商品类目");
     tab = await waitForPage(api, tab.id, "editor", signal, "SHEIN 未进入发布表单，请核对类目和品牌。");
     product.categoryPath = category.selectedPath;
@@ -258,15 +264,12 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
     if (!current.ok) return outcome(current, "商品类目");
     product.categoryPath = current.categoryPath || [];
   }
-  report("试填基础信息和当前类目属性");
+  report("填写基础信息和当前类目属性");
   const result = await editorCall(api, tab, { kind: "fill", input: product }, signal);
   if (!result.ok) return outcome(result, "商品表单");
   fields.push(...result.fields || []);
   items.push(...result.items || []);
   issues.push(...result.issues || []);
-  for (const field of fields.filter(field => field.required && !field.value?.length)) {
-    if (!issues.some(issue => issue.label === field.label)) issues.push({ label: field.label, code: "REQUIRED", message: "待填" });
-  }
   const pinned = { categoryPath: product.categoryPath };
   report("填写商品规格和上架站点");
   const variant = await pageCall(api, tab, sheinVariantPage, { ...pinned, kind: "fill", input: product }, signal);
@@ -349,6 +352,56 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
         issues.push(...retry.issues || []);
       } else issues.push(...pendingSupply);
     } else issues.push(...pendingSupply);
+  }
+  report("核对当前表单");
+  const review = async () => {
+    const snapshot = await editorCall(api, tab, { kind: "review", input: pinned }, signal);
+    if (!snapshot.ok) return snapshot;
+    const chosen = snapshot.fields.filter(field => field.type === "select" && [].concat(field.value).some(Boolean));
+    return { ...snapshot, fields: snapshot.fields.map(field => ({ ...field, dependency: JSON.stringify(chosen
+      .filter(other => other.key !== field.key).map(({ key, value }) => [key, value])) })) };
+  };
+  let final = await review();
+  if (!final.ok) return outcome(final, "SHEIN 页面");
+  const repairedKeys = new Set();
+  if (advisor) {
+    try {
+      const recovery = await recoverListingFields({
+        snapshot: final, read: review, signal, cache: createListingFieldCache({ storage: api.storage?.local }),
+        scope: { platform: "shein", store: final.storeKey, market: activeSites.join("/"), categoryPath: product.categoryPath },
+        async readOptions(field) {
+          const read = await editorCall(api, tab, { kind: "options", input: { ...pinned, fieldKey: field.key } }, signal);
+          if (["MENU_STILL_OPEN", "PAGE_CHANGED", "CATEGORY_CHANGED", "MODAL_BLOCKED"].includes(read.code)) throw new Error(read.message);
+          return read.options;
+        },
+        apply: values => editorCall(api, tab, { kind: "repair", input: { ...pinned, values } }, signal),
+        suggest: advisor.fields,
+        onPhase: () => report("根据商品资料补齐当前表单"),
+      });
+      final = recovery.state;
+      if (!final?.ok) return outcome(final || fail("REVIEW_UNAVAILABLE", "未读到最新表单。"), "SHEIN 页面");
+      items.push(...recovery.items);
+      issues.push(...recovery.issues);
+      for (const item of recovery.items) repairedKeys.add(item.key);
+    } catch (error) {
+      signal?.throwIfAborted();
+      issues.push({ label: "上品助手", code: "ASSIST_UNAVAILABLE", message: error.message || "无法补齐当前表单。" });
+    }
+  }
+  fields.splice(0, fields.length, ...final.fields);
+  const blank = field => field.type === "checkbox" ? !field.value : ![].concat(field.value).some(value => clean(value));
+  for (const field of fields) {
+    const pending = field.error || field.required && blank(field);
+    if (!pending && repairedKeys.has(field.key)) {
+      for (let index = issues.length - 1; index >= 0; index--) if (issues[index].key === field.key) issues.splice(index, 1);
+    } else if (pending && !issues.some(issue => issue.key === field.key)) {
+      issues.push({ key: field.key, label: field.label, code: "FIELD_NEEDS_REVIEW", message: field.error || "SHEIN 当前类目要求填写此项。" });
+    }
+  }
+  const mediaReview = await pageCall(api, tab, sheinRowsPage, { ...pinned, kind: "inspect" }, signal);
+  if (!mediaReview.ok) return outcome(mediaReview, "图片核对");
+  for (const issue of mediaReview.validation || []) {
+    if (!issues.some(existing => existing.label === issue.label && existing.message === issue.message)) issues.push(issue);
   }
   await currentTab(tab.id, tab.url, api, signal);
   return outcome();

@@ -30,7 +30,11 @@ test("product view requires consent for an explicit size chart even without uplo
     runtime: { getURL: path => "chrome-extension://test/" + path, onMessage: { addListener() {} } },
   };
   try {
-    const open = bindPtcFlow({ getTargetTab: async () => tab });
+    const open = bindPtcFlow({
+      getTargetTab: async () => tab,
+      chooseDirectory: async () => ({ root: "/Products", directoryName: "Products",
+        products: [{ title: "Shirt", folder: "shirt", input: { sizeChart: {} } }], issues: [] }),
+    });
     const byId = id => document.getElementById(id);
     const dialog = byId("ptc-flow-dialog");
     dialog.showModal ??= () => { dialog.open = true; };
@@ -38,25 +42,31 @@ test("product view requires consent for an explicit size chart even without uplo
     assert.equal(document.querySelectorAll('link[rel="stylesheet"]').length, 1);
     assert.equal(open(), true);
     await nextTurn();
-    assert.equal(byId("ptc-start").disabled, false);
+    assert.equal(byId("ptc-input"), null);
+    assert.equal(byId("ptc-directory-path"), null);
+    assert.equal(byId("ptc-batch-start").textContent, "开始上品");
+    assert.equal(byId("ptc-batch-start").disabled, true);
+    byId("ptc-load-directory").click();
+    await nextTurn();
+    assert.equal(byId("ptc-batch-consent-row").hidden, false);
+    assert.match(byId("ptc-batch-consent-text").textContent, /模型估算/u);
+    assert.match(byId("ptc-batch-consent-text").textContent, /创建尺码表/u);
+    assert.equal(byId("ptc-batch-start").disabled, true);
+    assert.equal(byId("ptc-batch-ai-consent").checked, false);
 
-    const input = byId("ptc-input");
-    input.value = JSON.stringify({ sizeChart: {}, completeMissingSizeChart: true });
-    input.dispatchEvent(new window.Event("input"));
-    assert.equal(byId("ptc-consent-row").hidden, false);
-    assert.match(byId("ptc-consent-text").textContent, /发给已配置的模型/u);
-    assert.match(byId("ptc-consent-text").textContent, /保存尺码表/u);
-
-    byId("ptc-form").dispatchEvent(new window.Event("submit", { cancelable: true }));
-    assert.equal(byId("ptc-status").dataset.state, "needs-review");
+    byId("ptc-batch-form").dispatchEvent(new window.Event("submit", { cancelable: true }));
     assert.equal(accessRequests, 0);
 
-    const consent = byId("ptc-upload-consent");
+    const consent = byId("ptc-batch-upload-consent");
     consent.checked = true;
+    consent.dispatchEvent(new window.Event("change"));
+    assert.equal(byId("ptc-batch-start").disabled, false);
+    byId("ptc-batch-ai-consent").checked = true;
     tab = { ...tab, url: shopUrl.replace("1901697826", "1234") };
     activatedListeners[0]();
     await nextTurn();
     assert.equal(consent.checked, false);
+    assert.equal(byId("ptc-batch-ai-consent").checked, false);
   } finally {
     globalThis.document = originalDocument;
     globalThis.chrome = originalChrome;

@@ -19,7 +19,8 @@ function fail(code, error) {
   return { ok: false, code, error };
 }
 
-export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChart = completeSizeChartInput, url: expectedUrl } = {}) {
+export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChart = completeSizeChartInput,
+  adviseAttributes, url: expectedUrl } = {}) {
   let url = expectedUrl;
   let documentId;
   const cdp = getCdp();
@@ -52,6 +53,14 @@ export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChar
     const dialog = cdp.pendingDialog(tabId);
     if (dialog) return fail("modal", dialogNote(dialog));
     switch (tool) {
+      case "flow_attribute_advice": {
+        if (!adviseAttributes) return fail("attribute-advice-not-approved", "请允许已配置的 AI 分析本次商品。");
+        try { return { values: await adviseAttributes(args.fields) }; }
+        catch (error) {
+          if (signal?.aborted) throw error;
+          return fail("attribute-advice-unavailable", error?.message || "商品属性识别暂不可用。");
+        }
+      }
       case "flow_page_state":
         if (args.verifySummary === true) await chrome.tabs.update(tabId, { active: true }).catch(() => {});
         return exec(readPage, [args.category]);

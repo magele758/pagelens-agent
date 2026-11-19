@@ -37,19 +37,6 @@ function field(id, label, { search, trail = false, hidden = false } = {}) {
   </div>`;
 }
 
-function jsonObject(value) {
-  const content = value.trim();
-  if (!content) return {};
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new Error("商品 JSON 格式有误，请核对后重试。");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("请提供商品 JSON 对象。");
-  return parsed;
-}
-
 export function bindTemuListingPanel({
   getTargetTab, getSettings, isAgentBusy, onBack,
   chooseDirectory = chooseTemuProductDirectory, suggestCategory = suggestTemuCategory,
@@ -84,19 +71,15 @@ export function bindTemuListingPanel({
           ${field("listing-region", "省份或地区", { search: "搜索省份或地区" })}
         </div>
         <label class="temu-listing-check" id="temu-upload-option" hidden><input id="temu-listing-upload" type="checkbox" />上传商品目录中的图片</label>
-        <details class="temu-listing-advanced">
-          <summary>补充资料</summary>
-          <label for="temu-product-json">商品 JSON</label>
-          <textarea id="temu-product-json" rows="4" spellcheck="false" placeholder='{"title":"商品名称"}'></textarea>
-          <label class="temu-listing-check"><input id="temu-listing-ai" type="checkbox" />让已配置的 AI 补齐商品表单和识别尺码图</label>
-        </details>
+        <label for="temu-product-notes">补充商品描述</label>
+        <textarea id="temu-product-notes" rows="3" maxlength="1800" placeholder="例如商品名称、材质、规格或用途"></textarea>
+        <label class="temu-listing-check"><input id="temu-listing-ai" type="checkbox" />允许将商品资料和图片发送给已配置的模型，用于匹配类目和补齐表单</label>
       </fieldset>
       <div id="temu-listing-message" role="status" aria-live="polite"></div>
       <ul id="temu-listing-issues"></ul>
     </div>
     <footer class="temu-listing-footer">
-      <span class="temu-hint">试填到草稿，发布前可核对。</span>
-      <button class="temu-listing-action primary" type="button" data-action="run" disabled>开始试填</button>
+      <button class="temu-listing-action primary" type="button" data-action="run" disabled>开始上品</button>
       <button class="temu-listing-action" type="button" data-action="stop" hidden>停止</button>
     </footer>`;
   document.body.append(dialog);
@@ -110,7 +93,7 @@ export function bindTemuListingPanel({
   const categoryHint = find("category-hint");
   const categoryTrail = dialog.querySelector(".temu-category-trail");
   const upload = find("listing-upload");
-  const json = find("product-json");
+  const notes = find("product-notes");
   let products = [];
   let directoryRoot;
   let productIndex = 0;
@@ -125,7 +108,7 @@ export function bindTemuListingPanel({
   let categoryTrailParts = [];
   let categoryQuery = 0;
   let categoryTimer;
-  let jsonTimer;
+  let notesTimer;
   let directoryRequest;
   let run;
 
@@ -296,11 +279,13 @@ export function bindTemuListingPanel({
   }
 
   function sourceInput() {
-    const raw = jsonObject(json.value);
+    const description = notes.value.trim();
     const base = selected();
-    if (!base && !raw.title) throw new Error("请先选择商品目录，或在补充资料中提供商品 JSON。");
-    const normalized = normalizeTemuListingInput({ ...base, ...raw, title: raw.title || base?.title });
+    if (!base && !description) throw new Error("请选择商品目录或填写商品描述。");
+    const title = base?.title || description.split(/[\n。]/u)[0].slice(0, 100);
+    const normalized = normalizeTemuListingInput({ ...base, title, description: base?.description || description });
     const filled = { ...base };
+    filled.operatorNotes = description;
     for (const [key, value] of Object.entries(normalized)) {
       if (value == null || value === "" || (Array.isArray(value) && !value.length)) continue;
       filled[key] = value;
@@ -332,7 +317,7 @@ export function bindTemuListingPanel({
     updateCategory(undefined);
     categoryHint.textContent = "正在根据商品推荐类目…";
     try {
-      const result = await suggestCategory(product, { settings: getSettings?.(), signal, fetchImpl });
+      const result = await suggestCategory(product, { settings: getSettings?.(), signal, fetchImpl, useModel: find("listing-ai").checked });
       if (signal.aborted || manualCategory || !dialog.open) return;
       updateCategory(result.category);
       categoryHint.textContent = result.source === "model" ? "AI 推荐，可修改。"
@@ -351,12 +336,11 @@ export function bindTemuListingPanel({
     manualOrigin = false;
     setOrigin(defaultOrigin);
     updateCategory(undefined);
-    const { mainImages, detailImages, skus, variantImages, sizeChartImagePath } = product.input;
+    const { mainImages, detailImages, variantImages, sizeChartImagePath } = product.input;
     const hasImages = mainImages.length + detailImages.length + variantImages.length > 0 || Boolean(sizeChartImagePath);
     find("upload-option").hidden = !hasImages;
     if (!hasImages) upload.checked = false;
-    const counts = [`${mainImages.length} 张主图`, `${detailImages.length} 张详情图`, `${skus.length} 个 SKU`].join(" · ");
-    tell(counts);
+    tell("");
     void recommend();
   }
 
@@ -387,7 +371,7 @@ export function bindTemuListingPanel({
         setOrigin(defaultOrigin);
         find("upload-option").hidden = true;
         upload.checked = false;
-        tell("该目录没有可读取的商品。请选择包含 product.json 的目录。", true);
+        tell("该目录没有可读取的商品资料。可以更换目录或填写商品描述。", true);
       }
       renderIssues(result.issues.map(item => `${item.folder}：${item.error}`));
     } catch (error) {
@@ -400,15 +384,16 @@ export function bindTemuListingPanel({
     }
   });
 
-  json.addEventListener("input", () => {
+  notes.addEventListener("input", () => {
     if (!manualCategory) {
       categoryRequest?.abort();
       updateCategory(undefined);
       categoryHint.textContent = "";
     }
-    clearTimeout(jsonTimer);
-    jsonTimer = setTimeout(() => void recommend(), 400);
+    clearTimeout(notesTimer);
+    notesTimer = setTimeout(() => void recommend(), 400);
   });
+  find("listing-ai").addEventListener("change", () => void recommend());
 
   function renderIssues(receipts) {
     issues.replaceChildren(...[...new Set(receipts)].map(textContent => Object.assign(document.createElement("li"), { textContent })));
@@ -425,7 +410,7 @@ export function bindTemuListingPanel({
       const input = sourceInput();
       if (!chosenCategory) throw new Error("请选择完整的商品类目。");
       categoryRequest?.abort();
-      clearTimeout(jsonTimer);
+      clearTimeout(notesTimer);
       input.sites = [chosenSite];
       input.categoryPath = chosenCategory.path;
       input.categoryId = chosenCategory.id;
@@ -454,11 +439,12 @@ export function bindTemuListingPanel({
           root: directoryRoot, signal, getSettings: getSettings ? async () => getSettings() : undefined,
         })).sizeChart
         : undefined;
+      let imageRead;
+      const readImage = useModel && selectedProduct && referenceImage ? () => imageRead ??= readProductImage({
+        root: directoryRoot, folder: selectedProduct.folder, path: referenceImage, asset: "main", signal,
+      }) : undefined;
       const suggestSizeChart = useModel ? async (product, { sizes, signal }) => suggestTemuSizeChart(product, {
-        sizes, signal, settings: await getSettings?.(),
-        readImage: selectedProduct && referenceImage ? () => readProductImage({
-          root: directoryRoot, folder: selectedProduct.folder, path: referenceImage, asset: "main", signal,
-        }) : undefined,
+        sizes, signal, settings: await getSettings?.(), readImage,
       }) : undefined;
       const imagePaths = new Set([...(input.mainImages || []), ...(input.detailImages || []), ...(input.variantImages || []), input.sizeChartImagePath]);
       const call = createTemuListingToolCaller({
@@ -467,20 +453,16 @@ export function bindTemuListingPanel({
       });
       const result = await replay({
         tabId: tab.id, input, call, signal, readSizeChart, suggestSizeChart,
-        shouldSuggestField: createTemuSuggestionFilter(input, { useModel }),
+        shouldSuggestField: createTemuSuggestionFilter(input, { useModel, visual: Boolean(readImage) }),
         suggestFields: (product, schema, { signal }) =>
-          suggestTemuFields(product, schema, { signal, settings: getSettings?.(), useModel }),
-        onStep: ({ label, completed }) => tell(`${label} · 已核对 ${completed.length} 项`),
+          suggestTemuFields(product, schema, { signal, settings: getSettings?.(), useModel, readImage }),
+        onStep: ({ label }) => tell(label),
       });
-      const completed = result.items.filter(item => /^(?:filled|verified|unchanged)$/u.test(item.status)).length;
-      const sku = Number.isInteger(result.verifiedSkuCount) && input.skus?.length
-        ? `SKU 已匹配 ${result.verifiedSkuCount}/${input.skus.length}。` : "";
-      const verified = result.verificationComplete === false ? "最终回读未完成。" : `已识别的必填待补 ${result.missing.length} 项。`;
-      tell(result.status === "cancelled" ? "试填已停止。" :
-        `试填${result.status === "needs-review" ? "待核对" : "已完成"}，已核对 ${completed} 项，${verified}${sku}`, result.status === "needs-review");
+      tell(result.status === "cancelled" ? "上品已停止。" : result.status === "needs-review"
+        ? "请处理下方待核对事项。" : "商品资料已填写，请在 Temu 核对并发布。", result.status === "needs-review");
       renderIssues([...result.issues.map(({ label, message }) => `${label}：${message}`), ...result.missing.map(({ label }) => `待填：${label}`)]);
     } catch (error) {
-      tell(signal.aborted ? "试填已停止。" : error.message || "Temu 试填失败。", !signal.aborted);
+      tell(signal.aborted ? "上品已停止。" : error.message || "暂时无法完成 Temu 上品。", !signal.aborted);
     } finally {
       run = undefined;
       source.disabled = false;
@@ -492,7 +474,7 @@ export function bindTemuListingPanel({
   function cancelPending() {
     for (const control of [site, category, country, region, productItem]) control.close();
     clearTimeout(categoryTimer);
-    clearTimeout(jsonTimer);
+    clearTimeout(notesTimer);
     if (directoryRequest) directoryRequest.open = false;
     categoryRequest?.abort();
     run?.abort();
@@ -512,7 +494,7 @@ export function bindTemuListingPanel({
     if (!dialog.open) {
       dialog.showModal();
       void ensureOrigins().catch(() => {});
-      if (!chosenCategory && !manualCategory && (selected() || json.value.trim())) void recommend();
+      if (!chosenCategory && !manualCategory && (selected() || notes.value.trim())) void recommend();
     }
     return true;
   };

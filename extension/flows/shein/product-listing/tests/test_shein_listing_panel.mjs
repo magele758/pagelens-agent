@@ -7,7 +7,6 @@ import { bindSheinListingPanel } from "../sidepanel/listing-panel.js";
 
 const html = await readFile(new URL("../../../../sidepanel/index.html", import.meta.url), "utf8");
 const list = "https://sellerhub.shein.com/#/spmp/commdities/list";
-const editor = "https://sellerhub.shein.com/#/spmp/commoditiesInfo?mode=add";
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const absent = () => Object.assign(new Error("missing"), { name: "NotFoundError" });
 
@@ -88,7 +87,23 @@ test("preserves separate color hero, square, swatch and SKU assets plus shared g
   assert.equal(result.images.find(image => image.role === "detail").file, result.images.find(image => image.role === "shared-gallery").file);
 });
 
-test("binds the current seller tab, requests approval only on action, and sends image Files only after consent", async t => {
+test("imports a photo-only product directory without guessing its variants", async () => {
+  const folder = directory("陶瓷马克杯", {
+    "01-front.jpg": file("01-front.jpg", "front", "image/jpeg"),
+    ".hidden.jpg": file(".hidden.jpg", "hidden", "image/jpeg"),
+    images: directory("images", { "hero.jpg": image }),
+    "notes.txt": file("notes.txt", "not an image", "text/plain"),
+  });
+  const { products, issues } = await readSheinProductDirectory(folder);
+  assert.deepEqual(issues, []);
+  assert.equal(products.length, 1);
+  assert.deepEqual(products[0].input, { title: "陶瓷马克杯", imagePath: "images/hero.jpg", detailImages: ["01-front.jpg"] });
+  const { images, issues: imageIssues } = await readSheinProductImages(products[0]);
+  assert.deepEqual(imageIssues, []);
+  assert.deepEqual(images.map(({ path, role }) => [path, role]), [["images/hero.jpg", "main"], ["01-front.jpg", "detail"]]);
+});
+
+function mount(t) {
   const { window } = new JSDOM(html);
   const previous = globalThis.document;
   globalThis.document = window.document;
@@ -96,9 +111,21 @@ test("binds the current seller tab, requests approval only on action, and sends 
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   const get = key => document.getElementById(`shein-listing-${key}`);
+  const describe = text => {
+    get("description").value = text;
+    get("description").dispatchEvent(new window.Event("input", { bubbles: true }));
+  };
+  return { get, describe };
+}
+
+test("starts with one customer action, scopes photos separately, and displays only problems", async t => {
+  const { get, describe } = mount(t);
   let tab = { id: 13, url: list };
   const calls = [];
   let approvalCount = 0;
+  let photoReads = 0;
+  let issues = [];
+  const categoryPath = ["家居", "水具"];
   const open = bindSheinListingPanel({
     getTargetTab: async () => tab,
     authorize: async (url, options) => {
@@ -106,53 +133,89 @@ test("binds the current seller tab, requests approval only on action, and sends 
       assert.equal(url, tab.url);
       assert.deepEqual(options, { userGesture: true, tabId: 13 });
     },
-    pickDirectory: async () => product("first", { title: "Shirt", imagePath: "images/hero.jpg" }, {
-      "hero.jpg": image, "common.jpg": file("common.jpg", "details", "image/jpeg"),
+    pickDirectory: async () => product("first", {
+      title: "Cup", description: "Original listing description", imagePath: "images/hero.jpg", shein: { categoryPath },
+    }, {
+      "hero.jpg": { ...image, getFile: () => { photoReads++; return image.getFile(); } },
     }),
-    openEditor: async spec => { calls.push(["open", spec]); tab = { ...tab, url: editor }; return { ok: true }; },
-    inspect: async spec => { calls.push(["inspect", spec]); return { ok: true, fields: [{ label: "商品名", required: true }] }; },
     replay: async spec => {
-      calls.push(["replay", spec]);
-      spec.onStep({ label: "正在填写商品" });
-      return { ok: true, items: [{ label: "商品标题", status: "filled" }], issues: [] };
+      calls.push(spec);
+      spec.onStep({ label: "正在填写商品", categoryPath: ["家居", "马克杯"] });
+      return { ok: true, items: [{ label: "商品标题", status: "filled" }], issues };
     },
   });
   await open();
   assert.equal(get("dialog").open, true);
   assert.equal(approvalCount, 0);
   assert.equal(get("run").disabled, true);
-  get("open").click();
-  await tick();
-  assert.equal(calls[0][1].url, list);
-  get("inspect").click();
-  await tick();
-  assert.equal(calls[1][1].url, editor);
-  assert.equal(get("results").textContent, "商品名（必填）");
+  assert.equal(get("run").textContent, "开始上品");
+  assert.equal(get("open"), null);
+  assert.equal(get("inspect"), null);
+  assert.equal(get("json"), null);
+  assert.doesNotMatch(get("dialog").textContent, /JSON|试填/);
   get("pick").click();
   await tick();
-  assert.equal(get("directory-status").textContent, "Shirt");
+  assert.equal(get("directory-status").textContent, "Cup");
   assert.equal(get("upload-row").hidden, false);
-  get("category").value = "Clothing › T-shirts";
+  assert.match(get("category").textContent, /家居 › 水具/);
+  describe("杯身是不锈钢");
   get("run").click();
   await tick();
-  assert.deepEqual(calls[2][1].images, []);
-  assert.deepEqual(calls[2][1].input.categoryPath, ["Clothing", "T-shirts"]);
-  get("upload").checked = true;
-  get("json").value = '{"description":"Cotton t-shirt","shein":{"sharedGalleryImages":["images/common.jpg"]}}';
-  get("json").dispatchEvent(new window.Event("input", { bubbles: true }));
-  get("run").click();
-  await tick();
-  assert.equal(calls[3][1].input.title, "Shirt");
-  assert.equal(calls[3][1].input.description, "Cotton t-shirt");
-  assert.equal(calls[3][1].images[0].file.name, "hero.jpg");
-  assert.deepEqual(calls[3][1].images.map(({ role, path }) => [role, path]), [["main", "images/hero.jpg"], ["shared-gallery", "images/common.jpg"]]);
-  assert.equal(get("upload").checked, false);
+  assert.deepEqual(calls[0].images, []);
+  assert.deepEqual(calls[0].referenceImages, []);
+  assert.equal(calls[0].allowAI, false);
+  assert.equal(photoReads, 0);
+  assert.equal(calls[0].input.operatorNotes, "杯身是不锈钢");
+  assert.equal(calls[0].input.description, "Original listing description");
+  assert.equal(calls[0].url, list);
   assert.equal(get("status").dataset.state, "verified");
-  assert.equal(get("results").textContent, "已核对 · 商品标题");
+  assert.match(get("category").textContent, /家居 › 马克杯/);
+  assert.equal(get("results").hidden, true);
+  assert.equal(get("results").textContent, "");
+  issues = [{ label: "材质", message: "请补充杯身材质。" }];
+  get("ai").checked = true;
+  get("run").click();
+  await tick();
+  assert.deepEqual(calls[1].images, []);
+  assert.equal(calls[1].allowAI, true);
+  assert.equal(calls[1].referenceImages[0].file.name, "hero.jpg");
+  assert.equal(photoReads, 1);
+  assert.equal(get("results").hidden, false);
+  assert.equal(get("results").textContent, "材质 · 请补充杯身材质。");
+  assert.equal(get("status").dataset.state, "needs-review");
+  get("ai").checked = false;
+  get("upload").checked = true;
+  get("run").click();
+  await tick();
+  assert.equal(calls[2].images[0].file.name, "hero.jpg");
+  assert.deepEqual(calls[2].referenceImages, []);
+  assert.equal(get("upload").checked, false);
   tab = { ...tab, url: "https://www.shein.com/" };
   get("run").click();
   await tick();
-  assert.equal(calls.length, 4);
-  assert.equal(approvalCount, 4);
+  assert.equal(calls.length, 3);
+  assert.equal(approvalCount, 3);
   assert.match(get("status").textContent, /切回 SHEIN 商家后台/);
+});
+
+test("uses a natural-language description without a directory", async t => {
+  const { get, describe } = mount(t);
+  const calls = [];
+  const open = bindSheinListingPanel({
+    getTargetTab: async () => ({ id: 13, url: list }),
+    probeAccess: async () => true,
+    replay: async request => { calls.push(request); return { ok: true }; },
+  });
+  await open();
+  assert.equal(get("run").disabled, true);
+  assert.equal(get("upload-row").hidden, true);
+  describe("  白色陶瓷杯。容量 350 毫升。  ");
+  assert.equal(get("run").disabled, false);
+  get("run").click();
+  await tick();
+  assert.deepEqual(calls[0].input, {
+    title: "白色陶瓷杯", description: "白色陶瓷杯。容量 350 毫升。", operatorNotes: "白色陶瓷杯。容量 350 毫升。",
+  });
+  assert.equal(calls[0].useActiveTab, true);
+  assert.equal(get("results").hidden, true);
 });

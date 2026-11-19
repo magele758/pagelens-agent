@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { handleFs } from "../../../../../native/pagelens-host.mjs";
-import { completeDirectorySizeChartInput, loadProductDirectory, prepareSizeChartInput, readSizeChartImage } from "../sidepanel/product-directory.js";
+import { chooseShopeeProductDirectory, completeDirectorySizeChartInput, directoryAttributeAdvice,
+  loadProductDirectory, prepareSizeChartInput, readSizeChartImage } from "../sidepanel/product-directory.js";
 
 const root = "/Users/example/Desktop/跨境";
 const product = {
@@ -27,6 +28,15 @@ const loaded = await loadProductDirectory(` ${root} `, {
 });
 assert.deepEqual(loaded, { root, products: [product], issues });
 assert.equal(sent, 1);
+
+assert.equal(await chooseShopeeProductDirectory({
+  authorize: async (permission, { userGesture }) => { assert.equal(permission, "nativeMessaging"); assert.equal(userGesture, true); },
+  choose: async () => ({ ok: true, cancelled: true }),
+}), null);
+assert.deepEqual(await chooseShopeeProductDirectory({
+  authorize: async () => "",
+  choose: async () => ({ ok: true, root, products: [product], issues, directoryName: "跨境" }),
+}), { ...loaded, directoryName: "跨境" });
 
 for (const path of ["", "Desktop/跨境", root + "/../elsewhere", root + "\0suffix"]) {
   await assert.rejects(loadProductDirectory(path, { send: () => { throw new Error("不应请求本机助手"); } }), /绝对路径/);
@@ -114,6 +124,32 @@ try {
   assert.equal(mainReads, 0);
   assert.equal(await supply({ requiredColumns: ["肩宽"] }), "data:image/jpeg;base64," + main.toString("base64"));
   assert.equal(mainReads, 1);
+  let advisorReads = 0;
+  const advise = directoryAttributeAdvice(item, {
+    root: single.root,
+    getSettings: async () => settings,
+    async readImage(spec) {
+      advisorReads++;
+      assert.equal(spec.path, item.input.imagePath);
+      const response = handleFs({ action: "readProductSizeChartChunk", root: spec.root, folder: spec.folder,
+        expectedPath: spec.path, offset: 0, asset: spec.asset });
+      assert.equal(response.mime, "image/jpeg");
+      return `data:${response.mime};base64,${response.base64}`;
+    },
+    createAdvisor({ product, referenceImages }) {
+      assert.equal(product, item.input);
+      return {
+        async fields(fields) {
+          assert.deepEqual(Buffer.from(await referenceImages[0].file.arrayBuffer()), main);
+          return { [fields[0].key]: "棉" };
+        },
+      };
+    },
+  });
+  assert.equal(advisorReads, 0);
+  assert.deepEqual(await advise([{ key: "材质" }]), { 材质: "棉" });
+  assert.deepEqual(await advise([{ key: "袖口" }]), { 袖口: "棉" });
+  assert.equal(advisorReads, 1);
 
   const reference = path.join(single.root, folder, "detail.jpg");
   fs.writeFileSync(reference, main);

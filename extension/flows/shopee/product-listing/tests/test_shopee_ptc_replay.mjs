@@ -6,12 +6,15 @@ import { shopeeExampleInput as example } from '../example-input.js';
 const input = { ...example, shopId: '123', imagePath: '/products/notebook.png', attributes: { 品牌: 'NoBrand' } };
 
 function mockPage({ modal = null, newRequired = false, failWrite = false, delayedWrite = false, noImagePreview = false,
-  coverPresent = false, retryCategory = false, categoryRecommendations = null, rejectVariantName = false } = {}) {
+  coverPresent = false, retryCategory = false, categoryRecommendations = null, rejectVariantName = false, advice } = {}) {
   const labels = {
     '#category': input.category, '#noBrand': 'NoBrand', '#enable': '开启商品规格'
   };
   const attrs = [{ label: '品牌', required: true, selector: '#brand', value: '' }];
-  if (newRequired) attrs.push({ label: '装订方式', required: true, selector: '#binding', value: '' });
+  if (newRequired) attrs.push({
+    label: '装订方式', type: 'select', required: true, selector: '#binding', value: '',
+    ...(advice && { error: '请选择装订方式' }),
+  });
   const fields = Object.fromEntries([
     'title', 'description', 'price', 'quantity', 'weight', 'width', 'length', 'height', 'shipDays',
     'sku', 'batchQuantity',
@@ -19,7 +22,8 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
   const state = {
     url: 'https://seller.shopee.cn/portal/mtsku/new?cnsc_shop_id=123',
     modal,
-    validation: [],
+    validation: newRequired && advice ? ['请选择装订方式'] : [],
+    unscopedValidation: [],
     category: null,
     categoryReady: false,
     recommendation: null,
@@ -45,6 +49,17 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
     },
     '#noBrand': () => {
       attrs[0].value = 'NoBrand';
+      state.options = [];
+      state.optionOwner = null;
+    },
+    '#binding': () => {
+      state.options = [{ text: '线圈装', selector: '#spiral' }, { text: '胶装', selector: '#glued' }];
+      state.optionOwner = '装订方式';
+    },
+    '#spiral': () => {
+      attrs[1].value = '线圈装';
+      attrs[1].error = '';
+      state.validation = [];
       state.options = [];
       state.optionOwner = null;
     },
@@ -110,9 +125,12 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
         break;
       case 'flow_control_click':
         assert.equal(args.category, input.category);
-        assert.equal({ '#brand': 'attribute-trigger', '#noBrand': 'attribute-option', '#enable': 'variant-enable' }[args.selector], args.action);
+        assert.equal({ '#brand': 'attribute-trigger', '#noBrand': 'attribute-option', '#enable': 'variant-enable',
+          '#binding': 'attribute-trigger', '#spiral': 'attribute-option' }[args.selector], args.action);
         actions[args.selector]();
         break;
+      case 'flow_attribute_advice':
+        return { values: await advice(args.fields) };
       case 'flow_category_click':
         assert.equal(args.selector, '#category');
         assert.equal(args.category, input.category);
@@ -130,8 +148,13 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
         }
         break;
       }
-      case 'wait_for':
       case 'press_keys':
+        if (args.keys[0] === 'Escape') {
+          state.options = [];
+          state.optionOwner = null;
+        }
+        break;
+      case 'wait_for':
         break;
       default:
         assert.fail(tool);
@@ -366,6 +389,41 @@ test('pauses on a new required attribute without redoing form discovery', async 
   assert.equal(receipt.code, 'required-attribute-missing');
   assert.equal(receipt.details.label, '装订方式');
   assert.equal(page.calls.some(({ tool }) => tool === 'upload_file'), false);
+  assert.equal(page.calls.some(({ tool }) => tool === 'flow_attribute_advice'), false);
+});
+
+test('recovers a new red-required dropdown in the current category after model consent', async () => {
+  const page = mockPage({ newRequired: true, advice: async fields => {
+    assert.deepEqual(fields.map(({ key, error, options }) => ({ key, error, options })), [
+      { key: '装订方式', error: '请选择装订方式', options: ['线圈装', '胶装'] },
+    ]);
+    return { '装订方式': '线圈装', '库存': '50' };
+  } });
+  const receipt = await run(page, { ...input, completeMissingAttributes: true });
+  assert.equal(receipt.status, 'verified');
+  assert.equal(page.state.attributes.find(attr => attr.label === '装订方式').value, '线圈装');
+  assert.equal(page.calls.filter(({ tool }) => tool === 'flow_attribute_advice').length, 1);
+  assert.ok(page.calls.every(({ args }) => args.selector !== '#submit'));
+});
+
+test('leaves a required dropdown pending when the model invents an option', async () => {
+  const page = mockPage({ newRequired: true, advice: async () => ({ '装订方式': '其他虚构方式' }) });
+  const receipt = await run(page, { ...input, completeMissingAttributes: true });
+  assert.equal(receipt.code, 'required-attribute-missing');
+  assert.equal(receipt.details.label, '装订方式');
+  assert.ok(!page.calls.some(({ args }) => args.selector === '#spiral' || args.selector === '#cover'));
+});
+
+test('reconsiders an old supplied choice only against the current category dropdown', async () => {
+  const page = mockPage({ newRequired: true, advice: async fields => {
+    assert.deepEqual(fields[0].options, ['线圈装', '胶装']);
+    return { '装订方式': '线圈装' };
+  } });
+  const receipt = await run(page, { ...input, attributes: { ...input.attributes, '装订方式': '以前的选项' },
+    completeMissingAttributes: true });
+  assert.equal(receipt.status, 'verified');
+  assert.equal(page.state.attributes.find(attr => attr.label === '装订方式').value, '线圈装');
+  assert.ok(!page.calls.some(({ args }) => args.text === '以前的选项'));
 });
 
 test('does not confuse populated bulk controls with the actual SKU row', async () => {

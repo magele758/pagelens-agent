@@ -6,12 +6,17 @@ import { sheinCategoryPage } from "../category-page.js";
 const url = "https://sellerhub.shein.com/#/spmc/commodities-category/followsales-pro/list?externalSystem=spmp&last_page=page_commodities_list";
 const path = ["家居&生活", "厨房&餐厅", "饮具", "真空瓶和保温杯"];
 
-function fixture(t, { href = url, withBrand = false } = {}) {
+function fixture(t, { href = url, withBrand = false, search = false } = {}) {
   const dom = new JSDOM(`<main>
     <h1>发布商品</h1>
-    <aside><button>厨房&amp;餐厅</button></aside>
+    <aside><button>厨房&amp;餐厅</button><input placeholder="搜索订单"></aside>
     <section>
-      <div role="tab">手动选择分类</div><input type="text">
+      <div role="tab">手动选择分类</div>
+      <div class="spmc_cascader_kjYx">
+        <div class="soui-cascader-result-wrapper"><div class="soui-cascader-result">
+          <div class="soui-cascader-result-text-wrapper"><input></div>
+        </div></div>
+      </div>
       <div class="spmc_wrapper_QSELq">
         <div class="spmc_result_IyX_d"></div>
         <div class="spmc_panelWrapper_ngBoL"></div>
@@ -65,6 +70,56 @@ function fixture(t, { href = url, withBrand = false } = {}) {
     }
   }
   render();
+  const categoryTerms = [];
+  const searchClicks = [];
+  if (search) {
+    const store = document.createElement("p");
+    store.textContent = "半托管店铺 GS12345678";
+    document.querySelector("main").prepend(store);
+    const input = document.querySelector(".soui-cascader-result-text-wrapper input");
+    const popup = document.createElement("div");
+    popup.hidden = true;
+    popup.innerHTML = '<div class="soui-cascader-filter-list"></div><div><span class="category_footer_tips">未找到合适分类？</span><button>点击申请</button></div>';
+    document.body.append(popup);
+    const mug = [...path.slice(0, -1), "马克杯"];
+    const suggestions = {
+      旧词: [{ path }],
+      马克杯: [{ path: path.slice(0, -1), branch: true }, { path, disabled: true }, { path: mug }, { path }],
+      同类马克杯: [{ path: mug }, { path }],
+    };
+    function show(term) {
+      popup.hidden = false;
+      const rows = (suggestions[term] || []).map(result => {
+        const item = Object.assign(document.createElement("div"), { className: "soui-cascader-filter-option soui-cascader-option" });
+        const inner = Object.assign(document.createElement("div"), { className: "soui-cascader-option-inner" });
+        item.append(inner);
+        const parts = result.path.map(name => Object.assign(document.createElement("span"), { textContent: name }));
+        for (const [index, span] of parts.entries()) {
+          if (index) inner.append("/");
+          inner.append(span);
+        }
+        if (result.branch) item.dataset.leaf = "false";
+        if (result.disabled) item.setAttribute("aria-disabled", "true");
+        item.onclick = () => {
+          searchClicks.push(result.path);
+          selected.splice(0, selected.length, ...result.path);
+          leaf.textContent = selected.at(-1);
+          breadcrumb.replaceChildren(...selected.map(name => Object.assign(document.createElement("span"), { textContent: name })));
+          popup.hidden = true;
+          render();
+        };
+        return item;
+      });
+      popup.querySelector(".soui-cascader-filter-list").replaceChildren(...rows);
+    }
+    input.value = "旧词";
+    show(input.value);
+    input.oninput = () => {
+      const value = input.value;
+      categoryTerms.push(value);
+      setTimeout(() => show(value), 250);
+    };
+  }
   document.querySelector("#publish").onclick = () => publishes++;
   document.querySelector("#next").onclick = () => advances++;
   if (withBrand) {
@@ -84,7 +139,7 @@ function fixture(t, { href = url, withBrand = false } = {}) {
     const result = await dom.window.eval(`(${sheinCategoryPage})(${JSON.stringify({ href, ...args })})`);
     return JSON.parse(JSON.stringify(result));
   };
-  return { run, document, advances: () => advances, publishes: () => publishes };
+  return { run, document, categoryTerms, searchClicks, advances: () => advances, publishes: () => publishes };
 }
 
 test("reads choices, selects the exact live path, and explicitly advances without publishing", async t => {
@@ -134,5 +189,31 @@ test("refuses duplicate rows at the same level without changing the selected cat
   document.querySelector(".panel_0").append(duplicate);
   assert.equal((await run({ kind: "select", categoryPath: path })).code, "CATEGORY_AMBIGUOUS");
   assert.equal((await run()).selectedPath.length, 0);
+  assert.equal(advances(), 0);
+});
+
+test("searches only the category box and waits for first eligible result instead of old suggestions", async t => {
+  const { run, document, categoryTerms, searchClicks, advances, publishes } = fixture(t, { search: true });
+  assert.equal((await run()).storeKey, "GS12345678");
+  const result = await run({ kind: "search", keyword: "马克杯", storeKey: "GS12345678" });
+  const mug = [...path.slice(0, -1), "马克杯"];
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.selectedPath, mug);
+  assert.equal(result.canAdvance, true);
+  assert.deepEqual(categoryTerms, ["马克杯"]);
+  assert.deepEqual(searchClicks, [mug]);
+  assert.equal(document.querySelector('input[placeholder="搜索订单"]').value, "");
+  assert.equal(advances(), 0);
+  assert.equal(publishes(), 0);
+});
+
+test("keeps a live matched cached terminal path and stops if the seller store changed", async t => {
+  const { run, searchClicks, advances } = fixture(t, { search: true });
+  assert.equal((await run({ kind: "search", keyword: "马克杯", storeKey: "GS00000000" })).code, "CATEGORY_STORE_CHANGED");
+  assert.deepEqual(searchClicks, []);
+  const result = await run({ kind: "search", keyword: "同类马克杯", preferredPath: path, storeKey: "GS12345678" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.selectedPath, path);
+  assert.deepEqual(searchClicks, [path]);
   assert.equal(advances(), 0);
 });

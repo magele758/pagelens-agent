@@ -87,8 +87,8 @@ for (const width of [400, 900]) {
     await until(() => product.open, 'open Shopee product listing');
     // Give the first click's asynchronous dispatch the same task boundary as a subsequent browser click.
     await delay(0);
-    assert.equal(document.getElementById('ptc-start').disabled, true, 'fixture is outside Shopee listing');
-    click('ptc-mode-directory');
+    assert.equal(document.getElementById('ptc-batch-start').disabled, true, 'fixture is outside Shopee listing');
+    assert.equal(document.getElementById('ptc-input'), null);
     assert.equal(document.getElementById('ptc-batch-pane').hidden, false);
     click('ptc-back');
     assert.ok(workflow.open);

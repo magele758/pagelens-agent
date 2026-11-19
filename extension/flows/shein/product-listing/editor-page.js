@@ -36,14 +36,14 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     ? input.categoryPath.map(clean) : [];
   const categoryMatches = () => expectedPath.length > 0 && expectedPath.every(Boolean) &&
     JSON.stringify(expectedPath) === JSON.stringify(readCategoryPath());
-  const editContext = () => isRoute() && (kind !== "fill" || categoryMatches());
+  const editContext = () => isRoute() && (kind === "inspect" || categoryMatches());
 
   if (!isRoute()) return fail("PAGE_CHANGED", "SHEIN 新建商品页面已切换。");
-  if (!["inspect", "fill"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 编辑操作。");
+  if (!["inspect", "fill", "options", "repair", "review"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 编辑操作。");
   if (!pageMarkers()) return fail("EDITOR_NOT_READY", "SHEIN 商品编辑器仍在加载。");
   if (kind === "fill" && !fullEditor()) return fail("EDITOR_NOT_READY", "正在等待 SHEIN 规格和上架站点加载。");
   if (blocked()) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再继续。");
-  if (kind === "fill" && !categoryMatches()) return fail("CATEGORY_CHANGED", "当前 SHEIN 商品分类与待填资料不一致，请核对。");
+  if (!editContext()) return fail("CATEGORY_CHANGED", "当前 SHEIN 商品分类与待填资料不一致，请核对。");
 
   function dismissListingTips() {
     for (const message of ["建议完善尺码数据", "拖动图片可进行排序"]) {
@@ -103,12 +103,31 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     return [...new Set(labels)];
   }
 
+  function inlineError(section, node) {
+    const error = query(section, '[role="alert"],[class*="form-item-error"],.soui-form-item-explain-error,[class*="errorMessage--"],[class*="errorTip--"]')
+      .map(text).filter(message => message && message.length < 230);
+    if (error.length) return [...new Set(error)].slice(0, 2).join(" ");
+    const invalid = node.matches('[aria-invalid="true"]') ||
+      section.matches('.soui-form-item-wrapper-error,.so-form-item-has-error,[aria-invalid="true"]') ||
+      section.querySelector('[aria-invalid="true"]');
+    const border = [node, node.querySelector('.soui-select-result-wrapper')].filter(Boolean).some(control => {
+      const color = getComputedStyle(control).borderTopColor.match(/rgba?\(\s*(\d+)[, ]+\s*(\d+)[, ]+\s*(\d+)/u);
+      return color && Number(color[1]) >= 155 && Number(color[1]) - Math.max(Number(color[2]), Number(color[3])) >= 75;
+    });
+    return invalid || border ? "SHEIN 标记此项需要核对。" : "";
+  }
+
   function describe(section, node, key, label, required, limit) {
     const select = node.matches('.soui-select');
     const multiple = select && node.classList.contains('soui-select-multiple');
     const values = select ? chosen(node) : [];
-    return { section, node, limit, field: { key, label, type: select ? "select" : "text", required,
-      value: select ? multiple ? values : values[0] ?? "" : node.value, ...(multiple && { multiple }) } };
+    const type = select ? "select" : node.type === "number" ? "number" : node.type === "checkbox" ? "checkbox" : "text";
+    const group = key.startsWith("attribute:") ? required ? "必填商品属性" : "商品属性" : "基础信息";
+    const error = inlineError(section, node);
+    return { section, node, limit, field: { key, label, type, required, section: group, maxLength: limit,
+      value: select ? multiple ? values : values[0] ?? "" : type === "checkbox" ? node.checked : node.value,
+      ...(type === "number" && { min: node.min ? Number(node.min) : undefined, max: node.max ? Number(node.max) : undefined }),
+      ...(multiple && { multiple }), ...(error && { error }) } };
   }
 
   function controls() {
@@ -121,7 +140,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
       const heading = section.querySelector('.soui-form-item-label,.soui-form-item-label-wrapper,[class*="productAttrLabel--"]');
       const label = text(heading).replace(/^[*＊]\s*/u, "");
       const nodes = query(section, '.soui-select,input,textarea').filter(node => enabled(node) &&
-        (node.matches('.soui-select') || /^(?:text|search|number|textarea)$/u.test(node.type) && !node.readOnly && !node.closest('.soui-select')));
+        (node.matches('.soui-select') || /^(?:text|search|number|textarea|checkbox)$/u.test(node.type) && !node.readOnly && !node.closest('.soui-select')));
       const node = one(nodes);
       if (!label || !node || label.length > 140) continue;
       const required = section.matches('.soui-form-item-wrapper-required,[aria-required="true"]') || node.required === true;
@@ -185,6 +204,48 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     return Boolean(await stable(() => !menus().includes(menu) ? { key: "closed" } : null, 600));
   }
 
+  async function inspectChoices(entry) {
+    const { node } = entry;
+    if (menus().length) return fail("MENU_STILL_OPEN", "请先关闭 SHEIN 当前的下拉菜单。");
+    const control = node.querySelector('.soui-select-result-wrapper') ?? node;
+    control.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    if (!enabled(control) || !editContext()) return fail("PAGE_CHANGED", "SHEIN 商品控件已变化。");
+    control.click();
+    const found = await stable(() => {
+      const menu = one(menus());
+      const options = menu && optionNodes(menu).map(optionValue).filter(Boolean);
+      return options?.length ? { key: JSON.stringify(options), menu, options } : null;
+    }, 1800);
+    const menu = found?.menu ?? one(menus());
+    if (!found) {
+      if (menu) await closeMenu(node, menu);
+      return fail("OPTIONS_UNAVAILABLE", "暂时没有读到该字段的可用选项。");
+    }
+    const choices = new Set(found.options);
+    const scroller = [menu, ...query(menu, '.soui-select-list,.soui-select-virtual-list,[role="listbox"]')]
+      .find(element => element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 4);
+    const original = scroller?.scrollTop;
+    let closed;
+    try {
+      for (let index = 0; scroller && index < 9 && choices.size < 140; index++) {
+        const next = Math.min(scroller.scrollTop + Math.max(1, scroller.clientHeight * 0.85), scroller.scrollHeight - scroller.clientHeight);
+        if (scroller.scrollTop >= next || one(menus()) !== menu) break;
+        scroller.scrollTop = next;
+        const read = await stable(() => {
+          if (one(menus()) !== menu) return null;
+          const options = optionNodes(menu).map(optionValue).filter(Boolean);
+          return options.length ? { key: JSON.stringify(options), options } : null;
+        }, 550);
+        for (const option of read?.options || []) choices.add(option);
+      }
+    } finally {
+      if (scroller?.isConnected && one(menus()) === menu) scroller.scrollTop = original;
+      closed = await closeMenu(node, menu);
+    }
+    if (!closed) return fail("MENU_STILL_OPEN", "未确认该字段下拉菜单已关闭。");
+    return { ok: true, options: [...choices].slice(0, 140) };
+  }
+
   async function fillSelect(entry, supplied) {
     const { node, field } = entry;
     const values = Array.isArray(supplied) ? supplied : [supplied];
@@ -195,7 +256,9 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     const previous = chosen(node);
     const alreadyChosen = value => previous.filter(label => namesFor(label).has(fieldKey(value))).length === 1;
     if (wanted.every(alreadyChosen)) return { ok: true, status: "unchanged" };
-    if (menus().length || (!field.multiple && previous.length)) return fail("SELECT_NOT_EMPTY", "该选项已有值或另一个菜单打开，请核对。");
+    if (menus().length || (!field.multiple && previous.length && !(kind === "repair" && field.error))) {
+      return fail("SELECT_NOT_EMPTY", "该选项已有值或另一个菜单打开，请核对。");
+    }
     const control = node.querySelector('.soui-select-result-wrapper') ?? node;
     control.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     if (!editContext() || !enabled(control)) return fail("PAGE_CHANGED", "SHEIN 商品控件已变化。");
@@ -256,7 +319,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
         const { target } = resolved;
         const expected = optionNames(target);
         expected.add(fieldKey(value));
-        const retained = chosen(node);
+        const retained = field.multiple ? chosen(node) : [];
         if (target.matches('[aria-selected="true"],[data-selected="true"],.soui-select-dropdown-item-selected') ||
             retained.some(prior => expected.has(fieldKey(prior)))) {
           return fail("EXISTING_VALUE_UNVERIFIED", "该选项可能已选中，已停止重复点击以免取消现有值。");
@@ -310,8 +373,33 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
   const issues = [];
   const initial = controls();
   if (!initial.some(({ field }) => field.key === "englishTitle")) return fail("EDITOR_NOT_READY", "未找到 SHEIN 商品标题控件。");
-  if (kind === "inspect") return { ok: true, status: "inspected", categoryPath: readCategoryPath(),
-    fields: initial.map(({ field }) => field), items, issues };
+  function view(entries) {
+    const fields = entries.map(({ field }) => field);
+    const ids = new Set(query(document, 'span,div,p').flatMap(node => {
+      const label = text(node);
+      return label.length < 80 && label.match(/店铺\s*(GS\d{3,})\b/u) ? [label.match(/店铺\s*(GS\d{3,})\b/u)[1]] : [];
+    }));
+    return { ok: true, status: "inspected", categoryPath: readCategoryPath(), fields, items, issues,
+      storeKey: ids.size === 1 ? [...ids][0] : "" };
+  }
+  if (kind === "inspect" || kind === "review") return view(initial);
+  if (kind === "options") {
+    const entry = initial.find(entry => entry.field.key === input.fieldKey && entry.field.type === "select");
+    return entry ? inspectChoices(entry) : fail("FIELD_UNAVAILABLE", "当前页未找到对应下拉字段。");
+  }
+  async function apply(entry, value) {
+    const { field, node } = entry;
+    if (field.type === "select") return fillSelect(entry, value);
+    if (field.type === "checkbox") {
+      if (typeof value !== "boolean") return fail("VALUE_INVALID", "复选框需要明确的勾选状态。");
+      if (node.checked === value) return { ok: true, status: "unchanged" };
+      if (!enabled(node) || !editContext()) return fail("FIELD_UNAVAILABLE", "复选框当前不可编辑。");
+      node.click();
+      const read = await stable(() => controls().find(entry => entry.field.key === field.key)?.node.checked === value ? { key: value } : null);
+      return read ? { ok: true, status: "filled" } : fail("VALUE_UNVERIFIED", "未回读到复选框状态。");
+    }
+    return fillText(entry, value);
+  }
   const attempted = new Set();
   for (let round = 0; round < 3; round++) {
     const pending = controls().filter(entry => !attempted.has(entry.field.key));
@@ -321,9 +409,10 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
       attempted.add(field.key);
       const entry = controls().find(control => control.field.key === field.key);
       if (!entry) continue;
-      const value = requestedValue(entry);
+      const value = kind === "repair" ? (field.error || field.required && ![].concat(field.value).some(value => clean(value)))
+        && Object.hasOwn(input.values || {}, field.key) ? input.values[field.key] : undefined : requestedValue(entry);
       if (value == null || value === "" || Array.isArray(value) && !value.length) continue;
-      const { ok, status, code, message } = field.type === "select" ? await fillSelect(entry, value) : await fillText(entry, value);
+      const { ok, status, code, message } = await apply(entry, value);
       if (ok) items.push({ key: field.key, label: field.label, status });
       else issues.push({ key: field.key, label: field.label, code, message });
       if (menus().length) return { ok: false, code: "MENU_STILL_OPEN", message: "请关闭当前 SHEIN 下拉菜单。", items, issues };

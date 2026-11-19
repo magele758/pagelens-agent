@@ -59,7 +59,7 @@ import { bindTemuListingPanel } from "./temu-listing-panel.js";
 import { bindTemuSellerOperationsPanel } from "../flows/temu/seller-operations/panel.js";
 import { bindProductCapturePanel } from "./product-capture-panel.js";
 import { bindSheinListingPanel } from "../flows/shein/product-listing/sidepanel/listing-panel.js";
-import { inspectSheinListing, openSheinListingEditor, replaySheinListing } from "../flows/shein/product-listing/runtime.js";
+import { replaySheinListing } from "../flows/shein/product-listing/runtime.js";
 import { bindShopeeMarketingPanel } from "../flows/shopee/marketing-panel.js";
 import { bindPtcFlow } from "../flows/shopee/product-listing/sidepanel/flow-ui.js";
 import { skillCommandText } from "../lib/slash.js";
@@ -215,9 +215,7 @@ function wire() {
     getTargetTab: pickTargetTab,
     isAgentBusy: () => state.busy,
     onBack,
-    openEditor: openSheinListingEditor,
-    inspect: inspectSheinListing,
-    replay: replaySheinListing,
+    replay: request => replaySheinListing({ ...request, settings: state.settings }),
   });
   const workflowHandlers = { openProductListing, openSheinListing, openMarketing, openTiktokDraft, openTemuListing, openTemuOperations, ...captureActions };
   openCatalog = bindWorkflowCatalog(workflowHandlers);

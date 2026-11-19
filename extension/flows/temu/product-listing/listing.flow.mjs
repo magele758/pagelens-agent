@@ -1,4 +1,4 @@
-import { readTemuAttributeValue } from "./input.js";
+import { createTemuSuggestionFilter, readTemuAttributeValue } from "./input.js";
 import { isTemuServiceField, planTemuServiceField } from "./service.js";
 import { prepareTemuSizeChart, temuSizeKey as sizeKey } from "./size-chart-input.js";
 
@@ -14,6 +14,37 @@ const standardColors = new Map([
 ]);
 const standardColor = label => standardColors.get(keyOf(label.replace(/^[a-z]\s+-\s+/iu, "")));
 const stockMembers = new Set(["stock", "quantity"]);
+const categoryAttribute = /^productProperties\[\d+\]$/u;
+const validationOf = state => Array.isArray(state.validation) ? state.validation :
+  (state.issues || []).map(message => ({ message }));
+
+function recoveryValue(field, raw) {
+  if (!hasValue(raw)) return undefined;
+  if (field.kind === "text") return typeof raw === "string" || Number.isFinite(raw) ? raw : undefined;
+  if (field.kind !== "select") return typeof raw === "boolean" ? raw : undefined;
+  const requested = Array.isArray(raw) ? raw : [raw];
+  if (!field.multiple && requested.length !== 1) return undefined;
+  const selected = requested.map(value => {
+    const matches = field.options.filter(option => !option.disabled &&
+      [option.value, option.label, ...(option.aliases || [])].some(name => keyOf(name) === keyOf(value)));
+    return matches.length === 1 ? matches[0].value : undefined;
+  });
+  return selected.every(Boolean) && new Set(selected).size === selected.length
+    ? field.multiple ? selected : selected[0] : undefined;
+}
+
+function verifiesRecovery(field, wanted, actual) {
+  if (!hasValue(actual)) return false;
+  const observed = (Array.isArray(actual) ? actual : [actual]).map(keyOf);
+  const expected = Array.isArray(wanted) ? wanted : [wanted];
+  const unmatched = new Set(observed);
+  return observed.length === expected.length && unmatched.size === observed.length && expected.every(value => {
+    const option = field.options?.find(option => option.value === value);
+    const accepted = [...new Set([value, option?.label, ...(option?.aliases || [])].map(keyOf))]
+      .filter(name => name && unmatched.has(name));
+    return accepted.length === 1 && unmatched.delete(accepted[0]);
+  });
+}
 
 function optionAliases(value) {
   const alias = keyOf(value);
@@ -91,8 +122,8 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     onStep?.({ step, label, completed: items.filter(item => ["filled", "verified", "unchanged"].includes(item.status)),
       issues: [...issues] });
   };
-  const asIssue = (label, result) => ({
-    label, code: result?.code || "UNVERIFIED", message: result?.message || "没有收到可核对的结果。",
+  const asIssue = (label, result, key) => ({
+    ...(key && { key }), label, code: result?.code || "UNVERIFIED", message: result?.message || "没有收到可核对的结果。",
   });
   const result = (status, code) => ({
     status, step, ...(code && { code }), ...(draftUrl && { draftUrl }), items, issues, missing, verificationComplete, verifiedSkuCount,
@@ -109,7 +140,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const status = outcome?.ok ? outcome.status || "verified" : "needs-review";
     items.push({ ...(key && { key }), label, status });
     if (!outcome?.ok) {
-      const problem = asIssue(label, outcome);
+      const problem = asIssue(label, outcome, key);
       issues.push(problem);
       if (fatal.has(problem.code)) throw Object.assign(new Error(problem.message), { workflowCode: problem.code });
     }
@@ -126,15 +157,15 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       await new Promise(resolve => setTimeout(resolve, 250));
     } while (true);
   }
-  async function applyField(field, value) {
-    if (!hasValue(value) || attempted.has(field.key)) return;
+  async function applyField(field, value, { recovery = false } = {}) {
+    if (!hasValue(value) || !recovery && attempted.has(field.key)) return;
     attempted.add(field.key);
     const select = options => run("temu_select", { key: field.key, ...options });
     const requested = Array.isArray(value) ? value : [value];
     const hints = requested.map(item => (field.options || []).find(option => keyOf(option.value) === keyOf(item)));
     const args = { value, ...(hints.length === 1 && hints[0]?.label && { query: hints[0].label }) };
     let outcome = field.locator ? await select(args) : await run("temu_write", { key: field.key, value });
-    if (field.locator && outcome?.code === "OPTION_MISSING" && !outcome.changed) {
+    if (!recovery && field.locator && outcome?.code === "OPTION_MISSING" && !outcome.changed) {
       const current = await run("temu_field_options", { key: field.key, forceLive: true });
       if (!current?.ok && fatal.has(current?.code)) outcome = current;
       if (current?.ok) {
@@ -419,6 +450,76 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     return undefined;
   }
 
+  async function recoverAttributes(state) {
+    const invalid = new Set(validationOf(state).filter(issue => issue.key && issue.kind !== "upload").map(issue => issue.key));
+    const canSuggest = shouldSuggestField ?? createTemuSuggestionFilter(input);
+    const candidates = state.fields.filter(field => categoryAttribute.test(field.key) && !field.skuMember &&
+      ["select", "text", "checkbox", "radio"].includes(field.kind) && !isTemuServiceField(field) &&
+      state.fields.filter(other => other.key === field.key).length === 1 &&
+      (invalid.has(field.key) || field.required && !hasValue(field.value)) &&
+      (hasValue(explicitValue(field)) ||
+        typeof suggestFields === "function" && canSuggest(field))).slice(0, 10);
+    if (!candidates.length) return state;
+    report("repair", "补齐 Temu 当前类目遗漏的属性");
+    const pending = [];
+    const plan = [];
+    for (const field of candidates) {
+      let live = { ...field, options: field.options || [] };
+      if (field.locator) {
+        const observed = await run("temu_field_options", { key: field.key, forceLive: true });
+        if (!observed?.ok) {
+          record(field.label, observed, field.key);
+          continue;
+        }
+        live = { ...live, options: observed.options || [] };
+      }
+      const direct = explicitValue(field);
+      const value = recoveryValue(live, direct);
+      if (hasValue(value)) plan.push({ field: live, value });
+      else if (!hasValue(direct) && typeof suggestFields === "function") {
+        pending.push({ ...live, required: true, value: "" });
+      }
+    }
+    if (pending.length) {
+      try {
+        const suggestion = await suggestFields(input, { fields: pending }, { signal });
+        for (const field of pending) {
+          const value = recoveryValue(field, suggestion?.values?.[field.key]);
+          if (hasValue(value)) plan.push({ field, value });
+        }
+      } catch (error) {
+        if (signal?.aborted || error?.workflowCode) throw error;
+        issues.push(asIssue("类目资料补齐", { code: "SUGGEST_FAILED", message: error?.message }));
+      }
+    }
+    if (!plan.length) return state;
+
+    const successful = [];
+    for (const { field, value } of plan) {
+      if ((await applyField(field, value, { recovery: true }))?.ok) successful.push({ field, value, receipt: items.at(-1) });
+    }
+    const after = await readEditor();
+    if (!after?.ok) return after;
+    const remaining = new Set(validationOf(after).map(issue => issue.key));
+    const resolved = new Set();
+    for (const { field, value, receipt } of successful) {
+      const actual = after.fields.filter(other => other.key === field.key);
+      if (actual.length === 1 && !remaining.has(field.key) && verifiesRecovery(field, value, actual[0].value)) {
+        resolved.add(field.key);
+      } else {
+        receipt.status = "needs-review";
+        if (!remaining.has(field.key)) issues.push(asIssue(field.label, {
+          code: "READBACK_MISMATCH", message: "Temu 未回读到已补齐的属性值。",
+        }, field.key));
+      }
+    }
+    for (let index = issues.length - 1; index >= 0; index--) if (resolved.has(issues[index].key)) issues.splice(index, 1);
+    for (let index = items.length - 1; index >= 0; index--) {
+      if (items[index].status === "needs-review" && resolved.has(items[index].key)) items.splice(index, 1);
+    }
+    return after;
+  }
+
   try {
     const sites = input?.sites?.length ? input.sites : input?.site ? [input.site] : [];
     if (!Number.isSafeInteger(tabId) || tabId < 1 || typeof call !== "function" ||
@@ -585,8 +686,11 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     }
 
     report("verify", "复核试填表单");
-    const final = await readEditor();
+    let final = await readEditor();
     if (!final?.ok) return stop("试填回读", final);
+    final = await recoverAttributes(final);
+    if (!final?.ok) return stop("试填回读", final);
+    if (step !== "verify") report("verify", "复核试填表单");
     const skuFields = final.fields.filter(field => field.skuMember && field.skuGroup);
     const matched = matchedSkuGroups(final, sources, colorLabels);
     if (input.skus?.length) {
@@ -626,7 +730,9 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
         missing.push({ key: upload.key, label: `${upload.variant ? upload.variant + "规格图" : "商品轮播图"}需至少 ${upload.minimum} 张，已显示 ${upload.markers} 张` });
       }
     }
-    for (const message of final.issues || []) issues.push(asIssue("Temu 页面提示", { code: "VALIDATION", message }));
+    for (const { key, label, message } of validationOf(final)) {
+      issues.push(asIssue(label || final.fields.find(field => field.key === key)?.label || "Temu 页面提示", { code: "VALIDATION", message }, key));
+    }
     if (final.truncated) issues.push(asIssue("商品表单", { code: "FIELD_LIMIT", message: "当前表单超出一次试填支持的控件数量。" }));
     return result(issues.length || missing.length ? "needs-review" : "ready-for-review");
   } catch (error) {
