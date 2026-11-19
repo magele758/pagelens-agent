@@ -15,8 +15,8 @@
     "variantGroups": [{
       "name": "颜色",
       "options": [
-        {"value": "黑色", "imagePath": "images/black/front.jpg", "squareImagePath": "images/black/square.jpg"},
-        {"value": "粉色", "imagePath": "images/pink/front.jpg", "squareImagePath": "images/pink/square.jpg"}
+        {"value": "黑色", "imagePath": "images/black/front.jpg", "squareImagePath": "images/black/square.jpg", "swatchImagePath": "images/black/swatch.jpg"},
+        {"value": "粉色", "imagePath": "images/pink/front.jpg", "squareImagePath": "images/pink/square.jpg", "swatchImagePath": "images/pink/swatch.jpg"}
       ]
     }],
     "sharedGalleryImages": ["images/shared/lid.jpg", "images/shared/side.jpg"],
@@ -32,6 +32,6 @@
 
 - 商品目录有中文标题或描述时，可补充 `shein.englishTitle` 和 `shein.englishDescription`。
 - 基础商品尺寸用 `shein.dimensions`，包装尺寸用 SKU 行里的 `lengthCm`、`widthCm`、`heightCm` 和 `weightG`。
-- 为每个主规格登记首图 `imagePath` 和方形图 `squareImagePath`。有色块图时填写 `swatchImagePath`。各规格的「细节图」按自己的首图、共用细节图的顺序写入。共用图可登记在 `shein.sharedGalleryImages` 或 `detailImages`，试填最多带四张共用图。SKU 图使用对应 SKU 行的 `imagePath`。
+- 为每个主规格登记首图 `imagePath` 和方形图 `squareImagePath`。当前表单有「色块图」时，需使用 80×80 像素、3 MB 以内的 JPG、JPEG 或 PNG，路径填在 `swatchImagePath`。省略路径时，PageLens 可以从该规格已匹配的首图生成色块图。各规格的「细节图」按自己的首图、共用细节图的顺序写入。共用图可登记在 `shein.sharedGalleryImages` 或 `detailImages`，试填最多带四张共用图。SKU 图使用对应 SKU 行的 `imagePath`。
 - 图片路径相对于选中的商品目录。勾选本次上传后，PageLens 通过 SHEIN 原有上传控件上传，并按主规格或 SKU 核对页面回显。如果 SHEIN 已从同一首图生成对应方形图，核对后会复用。指定的方形图与已有图片不同、缺图或遇到平台拒收时，侧栏显示对应行和待处理原因。
 - 首次试填请在卖家中心核对报告中的待填项目。工作流停在新建表单，提交由卖家页的「发布商品」完成。

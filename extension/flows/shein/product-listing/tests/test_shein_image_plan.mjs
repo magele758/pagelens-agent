@@ -17,14 +17,15 @@ const product = {
   sharedGalleryImages: ["shared/side.png"],
   detailImages: ["shared/material.png", "shared/side.png"],
   variantGroups: [{ name: "颜色", options: [
-    { value: "Black", source: "Black", squareImagePath: "black/square.png" },
+    { value: "Black", source: "Black", squareImagePath: "black/square.png", swatchImagePath: "black/swatch.png" },
     { value: "White", source: "White", imagePath: "white/hero.png", squareImagePath: "white/square.png", swatchImagePath: "white/swatch.png" },
   ] }],
 };
 const assets = [
   ["detail", "shared/material.png"], ["variant", "black/hero.png"], ["variant", "white/hero.png"],
   ["variant", "white/small.png"], ["variant", "white/medium.png"], ["shared-gallery", "shared/side.png"],
-  ["variant-square", "black/square.png"], ["variant-square", "white/square.png"], ["variant-swatch", "white/swatch.png"],
+  ["variant-square", "black/square.png"], ["variant-square", "white/square.png"],
+  ["variant-swatch", "black/swatch.png"], ["variant-swatch", "white/swatch.png"],
 ];
 const descriptor = ([role, path]) => ({ role, path, name: path.split("/").at(-1) });
 const planSummary = plan => plan.tasks.map(({ role, options, image }) => [role, options, image.path]);
@@ -34,7 +35,7 @@ const samples = new Map([
   ["shared", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNI6TnxHwAFyAK47P4J0AAAAABJRU5ErkJggg=="],
 ]);
 
-test("plans different color covers, identical ordered shared pictures, and SKU-specific files from a real temporary directory", async t => {
+test("plans different color covers and swatches, identical ordered shared pictures, and SKU-specific files from a real temporary directory", async t => {
   const dir = await mkdtemp(join(tmpdir(), "pagelens-shein-color-gallery-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   for (const [, path] of assets) {
@@ -50,26 +51,33 @@ test("plans different color covers, identical ordered shared pictures, and SKU-s
   assert.deepEqual(plan.issues, []);
   assert.deepEqual(planSummary(plan), [
     ["detail", ["黑色"], "black/hero.png"], ["detail", ["黑色"], "shared/side.png"], ["detail", ["黑色"], "shared/material.png"],
-    ["square", ["黑色"], "black/square.png"],
+    ["square", ["黑色"], "black/square.png"], ["swatch", ["黑色"], "black/swatch.png"],
     ["detail", ["白色"], "white/hero.png"], ["detail", ["白色"], "shared/side.png"], ["detail", ["白色"], "shared/material.png"],
     ["square", ["白色"], "white/square.png"], ["swatch", ["白色"], "white/swatch.png"],
     ["variant", ["黑色", "S"], "black/hero.png"], ["variant", ["白色", "S"], "white/small.png"], ["variant", ["白色", "M"], "white/medium.png"],
   ]);
   assert.ok(plan.tasks.every(task => images.includes(task.image)));
-  assert.equal(plan.tasks[0].image.name, plan.tasks[4].image.name, "same base name stays separate by declared path");
-  assert.notDeepEqual(await plan.tasks[0].image.file.arrayBuffer(), await plan.tasks[4].image.file.arrayBuffer());
+  const covers = plan.tasks.filter(task => task.role === "detail" && task.image.name === "hero.png");
+  const swatches = plan.tasks.filter(task => task.role === "swatch");
+  assert.ok(swatches.every(task => !task.deriveSwatch));
+  for (const [first, second] of [covers, swatches]) {
+    assert.equal(first.image.name, second.image.name, "same base name stays separate by declared path");
+    assert.notDeepEqual(await first.image.file.arrayBuffer(), await second.image.file.arrayBuffer());
+  }
 });
 
 test("never assigns one color's cover, a top-level square, or an ambiguous supply row to another color", () => {
   const images = assets.map(descriptor).concat(descriptor(["square", "square.png"]));
   const uncertain = structuredClone(product);
   uncertain.variantGroups[0].options[0].squareImagePath = "";
+  uncertain.variantGroups[0].options[0].swatchImagePath = "";
   uncertain.variantGroups[0].options[1].imagePath = "black/hero.png";
   const plan = buildSheinImagePlan({ product: uncertain, variant, rows, images,
     tables: { ...tables, supply: [["黑色", "S"], ["黑色", "S"], ["白色", "M"]] } });
   assert.equal(plan.tasks.some(task => task.role === "detail"), false);
   assert.deepEqual(planSummary(plan).filter(row => row[1][0] === "黑色"), []);
   assert.ok(plan.issues.some(issue => issue.code === "MEDIA_SQUARE_MISSING"));
+  assert.ok(plan.issues.some(issue => issue.code === "MEDIA_SWATCH_MISSING"));
   assert.equal(plan.issues.filter(issue => issue.code === "MEDIA_HERO_UNVERIFIED").length, 2);
   assert.equal(plan.issues.filter(issue => issue.code === "MEDIA_SKU_ROW_AMBIGUOUS").length, 2);
 });
@@ -103,6 +111,59 @@ test("reports missing required image inputs for the current color and SKU, inclu
     rows: [{ options: ["黑色", "S"] }], tables: { media: [["黑色"]], supply: [["黑色", "S"], ["黑色", "M"]] } });
   assert.deepEqual(plan.tasks, []);
   assert.deepEqual(plan.issues.map(({ code }) => code), [
-    "MEDIA_SHARED_MISSING", "MEDIA_HERO_UNVERIFIED", "MEDIA_SQUARE_MISSING", "MEDIA_SKU_IMAGE_MISSING", "MEDIA_SKU_IMAGE_MISSING",
+    "MEDIA_SHARED_MISSING", "MEDIA_HERO_UNVERIFIED", "MEDIA_SQUARE_MISSING", "MEDIA_SWATCH_MISSING",
+    "MEDIA_SKU_IMAGE_MISSING", "MEDIA_SKU_IMAGE_MISSING",
   ]);
+});
+
+test("reports missing and unreadable swatches for the exact colors and ignores a generic multicolor swatch", () => {
+  const incomplete = structuredClone(product);
+  delete incomplete.variantGroups[0].options[0].swatchImagePath;
+  incomplete.variantGroups[0].options[1].swatchImagePath = "white/unreadable.png";
+  const images = assets.map(descriptor).filter(image => image.path !== "black/hero.png")
+    .concat(descriptor(["swatch", "generic.png"]));
+  const plan = buildSheinImagePlan({ product: { ...incomplete, swatchImagePath: "generic.png" }, variant, rows, images, tables });
+  assert.deepEqual(plan.tasks.filter(task => task.role === "swatch"), []);
+  assert.deepEqual(plan.issues.filter(issue => issue.label.endsWith("色块图")).map(({ label, code }) => [label, code]), [
+    ["Black 色块图", "MEDIA_SWATCH_MISSING"], ["White 色块图", "MEDIA_ASSET_MISSING"],
+  ]);
+});
+
+test("does not substitute a generic single-color swatch for an unsafe explicit path", () => {
+  const selected = { groups: [{ values: ["黑色"] }] };
+  const images = [descriptor(["swatch", "generic.png"])];
+  const plan = buildSheinImagePlan({ product: { variantGroups: [{ options: [{ value: "黑色", swatchImagePath: "../unsafe.png" }] }] },
+    variant: selected, images, tables: { media: [["黑色"]] } });
+  assert.equal(plan.tasks.some(task => task.role === "swatch"), false);
+  assert.ok(plan.issues.some(issue => issue.code === "MEDIA_SWATCH_PATH_INVALID"));
+});
+
+test("derives an omitted swatch only from the matched color's own unique hero", () => {
+  const incomplete = structuredClone(product);
+  for (const option of incomplete.variantGroups[0].options) delete option.swatchImagePath;
+  const images = assets.map(descriptor).concat(descriptor(["swatch", "generic.png"]));
+  const plan = buildSheinImagePlan({ product: incomplete, variant, rows, images, tables });
+  const swatches = plan.tasks.filter(task => task.role === "swatch");
+  assert.deepEqual(swatches.map(task => [task.options, task.image.path, task.deriveSwatch]), [
+    [["黑色"], "black/hero.png", true], [["白色"], "white/hero.png", true],
+  ]);
+  assert.deepEqual(plan.issues, []);
+});
+
+test("uses only live swatches on the exact row and reports an additional media row without source data", () => {
+  const incomplete = structuredClone(product);
+  delete incomplete.variantGroups[0].options[0].swatchImagePath;
+  const images = assets.map(descriptor);
+  const plan = buildSheinImagePlan({ product: incomplete, variant, rows, images, tables: {
+    ...tables, media: [...tables.media, ["蓝色"]], swatches: [["黑色"]],
+  } });
+  assert.deepEqual(plan.tasks.filter(task => task.role === "swatch").map(task => task.options), [["白色"]]);
+  assert.deepEqual(plan.issues.map(({ label, code }) => [label, code]), [["蓝色 色块图", "MEDIA_SWATCH_MISSING"]]);
+});
+
+test("skips swatches when the current SHEIN media table has no swatch column", () => {
+  const plan = buildSheinImagePlan({ product, variant, rows, images: assets.map(descriptor),
+    tables: { ...tables, media: [...tables.media, ["蓝色"]], swatchRequired: false } });
+  assert.equal(plan.tasks.some(task => task.role === "swatch"), false);
+  assert.deepEqual(plan.issues, []);
 });

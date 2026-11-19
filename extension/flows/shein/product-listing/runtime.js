@@ -4,6 +4,7 @@ import { sheinVariantPage } from "./variant-page.js";
 import { sheinRowsPage } from "./rows-page.js";
 import { sheinStockPage } from "./stock-page.js";
 import { buildSheinImagePlan } from "./image-plan.js";
+import { prepareSheinSwatch } from "./swatch-image.js";
 import { getCdp } from "../../../lib/cdp.js";
 
 const sellerOrigin = "https://sellerhub.shein.com";
@@ -305,17 +306,22 @@ export async function replaySheinListing({ tabId, url, input, images = [], signa
   const plan = buildSheinImagePlan({ product, variant, rows, images, tables: table.tables });
   issues.push(...plan.issues);
   const uploads = new Map();
-  for (const { role, options, image } of plan.tasks) {
+  for (const { role, options, image, deriveSwatch } of plan.tasks) {
     const id = JSON.stringify([role, options]);
-    if (!uploads.has(id)) uploads.set(id, { role, options, images: [] });
+    if (!uploads.has(id)) uploads.set(id, { role, options, deriveSwatch, images: [] });
     uploads.get(id).images.push(image);
   }
   const mediaLabels = { detail: "细节图", square: "方形图", swatch: "色块图", variant: "SKU 图" };
-  for (const { role, options, images: selected } of uploads.values()) {
+  for (const { role, options, deriveSwatch, images: selected } of uploads.values()) {
     const label = options.join(" / ") + " · " + mediaLabels[role];
     report("上传并核对 " + label);
     let files;
-    try { files = await Promise.all(selected.map(encodeImage)); }
+    try {
+      if (role === "swatch") {
+        const file = await prepareSheinSwatch(selected[0].file, { derive: deriveSwatch });
+        files = [await encodeImage({ file })];
+      } else files = await Promise.all(selected.map(encodeImage));
+    }
     catch (error) { issues.push({ label, code: "IMAGE_FORMAT", message: error.message }); continue; }
     const uploaded = await pageCall(api, tab, sheinRowsPage, {
       ...pinned, kind: "upload", upload: { role, options, files },
