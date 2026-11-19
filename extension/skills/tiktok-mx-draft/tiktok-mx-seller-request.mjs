@@ -48,8 +48,8 @@ export function mxSellerRequest(body) {
   switch (body?.mode) {
     case "reprice_draft":
       fields(body, ["mode", "sourceId", "draftId", "baselinePricesMXN", "multiplier"]);
-      if (body.multiplier !== 10) throw Error("Expected the approved 10× test price multiplier");
-      return { ...draft(body), baselinePricesMXN: prices(body.baselinePricesMXN), multiplier: 10 };
+      if (![10, 100].includes(body.multiplier)) throw Error("Expected an explicit 10× or 100× test price multiplier");
+      return { ...draft(body), baselinePricesMXN: prices(body.baselinePricesMXN), multiplier: body.multiplier };
     case "publish_draft": {
       fields(body, ["mode", "sourceId", "draftId", "offer"]);
       const { offer } = body;

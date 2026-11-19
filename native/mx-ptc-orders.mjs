@@ -55,8 +55,10 @@ function orderSnapshot(address, labels, requested, beforeReload, select) {
   });
   if (marked.length > 1) throw Error("Seller shows multiple selected order statuses");
   const [urlTab, extraTab] = page.searchParams.getAll("tab");
-  const urlStatus = urlTab === "to_ship" && extraTab === undefined &&
-    controls.some(({ status }) => status === "to_ship") ? "to_ship" : null;
+  const knownUrlStatus = urlTab === "to_ship" ||
+    (urlTab === "all" && !page.searchParams.has("order_status[]"));
+  const urlStatus = knownUrlStatus && extraTab === undefined &&
+    controls.some(({ status }) => status === urlTab) ? urlTab : null;
   const markedStatus = marked[0]?.status ?? null;
   if (markedStatus && urlStatus && markedStatus !== urlStatus) return null;
   const orderStatus = markedStatus ?? urlStatus;
@@ -64,6 +66,7 @@ function orderSnapshot(address, labels, requested, beforeReload, select) {
   if (!supportedOptions.length) return null;
 
   if (select && orderStatus !== requested) {
+    if (document.readyState !== "complete") return null;
     const control = controls.find(({ status }) => status === requested);
     if (!control) throw Error("Requested seller order status is unavailable");
     control.element.click();
@@ -127,10 +130,19 @@ export async function readMxOrders(send, { orderStatus = "all", productId } = {}
       return true;
     }, "Seller order tab did not reach the order page");
     const initial = await poll(() => read(), "Seller order controls did not load");
-    if (initial.orderStatus !== orderStatus) await read(null, true);
-    const selected = await poll(async () => {
+    const isSelected = state => state?.orderStatus === orderStatus && Number.isFinite(state.timeOrigin);
+    let clicks = 0;
+    let nextClick = 0;
+    const selected = isSelected(initial) ? initial : await poll(async () => {
       const state = await read();
-      return state?.orderStatus === orderStatus && Number.isFinite(state.timeOrigin) ? state : null;
+      if (isSelected(state)) return state;
+      if (!state || clicks >= 2 || Date.now() < nextClick) return null;
+      const outcome = await read(null, true);
+      if (outcome?.clicked) {
+        clicks += 1;
+        nextClick = Date.now() + 1000;
+      }
+      return isSelected(outcome) ? outcome : null;
     }, "Requested seller order status did not become selected");
     await call("reload_tab");
 
