@@ -462,7 +462,8 @@ export async function chooseCategory(source, candidates, generate = generateText
   const { results, ptc } = await runWorkers("category", ["category"], { category: instruction },
     async (_name, prompt, signal) => {
       const answer = await generate(prompt + "\n" + JSON.stringify({
-        title: source.title, categories: source.categories, specs: source.specs, description: source.description, candidates,
+        title: source.title, categories: source.categories, specs: source.specs, description: source.description,
+        candidates: candidates.map((c, idx) => idx + ": " + c),
       }), signal);
       const { index } = JSON.parse(answer.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, ""));
       if (!Number.isInteger(index) || index < 0 || index >= candidates.length)
@@ -480,7 +481,12 @@ export async function chooseAttributes(source, catalog, generate = generateText,
     (repair ? " When filling a missing function, select an ordinary use clearly supported by the facts, such as reusable for a rechargeable household appliance. Use a clearly identified material without inferring separate materials from ambiguous compound wording. A packaging material does not establish product material." : "");
   const { results, ptc } = await runWorkers("attributes", ["attributes"], { attributes: instruction },
     async (_name, prompt, signal) => {
-      const answer = await generate(prompt + "\n" + JSON.stringify({ facts, suggestions, catalog: catalog.map(({ name, options, multiple }) => ({ name, options, multiple: !!multiple })) }), signal);
+      const answer = await generate(prompt + "\n" + JSON.stringify({
+        facts, suggestions,
+        catalog: catalog.map(({ name, options, multiple }) => ({
+          name, options: options.map((o, idx) => idx + ": " + o), multiple: !!multiple,
+        })),
+      }), signal);
       const { fields } = JSON.parse(answer.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, ""));
       if (!Array.isArray(fields) || fields.length !== catalog.length) throw Error("Incomplete attribute decisions");
       return Object.fromEntries(fields.map((field, i) => {

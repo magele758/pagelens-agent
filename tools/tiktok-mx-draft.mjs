@@ -152,7 +152,8 @@ function sourceId(url) {
   return id;
 }
 async function extract(id) {
-  for (let i = 0; i < 80; i++) {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
     const el = document.querySelector("#__MODERN_ROUTER_DATA__");
     if (el) {
       const data = Object.values(JSON.parse(el.textContent).loaderData).find(
@@ -387,9 +388,8 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
     path.join(os.tmpdir(), "pagelens-mx-" + id + "-"),
   );
   group = new DraftTabs(id, bridge);
-  const tab = reuseSourceForCreate ? await group.open(url, [drafts], true) : await open(url);
+  const tab = await group.open(url, reuseSourceForCreate ? [drafts] : [], true);
   await waitForSourceTab(tab, url);
-  if (!reuseSourceForCreate) afterOpening?.();
   let data;
   try {
     data = await js(tab, extract, id);
@@ -403,7 +403,7 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
   mark("sourceRead");
   if (!data.title || !data.gallery?.length)
     throw new Error("Product title or gallery missing");
-  if (reuseSourceForCreate) afterOpening?.(tab);
+  afterOpening?.(tab);
   await write(path.join(dir, "source-capture.json"), {
     ...data,
     url,
@@ -1268,8 +1268,9 @@ export async function save(
       // Reload the existing list immediately. A second fresh read is cheaper
       // than waiting on a list document that cannot see the new row yet.
       const identifyUntil = Date.now() + 60000;
+      if (!id) await bridge("activate_tab", { tabId: list });
       for (let i = 0; i < 24 && Date.now() < identifyUntil && !id; i++) {
-        if (i === 0) await sleep(1000);
+        if (i === 0) await sleep(600);
         const saved = await refreshDraftList(list, copy.title, true);
         const fresh = (saved.matches || []).filter((row) => row.id && !seenIds.includes(String(row.id)));
         if (fresh.length > 1) throw new Error("Ambiguous draft match");
@@ -1289,6 +1290,7 @@ export async function save(
     let edit = target?.edit ?? (savedFrom == null
       ? await sellerTab(link, Boolean(knownId && !readOnly))
       : await group.reopenSavedDraft(savedFrom, link));
+    if (!knownId && !readOnly) await bridge("activate_tab", { tabId: edit });
     // One read waits for the editor and captures bilingual text, media and every SKU.
     // Reload explicitly after the initial save, then reuse this persisted snapshot.
     let state = target?.original;
