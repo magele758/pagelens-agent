@@ -170,10 +170,15 @@ export async function sheinStockPage({ href, categoryPath, rows } = {}) {
         const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
         if (!setValue) return fail("STOCK_CONTROL_MISSING", "无法写入 SHEIN 库存输入框。");
         input.focus({ preventScroll: true });
+        if (document.activeElement !== input) return fail("STOCK_CONTROL_MISSING", "SHEIN 未将焦点放在目标库存输入框。");
         const value = String(request.quantity);
-        setValue.call(input, value);
-        input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: value, inputType: "insertText" }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
+        input.select();
+        const inserted = typeof document.execCommand === "function" && document.execCommand("insertText", false, value);
+        if (!inserted) {
+          setValue.call(input, value);
+          input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: value, inputType: "insertText" }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
         if (input.isConnected) input.blur();
         let stableSince = 0;
         if (!await waited(() => {
