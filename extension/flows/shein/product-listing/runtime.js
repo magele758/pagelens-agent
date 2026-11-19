@@ -398,6 +398,10 @@ export async function replaySheinListing({ tabId, url, input, images = [], refer
       issues.push({ key: field.key, label: field.label, code: "FIELD_NEEDS_REVIEW", message: field.error || "SHEIN 当前类目要求填写此项。" });
     }
   }
+  if (advisor && referenceImages.length && !advisor.canInspectImages &&
+      fields.some(field => /材质|material/iu.test(field.label) && (field.error || field.required && blank(field)))) {
+    issues.push({ label: "商品材质", code: "VISION_UNAVAILABLE", message: "当前未配置识图模型，可补充材质说明或在设置中配置识图模型。" });
+  }
   const mediaReview = await pageCall(api, tab, sheinRowsPage, { ...pinned, kind: "inspect" }, signal);
   if (!mediaReview.ok) return outcome(mediaReview, "图片核对");
   for (const issue of mediaReview.validation || []) {

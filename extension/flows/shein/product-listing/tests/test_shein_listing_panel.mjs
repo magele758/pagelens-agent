@@ -153,9 +153,11 @@ test("starts with one customer action, scopes photos separately, and displays on
   assert.equal(get("inspect"), null);
   assert.equal(get("json"), null);
   assert.doesNotMatch(get("dialog").textContent, /JSON|试填/);
+  describe("上一件商品的描述");
   get("pick").click();
   await tick();
   assert.equal(get("directory-status").textContent, "Cup");
+  assert.equal(get("description").value, "");
   assert.equal(get("upload-row").hidden, false);
   assert.match(get("category").textContent, /家居 › 水具/);
   describe("杯身是不锈钢");

@@ -140,7 +140,6 @@ export function bindSheinListingPanel({
     if (!directory) return report();
     const loaded = await readSheinProductDirectory(directory, { signal });
     if (!current()) return;
-    const hadSelection = Boolean(selectedProduct());
     products = loaded.products;
     product.replaceChildren(...products.map((entry, index) =>
       Object.assign(document.createElement("option"), { value: index, textContent: entry.title })));
@@ -150,7 +149,7 @@ export function bindSheinListingPanel({
     if (loaded.products.length) {
       summary.textContent = products.length === 1 ? products[0].title : `${loaded.name} · ${products.length} 件商品`;
       get("pick").textContent = "更换商品目录";
-      if (hadSelection) description.value = "";
+      description.value = "";
       report(loaded.issues.length ? "已导入可读取的商品。" : "");
     } else {
       get("pick").textContent = "选择商品目录";
