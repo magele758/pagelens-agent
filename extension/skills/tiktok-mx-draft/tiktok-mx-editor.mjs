@@ -272,7 +272,7 @@ export async function readFreshDocument(url, call, snapshot = snapshotCode(true,
   const initial = await call("run_js", { code: guard + "return performance.timeOrigin" });
   if (!Number.isFinite(initial?.result)) throw Error("Draft document unavailable before reload");
   await call("reload_tab", {});
-  const code = guard + "if(performance.timeOrigin===" + initial.result + ")return null;" + snapshot;
+  const code = "if(location.href==='about:blank')return null;" + guard + "if(performance.timeOrigin===" + initial.result + ")return null;" + snapshot;
   const deadline = Date.now() + 20000;
   do {
     try {

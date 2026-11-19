@@ -309,16 +309,20 @@ async function optimizeProduct(send, { productId, editorUrl, beforeTitle, afterT
       const readAll = sellerListCode(allUrl, productId);
       const listing = await withSellerTab(send, allUrl, async inList => {
         let observed;
-        for (let attempt = 0; attempt < 10; attempt++) {
+        for (let attempt = 0; attempt < 14; attempt++) {
           observed = attempt === 0
             ? (await inList("run_js", { code: readAll })).result
             : await readFreshDocument(allUrl, inList, readAll);
-          if (observed.title === afterTitle || observed.title !== beforeTitle) break;
-          if (attempt < 9) await new Promise(resolve => setTimeout(resolve, 2500));
+          if (observed.status === "under_review" && observed.title === afterTitle) break;
+          if (observed.title === afterTitle && observed.canEdit) break;
+          if (observed.title && observed.title !== beforeTitle && observed.title !== afterTitle) break;
+          if (attempt < 13) await new Promise(resolve => setTimeout(resolve, 2500));
         }
         return observed;
       }, true);
-      if (listing.title === beforeTitle && !listing.canEdit && signal.messages?.some(m => /提交成功|更新成功|发布成功/.test(m)))
+      if (listing.status === "under_review" && listing.title === afterTitle)
+        return { productId, title: afterTitle, status: "optimization_under_review", submitted: true, verified: false, signal, review: listing };
+      if ((listing.title === beforeTitle || !listing.canEdit) && signal.messages?.some(m => /提交成功|更新成功|发布成功/.test(m)) && listing.title !== afterTitle)
         return { productId, title: afterTitle, status: "optimization_under_review", submitted: true, verified: false, signal, review: listing };
       if (listing.title !== afterTitle) throw Error("The updated title did not appear on the exact listing");
       const verifyEditor = async inEditor => {
