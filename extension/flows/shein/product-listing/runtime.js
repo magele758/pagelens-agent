@@ -5,7 +5,7 @@ import { sheinRowsPage } from "./rows-page.js";
 import { sheinStockPage } from "./stock-page.js";
 import { buildSheinImagePlan } from "./image-plan.js";
 import { prepareSheinSwatch } from "./swatch-image.js";
-import { resolveSheinCategory } from "./category-search.js";
+import { rememberVerifiedSheinCategory, resolveSheinCategory } from "./category-search.js";
 import { createListingFieldCache, recoverListingFields } from "../../shared/listing/adaptive-fields.js";
 import { createListingAdvisor } from "../../shared/listing/listing-advisor.js";
 import { getCdp } from "../../../lib/cdp.js";
@@ -21,7 +21,12 @@ const object = value => value && typeof value === "object" && !Array.isArray(val
 const array = value => Array.isArray(value) ? value : [];
 const english = value => /[a-z]/iu.test(clean(value)) && !/\p{Script=Han}/u.test(clean(value)) ? clean(value) : "";
 const key = value => clean(value).normalize("NFKC").replace(/\s+/gu, "").toLowerCase();
-const optionKey = value => ({ color: "颜色", colour: "颜色", size: "尺码" })[key(value)] || key(value);
+const optionKey = value => {
+  const name = key(value);
+  const bilingual = /^([\p{Script=Han}]+)[a-z][a-z-]*$/u.exec(name);
+  return ({ color: "颜色", colour: "颜色", size: "尺码" })[name] || bilingual?.[1] || name;
+};
+const unique = values => values.length === 1 ? values[0] : undefined;
 
 function route(href) {
   try {
@@ -91,8 +96,28 @@ export function normalizeSheinListingInput(raw) {
 }
 
 function pageOption(value, group) {
-  return group?.matches?.find(match => key(match.requested) === key(value))?.value ||
-    group?.values?.find(name => key(name) === key(value)) || value;
+  const requested = key(value);
+  if (!requested) return;
+  const mapped = array(group?.matches).filter(match => key(match.requested) === requested);
+  const expected = mapped.length ? key(unique(mapped)?.value) : requested;
+  if (expected) return unique(array(group?.values).filter(name => key(name) === expected));
+}
+
+const rowId = options => JSON.stringify(array(options).map(key));
+const hasRow = (rows, options) => array(rows).filter(row => rowId(row) === rowId(options)).length === 1;
+
+async function waitForListingRows(inspect, { rows, primary, expectSupply, signal }) {
+  const deadline = Date.now() + 5000;
+  do {
+    const snapshot = await inspect();
+    if (!snapshot.ok) return snapshot;
+    const tables = snapshot.tables || {};
+    const mediaReady = primary.every(value => array(tables.media).filter(row => key(row[0]) === key(value)).length === 1);
+    const rowsReady = rows.every(({ options }) => expectSupply ? hasRow(tables.supply, options) : hasRow(tables.package, options));
+    if (mediaReady && rowsReady || Date.now() >= deadline) return snapshot;
+    await wait(140);
+    signal?.throwIfAborted();
+  } while (true);
 }
 
 async function encodeImage({ file, name }) {
@@ -246,14 +271,23 @@ export async function replaySheinListing({ tabId, url, input, images = [], refer
   if (route(tab.url) === "category") {
     report("核对 SHEIN 商品类目");
     const categoryPage = request => pageCall(api, tab, sheinCategoryPage, request, signal);
+    const categoryAdvisor = advisor?.isAvailable ? advisor : null;
+    const categoryModelStep = (label, method) => categoryAdvisor && (args => {
+      report(label);
+      return categoryAdvisor[method](args);
+    });
     const category = product.categoryPath.length
       ? await categoryPage({ kind: "select", categoryPath: product.categoryPath, brand: product.brand })
-      : await resolveSheinCategory({ callPage: categoryPage, input, suggestKeywords: advisor?.categoryKeywords,
+      : await resolveSheinCategory({ callPage: categoryPage, input,
+        suggestKeywords: categoryModelStep("让 AI 生成 SHEIN 类目搜索词", "categoryKeywords"),
+        chooseCachedCategory: categoryModelStep("让 AI 核对店铺已用类目", "chooseCachedCategory"),
+        chooseCategory: categoryModelStep("让 AI 从 SHEIN 搜索结果选择类目", "chooseCategory"),
         storage: api.storage?.local, signal });
     if (!category.ok) return outcome(category, "商品类目");
     if (!category.selectedPath?.length || !category.canAdvance) {
       return outcome(fail("CATEGORY_NOT_CONFIRMED", "请在 SHEIN 选择商品的末级类目后继续。"), "商品类目");
     }
+    await rememberVerifiedSheinCategory(api.storage?.local, category);
     const advanced = await categoryPage({ kind: "advance", categoryPath: category.selectedPath, brand: product.brand });
     if (!advanced.ok) return outcome(advanced, "商品类目");
     tab = await waitForPage(api, tab.id, "editor", signal, "SHEIN 未进入发布表单，请核对类目和品牌。");
@@ -276,17 +310,42 @@ export async function replaySheinListing({ tabId, url, input, images = [], refer
   if (!variant.ok) return outcome(variant, "商品规格");
   items.push(...variant.items || []);
   issues.push(...variant.issues || []);
-  if (!variant.groups?.some(group => group.values.length)) {
-    issues.push({ label: "主规格", code: "REQUIRED", message: "请填写商品主规格和规格值。" });
+  const primary = unique(array(variant.groups).filter(group => group.label === "主规格"));
+  const primaryInput = product.variantGroups[0];
+  const primaryValues = !primaryInput || optionKey(primaryInput.name) === optionKey(primary?.name)
+    ? (primaryInput ? primaryInput.options.map(option => pageOption(option.value, primary)).filter(Boolean) : array(primary?.values))
+    : [];
+  if (!primaryValues.length && !array(variant.issues).some(issue => /^(?:SPEC_|OPTION|MENU_)/u.test(issue.code))) {
+    issues.push({ label: "主规格", code: "REQUIRED", message: "SHEIN 未回显主规格值，请先补齐主规格，随后才能填写 SKU 和图片。" });
   }
+  const groups = primary ? [primary, ...array(variant.groups).filter(group => group !== primary && group.values?.length)] : [];
+  const requestedGroups = product.variantGroups;
+  const groupsAgree = !requestedGroups.length || requestedGroups.length === groups.length &&
+    requestedGroups.every((group, index) => optionKey(group.name) === optionKey(groups[index]?.name));
   const activeSites = (variant.sites || []).filter(site => site.checked).map(site => site.name);
   if (!activeSites.length) issues.push({ label: "上架站点", code: "REQUIRED", message: "请指定当前商品的上架站点。" });
-  const rows = product.skus.filter(row => row.options.length && row.options.every(Boolean)).map(row => ({
-    ...row,
-    options: row.options.map((name, index) => pageOption(name, variant.groups?.[index])),
-  }));
-  const rowIds = rows.map(row => row.options.map(key).join("\0"));
+  const candidates = primaryValues.length && groupsAgree ? product.skus.flatMap(row => {
+    if (row.options.length !== groups.length) return [];
+    const options = row.options.map((name, index) => pageOption(name, groups[index]));
+    return options.every(Boolean) && primaryValues.some(value => key(value) === key(options[0])) ? [{ ...row, options }] : [];
+  }) : [];
+  if (primaryValues.length && candidates.length < product.skus.length) {
+    issues.push({ label: "SKU 规格", code: "SKU_SPEC_UNVERIFIED",
+      message: `有 ${product.skus.length - candidates.length} 个 SKU 的规格组合尚未在 SHEIN 核对。` });
+  }
+  const rowIds = candidates.map(row => rowId(row.options));
   if (rowIds.length !== new Set(rowIds).size) return outcome(fail("SKU_DUPLICATE", "存在规格完全相同的多行 SKU，请核对资料。"), "SKU");
+  const inspectRows = () => pageCall(api, tab, sheinRowsPage, { ...pinned, kind: "inspect" }, signal);
+  let rows = [];
+  if (primaryValues.length) {
+    report("等待 SHEIN 生成规格图片和 SKU 表格");
+    const current = await waitForListingRows(inspectRows, { rows: candidates, primary: primaryValues,
+      expectSupply: activeSites.length > 0, signal });
+    if (!current.ok) return outcome(current, "SKU 表格");
+    rows = candidates.filter(({ options }) => hasRow(current.tables?.supply, options) || hasRow(current.tables?.package, options));
+    if (rows.length < candidates.length) issues.push({ label: "SKU 表格", code: "SKU_ROWS_NOT_READY",
+      message: `SHEIN 未生成 ${candidates.length - rows.length} 个规格对应的唯一 SKU 行。` });
+  }
   report("填写价格、包装和产品尺寸");
   const table = await pageCall(api, tab, sheinRowsPage, {
     ...pinned, kind: "fill", rows, dimensions: product.dimensions, expectSupply: activeSites.length > 0,
@@ -295,9 +354,12 @@ export async function replaySheinListing({ tabId, url, input, images = [], refer
   items.push(...table.items || []);
   const pendingSupply = (table.issues || []).filter(issue => issue.supply);
   issues.push(...(table.issues || []).filter(issue => !issue.supply));
-  const stock = rows.filter(row => row.quantity !== undefined && row.quantity !== null && row.quantity !== "").map(row => ({
+  const requestedStock = rows.filter(row => row.quantity !== undefined && row.quantity !== null && row.quantity !== "");
+  const stock = requestedStock.filter(row => hasRow(table.tables?.supply, row.options)).map(row => ({
     options: row.options, quantity: row.quantity, siteLabel: row.siteLabel || (activeSites.length === 1 ? activeSites[0].replace(/站$/u, "") : ""),
   }));
+  if (stock.length < requestedStock.length) issues.push({ label: "库存", code: "SKU_STOCK_ROWS_NOT_READY",
+    message: `SHEIN 尚未显示 ${requestedStock.length - stock.length} 个可核对的库存行。` });
   if (stock.length) {
     report("填写并核对各规格库存");
     const inventory = await replayInventory(api, tab, { ...pinned, rows: stock }, signal, () => report("用浏览器原生输入复核库存"));
@@ -306,7 +368,8 @@ export async function replaySheinListing({ tabId, url, input, images = [], refer
       issues.push(...inventory.issues || []);
     } else issues.push({ label: "库存", code: inventory.code, message: inventory.message });
   }
-  const plan = buildSheinImagePlan({ product, variant, rows, images, tables: table.tables });
+  const plan = primaryValues.length ? buildSheinImagePlan({ product, variant: { ...variant, groups }, rows, images, tables: table.tables })
+    : { issues: [], tasks: [] };
   issues.push(...plan.issues);
   const uploads = new Map();
   for (const { role, options, image, deriveSwatch } of plan.tasks) {
@@ -399,10 +462,11 @@ export async function replaySheinListing({ tabId, url, input, images = [], refer
     }
   }
   if (advisor && referenceImages.length && !advisor.canInspectImages &&
-      fields.some(field => /材质|material/iu.test(field.label) && (field.error || field.required && blank(field)))) {
+      fields.some(field => /材质|\bmaterials?\b/iu.test(field.label) && !/危险品|hazardous/iu.test(field.label) &&
+        (field.error || field.required && blank(field)))) {
     issues.push({ label: "商品材质", code: "VISION_UNAVAILABLE", message: "当前未配置识图模型，可补充材质说明或在设置中配置识图模型。" });
   }
-  const mediaReview = await pageCall(api, tab, sheinRowsPage, { ...pinned, kind: "inspect" }, signal);
+  const mediaReview = await inspectRows();
   if (!mediaReview.ok) return outcome(mediaReview, "图片核对");
   for (const issue of mediaReview.validation || []) {
     if (!issues.some(existing => existing.label === issue.label && existing.message === issue.message)) issues.push(issue);

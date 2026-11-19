@@ -1,5 +1,6 @@
 /** Runs in the seller page. Keep the injected function self-contained. */
-export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, brand, keyword, preferredPath, storeKey } = {}) {
+export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, brand, keyword, preferredPath, sourcePaths, storeKey,
+  probe = false } = {}) {
   const clean = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const route = url => url.pathname === "/" && /^#\/(?:spmc\/commodities-category|spmp\/commoditiesCategory)\/followsales-pro\/list\/?(?:\?|$)/u.test(url.hash);
   const onPage = () => window === window.top && href === location.href &&
@@ -51,6 +52,10 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
   function currentStore() {
     const id = /^(?:(?:半托管|全托管|跨境|自运营|本地)\s*)?店铺\s*[:：]?\s*(GS\d{4,20})$/iu;
     const identities = new Set(texts(document, value => id.test(value)).map(node => id.exec(label(node))?.[1]?.toUpperCase()));
+    const shopHeader = '[class*="soc-fe-sso-sdk_userInfo"] [class*="soc-fe-sso-sdk_companyName"]';
+    for (const node of matches(document, shopHeader, item => /^GS\d{4,20}$/iu.test(label(item)))) {
+      identities.add(label(node).toUpperCase());
+    }
     return identities.size === 1 ? [...identities][0] : "";
   }
   const storeMatches = () => storeKey == null || (typeof storeKey === "string" && storeKey.toUpperCase() === currentStore());
@@ -88,8 +93,12 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
 
   function selectedPath(page, expected = [], columns = categoryColumns(page)) {
     const leaf = columns.at(-1);
-    if (!leaf?.column.matches('[class*="spmc_lastPanel_"]')) return [];
-    const observed = columns.map(({ options }) => one(options.filter(({ node }) => selectedRow(node)))?.name);
+    const committed = columns.map(({ options }) => one(options.filter(({ node }) => selectedRow(node))));
+    const terminal = committed.at(-1)?.node;
+    if (!terminal || terminal.matches('[data-leaf="false"],[data-is-leaf="false"]') ||
+        !leaf.column.matches('[class*="spmc_lastPanel_"]') &&
+        (terminal.children.length !== 1 || !terminal.firstElementChild.matches(itemLabelSelector))) return [];
+    const observed = committed.map(option => option?.name);
     if (observed.some(name => !name) || expected.length &&
         (expected.length !== observed.length || expected.some((name, index) => name !== observed[index]))) return [];
     const receipt = texts(page.footer, exact(observed.at(-1)));
@@ -208,6 +217,25 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
     return usable(nearest) ? { region: nearest, rows: [] } : null;
   }
 
+  function chooseSearchResult(rows) {
+    const fold = value => clean(value).toLowerCase();
+    const pathKey = path => JSON.stringify(path.map(fold));
+    if (requested.length) return one(rows.filter(({ path }) => pathKey(path) === pathKey(requested)));
+    const source = (Array.isArray(sourcePaths) ? sourcePaths : []).filter(Array.isArray).slice(0, 8);
+    const byContext = path => Math.max(0, ...source.map(parts => {
+      const ancestors = parts.slice(0, -1).map(fold);
+      return path.slice(0, -1).filter(name => ancestors.includes(fold(name))).length;
+    }));
+    const exactPaths = new Set(source.map(pathKey));
+    const choices = rows.filter(({ path }) => fold(path.at(-1)) === fold(query) || exactPaths.has(pathKey(path)));
+    if (!choices.length) return null;
+    const choiceScore = ({ path }) => Number(exactPaths.has(pathKey(path))) * 10 + byContext(path);
+    const bestScore = Math.max(...choices.map(choiceScore));
+    const best = choices.filter(row => choiceScore(row) === bestScore);
+    const preferred = Array.isArray(preferredPath) ? pathKey(preferredPath) : "";
+    return one(best) || one(best.filter(({ path }) => pathKey(path) === preferred));
+  }
+
   async function searchCategory(original) {
     if (!storeMatches()) return fail("CATEGORY_STORE_CHANGED", "当前 SHEIN 店铺已切换，请重新开始商品流程。");
     const input = searchInput(original);
@@ -245,9 +273,13 @@ export async function sheinCategoryPage({ href, kind = "inspect", categoryPath, 
     }
     const approved = current.rows.filter(({ node, path }) => found.rows.some(row =>
       row.node === node && JSON.stringify(row.path) === JSON.stringify(path)));
-    const preferred = Array.isArray(preferredPath) ? JSON.stringify(preferredPath.map(clean)) : "";
-    const target = approved.find(({ path }) => JSON.stringify(path) === preferred) || approved[0];
-    if (!target || !enabled(target.node)) return fail("CATEGORY_SEARCH_CHANGED", "SHEIN 分类搜索结果已变化，请重试。");
+    if (!approved.length) return fail("CATEGORY_SEARCH_CHANGED", "SHEIN 分类搜索结果已变化，请重试。");
+    const suggestions = approved.map(({ path }) => path).sort((a, b) => Number(b.at(-1) === query) - Number(a.at(-1) === query)).slice(0, 16);
+    if (probe === true) return { ok: true, status: "candidates", suggestions };
+    const target = chooseSearchResult(approved);
+    if (!target) return { ...fail("CATEGORY_SEARCH_UNCERTAIN", `「${query}」的搜索结果无法确定唯一匹配的末级分类。`),
+      suggestions };
+    if (!enabled(target.node)) return fail("CATEGORY_SEARCH_CHANGED", "SHEIN 分类搜索结果已变化，请重试。");
     target.node.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     if (!onPage() || blocked() || !storeMatches() || !enabled(target.node)) return fail("PAGE_CHANGED", "SHEIN 分类结果已变化。");
     target.node.click();

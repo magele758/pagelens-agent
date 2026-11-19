@@ -94,3 +94,23 @@ test("sends category and field instructions with only the selected product photo
   assert.match(content[0].text, /纯金属/u);
   assert.match(content[1].image_url.url, /^data:image\/png;base64,/u);
 });
+
+test("judges category choices only by supplied whole path indices", async () => {
+  const calls = [];
+  const replies = ['{"index":null,"keywords":["中筒袜","袜子"]}', '{"index":27}', '{"index":1}'];
+  const advisor = createListingAdvisor({
+    settings: { text: { baseUrl: "http://localhost:1234/v1", model: "text" } },
+    product: { title: "成人日常中筒袜" },
+    async request(model, payload) {
+      calls.push(JSON.parse(payload.messages.at(-1).content));
+      return replies.shift();
+    },
+  });
+  const candidates = [["运动&户外", "冬日运动", "滑雪袜"], ["女士服装", "袜子", "中筒袜"]];
+  assert.equal(advisor.isAvailable, true);
+  assert.deepEqual(await advisor.chooseCachedCategory({ candidates, hints: ["日常中筒袜"] }), { index: null, keywords: ["中筒袜", "袜子"] });
+  assert.equal(await advisor.chooseCategory({ candidates }), null);
+  assert.equal(await advisor.chooseCategory({ candidates }), 1);
+  assert.deepEqual(calls[0].candidates, candidates.map((path, index) => ({ index, path })));
+  assert.deepEqual(calls[0].hints, ["日常中筒袜"]);
+});

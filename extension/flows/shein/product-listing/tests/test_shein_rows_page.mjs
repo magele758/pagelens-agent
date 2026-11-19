@@ -72,7 +72,7 @@ function fixture(t) {
     const result = await dom.window.eval(`(${sheinRowsPage})(${JSON.stringify({ href, categoryPath, ...args })})`);
     return JSON.parse(JSON.stringify(result));
   };
-  return { run, document, window: dom.window, publishes: () => publishes, saves: () => saves };
+  return { run, table, document, window: dom.window, publishes: () => publishes, saves: () => saves };
 }
 
 test("reads split SHEIN tables and updates only the matching SKU across different header and row orders", async t => {
@@ -110,6 +110,18 @@ test("rejects unbound categories, duplicate SKU rows and invalid positive amount
   assert.deepEqual(duplicate.items, []);
   assert.equal(duplicate.issues[0].code, "SHEIN_ROW_FIELD");
   assert.ok([...document.querySelectorAll("#supply input")].every(input => input.value === ""));
+});
+
+test("writes the supplied sock shaft height in its own centimeter column", async t => {
+  const { run, table, document } = fixture(t);
+  table("size", ["宽度 (cm)", "筒高(cm)", "长度 (cm)", "高度 (cm)"], [Array(4).fill("<input>")]);
+  const heights = () => [...document.querySelectorAll("#size input")].map(input => input.value);
+  assert.deepEqual((await run({ kind: "fill", dimensions: { widthCm: 8, lengthCm: 21, heightCm: 10 } })).issues, []);
+  assert.deepEqual(heights(), ["8", "", "21", "10"]);
+  const supplied = await run({ kind: "fill", dimensions: { shaftHeightCm: 17.5 } });
+  assert.deepEqual(supplied.issues, []);
+  assert.deepEqual(supplied.items, [{ label: "产品筒高 (cm)", status: "filled" }]);
+  assert.deepEqual(heights(), ["8", "17.5", "21", "10"]);
 });
 
 test("waits for the requested supply row and its price and merchant-code inputs, even when other SKUs are already visible", async t => {

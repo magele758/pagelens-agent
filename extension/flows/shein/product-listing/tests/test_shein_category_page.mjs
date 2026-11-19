@@ -84,8 +84,10 @@ function fixture(t, { href = url, withBrand = false, search = false } = {}) {
     const mug = [...path.slice(0, -1), "马克杯"];
     const suggestions = {
       旧词: [{ path }],
-      马克杯: [{ path: path.slice(0, -1), branch: true }, { path, disabled: true }, { path: mug }, { path }],
-      同类马克杯: [{ path: mug }, { path }],
+      马克杯: [{ path: path.slice(0, -1), branch: true }, { path, disabled: true },
+        { path: [...path.slice(0, -1), "保温、保冷马克杯"] }, { path: mug }],
+      杯子: [{ path: mug }, { path }],
+      袜子: [{ path: ["运动&户外", "冬日运动", "滑雪", "滑雪袜"] }],
     };
     function show(term) {
       popup.hidden = false;
@@ -192,7 +194,7 @@ test("refuses duplicate rows at the same level without changing the selected cat
   assert.equal(advances(), 0);
 });
 
-test("searches only the category box and waits for first eligible result instead of old suggestions", async t => {
+test("waits for the category search and prioritizes an exact leaf over a specialized result", async t => {
   const { run, document, categoryTerms, searchClicks, advances, publishes } = fixture(t, { search: true });
   assert.equal((await run()).storeKey, "GS12345678");
   const result = await run({ kind: "search", keyword: "马克杯", storeKey: "GS12345678" });
@@ -207,13 +209,55 @@ test("searches only the category box and waits for first eligible result instead
   assert.equal(publishes(), 0);
 });
 
-test("keeps a live matched cached terminal path and stops if the seller store changed", async t => {
+test("chooses an exact source taxonomy path and stops if the seller store changed", async t => {
   const { run, searchClicks, advances } = fixture(t, { search: true });
   assert.equal((await run({ kind: "search", keyword: "马克杯", storeKey: "GS00000000" })).code, "CATEGORY_STORE_CHANGED");
   assert.deepEqual(searchClicks, []);
-  const result = await run({ kind: "search", keyword: "同类马克杯", preferredPath: path, storeKey: "GS12345678" });
+  const result = await run({ kind: "search", keyword: "杯子", sourcePaths: [path], storeKey: "GS12345678" });
   assert.equal(result.ok, true);
   assert.deepEqual(result.selectedPath, path);
   assert.deepEqual(searchClicks, [path]);
+  assert.equal(advances(), 0);
+});
+
+test("leaves unrelated search results unselected even when a specialized path is cached", async t => {
+  const { run, searchClicks } = fixture(t, { search: true });
+  const skiSocks = ["运动&户外", "冬日运动", "滑雪", "滑雪袜"];
+  const result = await run({ kind: "search", keyword: "袜子", preferredPath: skiSocks, storeKey: "GS12345678" });
+  assert.equal(result.code, "CATEGORY_SEARCH_UNCERTAIN");
+  assert.deepEqual(result.suggestions, [skiSocks]);
+  assert.deepEqual(searchClicks, []);
+  assert.deepEqual((await run()).selectedPath, []);
+});
+
+test("search probes have no category click and exact pinned paths must still be live", async t => {
+  const { run, searchClicks, advances } = fixture(t, { search: true });
+  const mug = [...path.slice(0, -1), "马克杯"];
+  const result = await run({ kind: "search", keyword: "马克杯", storeKey: "GS12345678", probe: true });
+  assert.equal(result.status, "candidates");
+  assert.deepEqual(result.suggestions, [mug, [...path.slice(0, -1), "保温、保冷马克杯"]]);
+  assert.deepEqual(searchClicks, []);
+  const disappeared = await run({ kind: "search", keyword: "马克杯", storeKey: "GS12345678", categoryPath: path });
+  assert.equal(disappeared.code, "CATEGORY_SEARCH_UNCERTAIN");
+  assert.deepEqual(searchClicks, []);
+  const selected = await run({ kind: "search", keyword: "马克杯", storeKey: "GS12345678", categoryPath: mug });
+  assert.deepEqual(selected.selectedPath, mug);
+  assert.deepEqual(searchClicks, [mug]);
+  assert.equal(advances(), 0);
+});
+
+test("verifies the terminal row and seller header on categories without the last panel class", async t => {
+  const { run, document, advances } = fixture(t);
+  const header = document.createElement("div");
+  header.className = "shein-components_soc-fe-sso-sdk_userInfo";
+  header.innerHTML = '<span class="shein-components_soc-fe-sso-sdk_companyName">GS98765432</span>';
+  document.querySelector("main").prepend(header);
+  assert.equal((await run()).storeKey, "GS98765432");
+  assert.equal((await run({ kind: "select", categoryPath: path })).ok, true);
+  const panel = document.querySelector('[class*="spmc_lastPanel_"]');
+  panel.classList.remove("spmc_lastPanel_Otzv4");
+  assert.deepEqual((await run()).selectedPath, path);
+  panel.querySelector('[class*="spmc_selected_"]').append(document.createElement("i"));
+  assert.deepEqual((await run()).selectedPath, []);
   assert.equal(advances(), 0);
 });

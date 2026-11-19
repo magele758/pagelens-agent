@@ -1,7 +1,7 @@
 /** Serialized into the verified SHEIN add-product page. */
 export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows = [], dimensions, upload, expectSupply = false } = {}) {
   const clean = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
-  const measureHeaders = { widthCm: "宽度", lengthCm: "长度", heightCm: "高度", diameterCm: "直径" };
+  const measureHeaders = { widthCm: "宽度", shaftHeightCm: "筒高", lengthCm: "长度", heightCm: "高度", diameterCm: "直径" };
   const supplyFields = [
     { key: "priceUsd", header: /^价格\s*\(USD\)/u, label: "价格 (USD)", numeric: true },
     { key: "sellerSku", header: /^商家SKU/u, label: "商家 SKU" },
@@ -372,8 +372,9 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     await write(() => {
       const table = refs.size();
       const row = table && one(tableRows(table));
-      const index = table && columns(table).findIndex(header => header === name + " (cm)");
-      return row && index >= 0 && writeable(row.cells[index]);
+      const index = one(columns(table).flatMap((header, position) =>
+        header.replace(/\s+(?=\(cm\)$)/iu, "").toLowerCase() === name + "(cm)" ? [position] : []));
+      return row && index !== undefined && writeable(row.cells[index]);
     }, dimensions[key], "产品" + name + " (cm)", { numeric: true });
   }
   return { ok: true, items, issues, tables: state() };

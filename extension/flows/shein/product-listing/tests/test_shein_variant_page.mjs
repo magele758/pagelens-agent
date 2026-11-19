@@ -10,11 +10,15 @@ const product = {
   sites: ["美国站"],
 };
 
-function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondSlot = false } = {}) {
+function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondSlot = false, searchable = false, addSecond = false } = {}) {
   const dom = new JSDOM(`<main>
     <div class="spmp_style__commodityCategoryItem--X"><span class="spmp_style__categoryInfo--X">家居&amp;生活 &gt; 厨房&amp;餐厅 &gt; 饮具 &gt; 真空瓶和保温杯</span></div>
-    <div id="main" class="spmp_style__specContentRow--X"></div>
-    ${secondSlot ? '<div id="second" class="spmp_style__specContentRow--X"></div>' : ''}
+    <div class="spec_info_body">
+      <div id="main" class="spmp_style__specContentRow--X"></div>
+      ${secondSlot ? '<div id="second" class="spmp_style__specContentRow--X"></div>' : ''}
+      ${addSecond ? '<button id="add-spec">添加规格类型</button>' : ''}
+    </div>
+    <button id="other-add-spec">添加规格类型</button>
     <section class="so-form-item publish_site">
       <label class="so-checkinput so-checkinput-checkbox-container"><input type="checkbox">全选</label>
       <label class="so-checkinput so-checkinput-checkbox-container"><input type="checkbox">美国站</label>
@@ -29,24 +33,24 @@ function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondS
     return this.closest("[hidden]") ? [] : [{ x: 1, y: 1, height: 20, width: 80 }];
   };
   const clicks = { publish: 0, save: 0, remove: 0, menus: 0 };
+  const searches = [];
   for (const id of ["publish", "save"]) document.getElementById(id).onclick = () => clicks[id]++;
 
   const makeGroup = (id, label, type, values) => {
     let menu;
     const row = document.getElementById(id);
-    const open = (role, choices, callback) => {
+    const open = (role, choices, callback, search) => {
       if (menu?.isConnected) { menu.remove(); return; }
       menu = document.createElement('div');
       menu.className = 'so-list so-hidable so-hidable-animation-240 ' +
         (role === 'type' ? 'so-select-options so-select-control-keyboard' : 'so-select-box-list');
       const current = menu;
       clicks.menus++;
-      setTimeout(() => {
-        menu.style.opacity = "1";
-        current.classList.add('so-hidable-show');
-        const scroll = document.createElement('div');
-        scroll.className = 'so-scroll-inner';
-        for (const [display, value] of choices) {
+      const scroll = document.createElement('div');
+      scroll.className = 'so-scroll-inner';
+      const renderChoices = items => {
+        scroll.replaceChildren();
+        for (const [display, value] of items) {
           const item = document.createElement(role === 'type' ? 'a' : 'label');
           item.className = 'so-checkinput so-checkinput-radio-container so-select-option so-select-option-ltr';
           if (role === 'type') {
@@ -71,8 +75,21 @@ function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondS
           };
           scroll.append(item);
         }
-        current.append(scroll);
+      };
+      current.append(scroll);
+      setTimeout(() => {
+        current.style.opacity = "1";
+        current.classList.add('so-hidable-show');
+        renderChoices(choices);
       }, 160);
+      if (search) search.oninput = () => {
+        searches.push(search.textContent);
+        current.setAttribute('aria-busy', 'true');
+        setTimeout(() => {
+          renderChoices([["粉色 Pink", "粉色"], ["浅粉色 Light Pink", "浅粉色"]]);
+          current.removeAttribute('aria-busy');
+        }, 350);
+      };
       current.style.opacity = "0";
       document.body.append(current);
     };
@@ -100,19 +117,34 @@ function fixture(t, { preset = "", initial = [], duplicateWhite = false, secondS
       const empty = document.createElement('div');
       empty.className = 'so-select';
       empty.innerHTML = '<div class="so-select-result so-select-empty"><div class="so-input-placeholder so-select-ellipsis"><span>请选择或自定义</span></div></div>';
+      if (searchable) empty.firstChild.insertAdjacentHTML('beforeend', '<div class="so-select-input" contenteditable="true" tabindex="0">﻿</div>');
       const colors = [["黑色 Black", "黑色"], ["白色 White", "白色"], ...(duplicateWhite ? [["白色 White", "白色"]] : [])];
-      empty.firstChild.onclick = () => open("value", type === "颜色" ? colors : [["均码 One Size", "均码"]], value => values.push(value));
+      empty.firstChild.onclick = event => {
+        const search = empty.querySelector('[contenteditable]');
+        if (event.target !== search) open("value", type === "颜色" ? colors : [["均码 One Size", "均码"]], value => values.push(value), search);
+      };
       row.append(empty);
     };
     render();
   };
   makeGroup("main", "* 主规格", preset, [...initial]);
   if (secondSlot) makeGroup("second", "规格类型2", "", []);
+  const testAdditions = [];
+  const add = document.getElementById('add-spec');
+  if (add) add.onclick = () => {
+    testAdditions.push('scope');
+    setTimeout(() => {
+      add.insertAdjacentHTML('beforebegin', '<div id="second" class="spmp_style__specContentRow--X"></div>');
+      makeGroup('second', '规格类型2', '', []);
+      add.remove();
+    }, 220);
+  };
+  document.getElementById('other-add-spec').onclick = () => testAdditions.push('other');
   const run = async (args = {}) => {
     const result = await dom.window.eval(`(${sheinVariantPage})(${JSON.stringify({ href, categoryPath, ...args })})`);
     return JSON.parse(JSON.stringify(result));
   };
-  return { run, clicks, document };
+  return { run, clicks, document, searches, testAdditions };
 }
 
 test("waits for current legacy dropdown options, reads each selected chip, and checks exact sites", async t => {
@@ -148,6 +180,26 @@ test("uses a secondary spec control only when it exists on this page", async t =
   ] } });
   assert.deepEqual(result.issues, []);
   assert.deepEqual(result.groups[1], { label: "规格类型2", name: "尺码", values: ["均码"], matches: [{ requested: "均码", value: "均码" }] });
+});
+
+test("adds a requested secondary group through the in-form control and waits for its newly rendered selectors", async t => {
+  const { run, testAdditions } = fixture(t, { preset: "颜色", initial: ["黑色"], addSecond: true });
+  const result = await run({ kind: "fill", input: { variantGroups: [
+    { name: "颜色", options: [{ value: "黑色" }] }, { name: "尺码", options: [{ value: "均码" }] },
+  ] } });
+  assert.deepEqual(testAdditions, ["scope"]);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.groups.map(({ values }) => values), [["黑色"], ["均码"]]);
+});
+
+test("searches the live contenteditable specification control and selects the exact full color", async t => {
+  const { run, searches } = fixture(t, { preset: "颜色", initial: ["黑色"], searchable: true });
+  const result = await run({ kind: "fill", input: { variantGroups: [{ name: "颜色", options: [
+    { value: "黑色" }, { value: "白色" }, { value: "粉色" },
+  ] }] } });
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(searches, ["粉色"]);
+  assert.deepEqual(result.groups[0].values, ["黑色", "白色", "粉色"]);
 });
 
 test("requires a matching new editor and blocks writes under an unrelated dialog", async t => {

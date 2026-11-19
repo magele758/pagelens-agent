@@ -7,7 +7,7 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
   const one = entries => entries.length === 1 ? entries[0] : null;
   const visible = node => Boolean(node?.isConnected && node.getClientRects().length &&
     !node.closest('[hidden],[inert],[aria-hidden="true"]') && getComputedStyle(node).visibility !== "hidden");
-  const enabled = node => visible(node) && !node.closest(':disabled,[aria-disabled="true"],.so-select-disabled');
+  const enabled = node => visible(node) && !node.closest(':disabled,[aria-disabled="true"],.so-select-disabled,.soui-select-wrapper-disabled');
   const scan = (root, selector) => [...root.querySelectorAll(selector)].filter(visible);
   const active = selector => scan(document, selector);
   const yieldControl = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -27,10 +27,12 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
   const specRowSelector = '[class*="specContentRow--"]';
   const specLabelSelector = '[class*="specContentLabel--"]';
   const typeSelector = '[class*="specAttrSelect--"]';
-  const menuSelector = '.so-select-box-list,.so-select-options';
+  const selectSelector = '.so-select,.soui-select';
+  const menuSelector = '.so-select-box-list,.so-select-options,.soui-select-picker-wrapper.merchant-ui-select-options,.soui-select-dropdown,[role="listbox"]';
   const closedMenu = '.so-hidable-hidden,[aria-hidden="true"],[hidden]';
-  const optionSelector = '[role="option"],.so-select-dropdown-item,.so-select-option';
-  const trigger = select => select.querySelector('.so-select-result,.so-select-selection,.so-select-result-wrapper') || select;
+  const optionSelector = '[role="option"],.so-select-dropdown-item,.so-select-option,.soui-select-dropdown-item,.soui-select-option';
+  const resultSelector = '.so-select-result,.soui-select-result-wrapper';
+  const trigger = select => select.querySelector(resultSelector + ',.so-select-selection,.so-select-result-wrapper') || select;
 
   if (!isRoute()) return fail("PAGE_CHANGED", "SHEIN 新建商品页面已切换。");
   if (!["inspect", "fill"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 规格操作。");
@@ -41,25 +43,34 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
   const withoutBadge = value => clean(value).replace(/\s*(?:重要|Important)$/iu, "");
   const typeKeys = new Map([["color", "颜色"], ["colour", "颜色"], ["size", "尺码"]]);
   const sameType = (left, right) => same(left, right) || (typeKeys.get(key(left)) || key(left)) === (typeKeys.get(key(right)) || key(right));
-  const results = select => one(scan(select, '.so-select-result'));
-  const titleValue = select => clean(one(scan(select, '.so-select-result .so-select-input[title]'))?.getAttribute("title"));
-  const emptyResult = select => results(select)?.classList.contains('so-select-empty');
+  const results = select => one(scan(select, resultSelector).filter(node => node.closest(selectSelector) === select));
+  const placeholder = node => clean(node.getAttribute('placeholder') || node.getAttribute('data-placeholder') || text(node));
+  const valuePlaceholder = value => /^(?:请选择或自定义|Please select or customize)$/iu.test(value);
+  const emptyResult = (select, result) => select.matches('.soui-select-wrapper-empty') || result?.matches('.so-select-empty');
+  const selectedValues = select => {
+    const result = results(select);
+    if (!result || emptyResult(select, result)) return [];
+    const valueNodes = scan(result, '.so-select-input[title],.so-select-ellipsis[title],.soui-select-ellipsis,.soui-select-result-label,.soui-select-result-text,.soui-select-multiple-result-item');
+    return [...new Set(valueNodes.filter(node => !valueNodes.some(other => other !== node && node.contains(other)))
+      .map(node => clean(node.getAttribute('title')) || text(node)).filter(value => value && !valuePlaceholder(value)))];
+  };
   const groupLabel = row => specLabel(one(scan(row, specLabelSelector).filter(node => node.closest(specRowSelector) === row)));
   const groupRows = () => active(specRowSelector).flatMap(row => {
     const label = groupLabel(row);
     if (!/^(?:主规格|(?:规格类型|次规格|副规格|子规格)\s*[\d一二]*)$/u.test(label)) return [];
-    const controls = scan(row, '.so-select').filter(node => node.closest(specRowSelector) === row && !node.parentElement.closest('.so-select'));
+    const controls = scan(row, selectSelector).filter(node => node.closest(specRowSelector) === row && !node.parentElement.closest(selectSelector));
     const type = one(controls.filter(node => node.matches(typeSelector)));
     if (!type) return [];
     const valueControls = controls.filter(node => node !== type);
     const values = one(valueControls.filter(select => {
       const result = results(select);
-      return result?.classList.contains('so-select-empty') && Boolean(
-        one(scan(result, '.so-select-input[placeholder="请选择或自定义"]')) ||
-        one(scan(result, '.so-input-placeholder.so-select-ellipsis').filter(node => text(node) === "请选择或自定义")));
+      return result && (scan(result, 'input[placeholder],[data-placeholder],.so-input-placeholder,.soui-select-placeholder')
+        .some(node => valuePlaceholder(placeholder(node))) ||
+        emptyResult(select, result) && Boolean(select.closest('[class*="specValueItem--"]')));
     }));
-    const selected = valueControls.map(titleValue).filter(Boolean);
-    const name = emptyResult(type) ? "" : titleValue(type) || withoutBadge(text(results(type)));
+    const selected = valueControls.filter(select => select !== values).flatMap(selectedValues);
+    const typeResult = results(type);
+    const name = emptyResult(type, typeResult) ? "" : selectedValues(type)[0] || withoutBadge(text(typeResult));
     return [{ row, label, type, values, name, selected }];
   });
 
@@ -105,9 +116,18 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
     return index === 0 ? one(primary) : one(rows.filter(row => row.label !== "主规格"));
   };
 
+  async function addSecondaryGroup(index) {
+    const section = currentGroup(0)?.row.closest('.spec_info_body');
+    const button = section && one(scan(section, 'button').filter(node => enabled(node) && /^\+?\s*添加规格类型$/u.test(text(node))));
+    if (!button || !onPage() || menus().length) return null;
+    button.click();
+    return await stable(() => currentGroup(index) ? "mounted" : "", 1800) ? currentGroup(index) : null;
+  }
+
   for (const [index, group] of requested.entries()) {
     if (!onPage()) return fail("PAGE_CHANGED", "SHEIN 商品表单已变化。");
     let row = currentGroup(index);
+    if (index && !row) row = await addSecondaryGroup(index);
     if (!row) {
       report(group.name, "SPEC_CONTROL_MISSING", index ? "请先在 SHEIN 添加另一种规格类型。" : "当前分类没有可识别的主规格控件。");
       continue;
@@ -221,7 +241,7 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
       const display = text(node);
       return englishName && display.endsWith(englishName) ? clean(display.slice(0, -englishName.length)) + " " + englishName : display;
     }
-    return text(node?.querySelector('.so-select-option-label,.so-select-dropdown-item-label')) || text(node);
+    return text(node?.querySelector('.so-select-option-label,.so-select-dropdown-item-label,.soui-select-option-label,.soui-select-dropdown-item-label')) || text(node);
   }
 
   function optionRows(menu) {
@@ -230,6 +250,11 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
 
   async function closeMenu(select, menu) {
     if (!menu || !menus().includes(menu)) return true;
+    const focused = document.activeElement;
+    if (focused?.matches('input,textarea,[contenteditable]') && (select.contains(focused) || menu.contains(focused))) {
+      focused.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      focused.blur();
+    }
     if (await stable(() => !menus().includes(menu) ? "closed" : "", 420, 60)) return true;
     if (!onPage() || one(menus()) !== menu || !enabled(trigger(select))) return false;
     trigger(select).click();
@@ -242,19 +267,18 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
     control.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     control.click();
     let menu;
-    const stableOptions = await stable(() => {
+    const menuState = () => {
       menu = one(menus());
-      if (!menu) return "";
+      if (!menu || menu.getAttribute('aria-busy') === 'true') return "";
       const options = optionRows(menu).map(optionLabel).filter(Boolean);
-      if (!options.length) return "";
+      if (!options.length && !searchControl(select, menu)) return "";
       const { top, left } = menu.getBoundingClientRect();
       return JSON.stringify([options, Math.round(top), Math.round(left)]);
-    }, 1500, 240);
+    };
+    const stableOptions = await stable(menuState, 1600, 240);
     let result = fail("OPTIONS_NOT_READY", "SHEIN 下拉没有稳定的选项列表。");
     if (stableOptions && menu && one(menus()) === menu) {
-      const rows = optionRows(menu);
-      const exact = rows.filter(node => key(optionLabel(node)) === key(wanted));
-      const matching = exact.length ? exact : rows.filter(node => same(optionLabel(node), wanted));
+      const matching = await findOptions(select, menu, wanted);
       const target = one(matching);
       const picked = optionLabel(target);
       const existing = one(readValues().filter(value => same(picked, value)));
@@ -262,20 +286,65 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
         result = fail(matching.length ? "OPTION_AMBIGUOUS" : "OPTION_MISSING", `SHEIN 无法唯一匹配「${wanted}」。`);
       } else if (existing) {
         result = { ok: true, status: "unchanged", value: existing };
-      } else if (target.matches('[aria-selected="true"],[data-selected="true"],.so-select-option-selected')) {
+      } else if (target.matches('[aria-selected="true"],[data-selected="true"],.so-select-option-selected,.soui-select-dropdown-item-selected')) {
         result = fail("OPTION_ALREADY_SELECTED", "选项可能已选中，未重复点击。");
       } else if (onPage() && enabled(target) && one(menus()) === menu) {
         target.scrollIntoView?.({ block: "nearest" });
         // Legacy link options handle selection in the app. Keep default link navigation from changing the editor route.
         if (target.matches('a')) target.addEventListener("click", event => event.preventDefault(), { once: true });
-        target.click();
-        const selected = await stable(() => {
-          const observed = readValues().filter(value => same(picked, value) || same(value, wanted));
-          return observed.length === 1 ? observed[0] : "";
-        });
-        result = selected ? { ok: true, value: selected } : fail("OPTION_NOT_VERIFIED", `选中「${wanted}」后，SHEIN 未显示选中结果。`);
+        const hit = one(scan(target, '.soui-select-option-inner')) || target;
+        if (enabled(hit)) {
+          hit.click();
+          const selected = await stable(() => {
+            const observed = readValues().filter(value => same(picked, value) || same(value, wanted));
+            return observed.length === 1 ? observed[0] : "";
+          });
+          result = selected ? { ok: true, value: selected } : fail("OPTION_NOT_VERIFIED", `选中「${wanted}」后，SHEIN 未显示选中结果。`);
+        }
       }
     }
     return await closeMenu(select, menu) ? result : fail("MENU_STILL_OPEN", "SHEIN 选项菜单仍打开，请核对页面。");
+  }
+
+  function searchControl(select, menu) {
+    const selector = 'input,textarea,[contenteditable="true"],[contenteditable="plaintext-only"]';
+    return one([...new Set([...scan(menu, selector), ...scan(select, selector)])].filter(node =>
+      enabled(node) && !node.readOnly && (!node.matches('input') || /^(?:text|search)$/u.test(node.type))));
+  }
+
+  function typeSearch(search, value) {
+    search.focus();
+    if (search.matches('[contenteditable]')) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(search);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      if (document.execCommand?.('insertText', false, value)) return;
+      search.textContent = value;
+    } else {
+      const proto = search.matches('textarea') ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(search, value);
+    }
+    search.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: value, inputType: 'insertText' }));
+  }
+
+  async function findOptions(select, menu, wanted) {
+    const matches = () => {
+      const rows = optionRows(menu);
+      const exact = rows.filter(node => key(optionLabel(node)) === key(wanted));
+      return exact.length ? exact : rows.filter(node => same(optionLabel(node), wanted));
+    };
+    const initial = matches();
+    if (initial.length) return initial;
+    const search = searchControl(select, menu);
+    if (!search || !enabled(search) || one(menus()) !== menu || !onPage()) return [];
+    typeSearch(search, wanted);
+    const loaded = await stable(() => {
+      if (one(menus()) !== menu || menu.getAttribute('aria-busy') === 'true') return "";
+      const matching = matches();
+      return matching.length ? JSON.stringify(matching.map(optionLabel)) : "";
+    }, 1900, 240);
+    return loaded && one(menus()) === menu ? matches() : [];
   }
 }
