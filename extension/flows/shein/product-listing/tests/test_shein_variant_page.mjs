@@ -182,6 +182,40 @@ test("uses a secondary spec control only when it exists on this page", async t =
   assert.deepEqual(result.groups[1], { label: "规格类型2", name: "尺码", values: ["均码"], matches: [{ requested: "均码", value: "均码" }] });
 });
 
+test("reads the explicit no-multicolor message only from the specifications section", async t => {
+  const { run, document } = fixture(t, { preset: "默认" });
+  const message = "无主规格发品，默认生成1个SKC，不支持复色，仅支持加码";
+  document.querySelector("main").append(message);
+  assert.equal((await run()).defaultOnly, false);
+  document.querySelector(".spec_info_body").append(message);
+  assert.equal((await run()).defaultOnly, true);
+});
+
+test("reloads absent default-SKC tables by restoring the sole selected native site", async t => {
+  const { run, document } = fixture(t, { preset: "默认" });
+  document.querySelector(".spec_info_body").append("无主规格发品，默认生成1个SKC，不支持复色，仅支持加码");
+  const media = Object.assign(document.createElement("div"), { className: "detail_img_container" });
+  document.querySelector("main").append(media);
+  const [selectAll, us, canada] = document.querySelectorAll(".publish_site input");
+  const changes = [];
+  const request = { kind: "refreshSite", input: { sites: ["美国站"] } };
+  us.checked = true;
+  us.onchange = () => {
+    changes.push(us.checked);
+    if (us.checked) media.innerHTML = '<div class="so-table">图片</div>';
+  };
+
+  assert.equal((await run(request)).code, "SITE_REFRESH_NOT_NEEDED");
+  canada.checked = false;
+  const refreshed = await run(request);
+  assert.equal(refreshed.ok, true);
+  assert.deepEqual(changes, [false, true]);
+  assert.deepEqual(refreshed.sites, [{ name: "美国站", checked: true }, { name: "加拿大站", checked: false }]);
+  assert.equal(selectAll.checked, false);
+  assert.equal((await run(request)).code, "SITE_REFRESH_NOT_NEEDED");
+  assert.deepEqual(changes, [false, true]);
+});
+
 test("adds a requested secondary group through the in-form control and waits for its newly rendered selectors", async t => {
   const { run, testAdditions } = fixture(t, { preset: "颜色", initial: ["黑色"], addSecond: true });
   const result = await run({ kind: "fill", input: { variantGroups: [

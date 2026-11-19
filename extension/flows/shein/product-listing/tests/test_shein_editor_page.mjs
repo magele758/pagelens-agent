@@ -238,3 +238,120 @@ test("waits for linked controls, accepts visually hidden checkboxes and closes o
   assert.equal(dismissed, 1);
   assert.deepEqual(received, ["Ready"]);
 });
+
+test("expands the product attribute group and reads required labels without validation errors", async t => {
+  const { run, document, publications, saves } = fixture(t);
+  const header = document.createElement("div");
+  header.className = "shein-components_soc-fe-sso-sdk_userInfo";
+  header.innerHTML = '<span class="shein-components_soc-fe-sso-sdk_companyName">GS12345678</span>';
+  document.querySelector("main").prepend(header);
+  const group = document.createElement("section");
+  const attribute = document.querySelector("#features").closest(".productAttrItem--hash");
+  attribute.classList.remove("soui-form-item-wrapper-required");
+  const heading = attribute.querySelector(".soui-form-item-label-wrapper");
+  heading.insertAdjacentHTML("afterbegin", '<i aria-hidden="true" style="color: rgb(235, 30, 30)">*</i>');
+  attribute.before(group);
+  group.append(attribute);
+  const toggle = document.createElement("div");
+  toggle.innerHTML = '<span>展开所有属性</span>';
+  group.append(toggle);
+  const outside = document.createElement("button");
+  outside.textContent = "展开所有属性";
+  document.querySelector("main").append(outside);
+  let expansions = 0;
+  outside.onclick = () => { expansions += 10; };
+  toggle.onclick = () => {
+    expansions++;
+    toggle.textContent = "收起所有属性";
+    setTimeout(() => toggle.insertAdjacentHTML("beforebegin", `
+      <div class="productAttrItem--test soui-form-item-wrapper">
+        <label class="soui-form-item-label-wrapper">材质 Material</label><input>
+      </div>
+      <div class="productAttrItem--test soui-form-item-wrapper">
+        <label class="soui-form-item-label-wrapper pseudo-star">连接方式 Connectivity Technology</label><input>
+      </div>
+      <div class="productAttrItem--test soui-form-item-wrapper">
+        <label class="soui-form-item-label-wrapper">键数 Keys Qty</label><input aria-required="true">
+      </div>
+      <div class="productAttrItem--test soui-form-item-wrapper soui-form-item-wrapper-hide-required">
+        <label class="soui-form-item-label-wrapper pseudo-star">键盘类型 Keyboard Types</label><input>
+      </div>
+      <div class="productAttrItem--test soui-form-item-wrapper">
+        <label class="soui-form-item-label-wrapper pseudo-star pseudo-hidden">协议 Protocol</label><input>
+      </div>
+      <div class="productAttrItem--test soui-form-item-wrapper soui-form-item-wrapper-hide-required">
+        <label class="soui-form-item-label-wrapper">原生必填 Native Required</label><input required>
+      </div>`), 55);
+  };
+  const win = document.defaultView;
+  const styles = win.getComputedStyle.bind(win);
+  win.CSS = { supports: () => true };
+  win.getComputedStyle = (node, pseudo) => pseudo ? node.classList.contains("pseudo-star") && pseudo === "::before"
+    ? { content: '"*"', color: "rgb(230, 40, 40)", display: node.classList.contains("pseudo-hidden") ? "none" : "inline" }
+    : { content: "none", color: "rgb(0, 0, 0)" } : styles(node);
+
+  const result = await run({ kind: "review" });
+  const byName = Object.fromEntries(result.fields.map(field => [field.label, field]));
+  assert.equal(expansions, 1);
+  assert.equal(result.storeKey, "GS12345678");
+  assert.equal(byName["产品功能 Product Features"].required, true);
+  assert.equal(byName["产品功能 Product Features"].error, undefined);
+  assert.equal(byName["连接方式 Connectivity Technology"].required, true);
+  assert.equal(byName["键数 Keys Qty"].required, true);
+  assert.equal(byName["材质 Material"].required, false);
+  assert.equal(byName["键盘类型 Keyboard Types"].required, false);
+  assert.equal(byName["协议 Protocol"].required, false);
+  assert.equal(byName["原生必填 Native Required"].required, true);
+  assert.equal(publications() + saves(), 0);
+});
+
+test("repairs empty optional fields and preserves valid values already entered", async t => {
+  const { run, document, setOptions } = fixture(t);
+  const section = document.querySelector("#features").closest(".productAttrItem--hash");
+  section.classList.remove("soui-form-item-wrapper-required");
+  section.querySelector(".soui-form-item-label-wrapper").textContent = "连接方式 Connectivity Technology";
+  setOptions(["有线 Wired", "无线 Wireless"]);
+  const description = document.querySelector(".main_desc textarea");
+  description.value = "已有描述";
+  const repaired = await run({ kind: "repair", input: { values: {
+    "attribute:连接方式 Connectivity Technology": ["有线 Wired"], englishDescription: "另一个描述",
+  } } });
+  assert.deepEqual(repaired.fields.at(-1).value, ["有线 Wired"]);
+  assert.equal(repaired.fields.at(-1).required, false);
+  assert.equal(description.value, "已有描述");
+  assert.equal(repaired.items.length, 1);
+});
+
+test("separates same-name product fields using stable controls and never guesses a label binding", async t => {
+  const { run, document } = fixture(t);
+  const first = document.querySelector(".productAttrItem--hash");
+  const second = first.cloneNode(true);
+  first.dataset.attrId = "base-model";
+  second.dataset.attrId = "variant-model";
+  first.after(second);
+  const snapshot = await run();
+  const modelKeys = snapshot.fields.filter(field => field.label === "产品型号 Product Model").map(field => field.key);
+  assert.deepEqual(modelKeys, ["attribute:产品型号 Product Model [base-model]", "attribute:产品型号 Product Model [variant-model]"]);
+  await run({ kind: "fill", input: { attributes: { 产品型号: "AMBIGUOUS" } } });
+  const intended = await run({ kind: "repair", input: { values: { [modelKeys[1]]: "VARIANT" } } });
+  assert.equal(intended.fields.find(field => field.key === modelKeys[0]).value, "");
+  assert.equal(intended.fields.find(field => field.key === modelKeys[1]).value, "VARIANT");
+});
+
+test("requires distinct source names when two bilingual controls share a translated label", async t => {
+  const { run, document } = fixture(t);
+  const first = document.querySelector(".productAttrItem--hash");
+  const second = first.cloneNode(true);
+  first.querySelector(".soui-form-item-label-wrapper").textContent = "连接方式 Connectivity Technology";
+  second.querySelector(".soui-form-item-label-wrapper").textContent = "连接方式 Connection Method";
+  first.after(second);
+
+  await run({ kind: "fill", input: { attributes: { 连接方式: "有线" } } });
+  assert.equal(first.querySelector("input").value, "");
+  assert.equal(second.querySelector("input").value, "");
+  await run({ kind: "fill", input: { attributes: {
+    连接方式: "通用值", "连接方式 Connectivity Technology": "有线", "Connection Method": "USB-C",
+  } } });
+  assert.equal(first.querySelector("input").value, "有线");
+  assert.equal(second.querySelector("input").value, "USB-C");
+});

@@ -167,3 +167,19 @@ test("skips swatches when the current SHEIN media table has no swatch column", (
   assert.equal(plan.tasks.some(task => task.role === "swatch"), false);
   assert.deepEqual(plan.issues, []);
 });
+
+test("plans the explicit representative color only for the pinned default SKU", () => {
+  const defaultSku = "se261119171434502395170";
+  const chosen = structuredClone(product);
+  chosen.variantGroups[0].options = [{ ...product.variantGroups[0].options[1], swatchImagePath: undefined }];
+  const params = { product: chosen, rows: [{ options: [], imagePath: "white/hero.png" }], images: assets.map(descriptor), defaultSku,
+    tables: { media: [[]], supply: [[]], defaultSku, swatchRequired: false, swatchAvailable: true } };
+  const plan = buildSheinImagePlan(params);
+  assert.deepEqual(plan.issues, []);
+  assert.deepEqual(planSummary(plan), [["detail", [], "white/hero.png"], ["detail", [], "shared/side.png"],
+    ["detail", [], "shared/material.png"], ["square", [], "white/square.png"],
+    ["swatch", [], "white/hero.png"], ["variant", [], "white/hero.png"]]);
+  assert.equal(plan.tasks.find(task => task.role === "swatch").deriveSwatch, true);
+  assert.deepEqual(buildSheinImagePlan({ ...params, product }).tasks, []);
+  assert.deepEqual(buildSheinImagePlan({ ...params, defaultSku: "stale" }).tasks, []);
+});

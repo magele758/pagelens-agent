@@ -221,3 +221,66 @@ test("uses a natural-language description without a directory", async t => {
   assert.equal(calls[0].useActiveTab, true);
   assert.equal(get("results").hidden, true);
 });
+
+test("requires a default SKU choice on the same editor tab and renews consent for image upload", async t => {
+  const { get } = mount(t);
+  const editor = "https://sellerhub.shein.com/#/spmp/commoditiesInfo?mode=add";
+  let tab = { id: 13, url: list };
+  const calls = [];
+  const choices = [{ sellerSku: "KB-BK", label: "黑色 · KB-BK" }, { sellerSku: "KB-WH", label: "白色 · KB-WH" }];
+  const input = { title: "Keyboard", imagePath: "images/hero.jpg", shein: { englishTitle: "USB Keyboard" } };
+  const open = bindSheinListingPanel({
+    getTargetTab: async () => tab,
+    probeAccess: async () => true,
+    pickDirectory: async () => directory("Catalog", { first: product("first", input, { "hero.jpg": image }),
+      second: product("second", { title: "Cup" }) }),
+    replay: async request => {
+      calls.push(request);
+      return calls.length === 1
+        ? { ok: true, tabId: 42, url: editor, defaultSkuChoices: choices }
+        : { ok: true };
+    },
+  });
+  await open();
+  assert.equal(get("default-sku-row").hidden, true);
+  get("pick").click();
+  await tick();
+  get("upload").checked = true;
+  get("run").click();
+  await tick();
+  assert.deepEqual(calls[0].input, input);
+  assert.equal(calls[0].uploadRequested, true);
+  assert.equal(calls[0].images.length, 1);
+  assert.equal(get("default-sku-row").hidden, false);
+  assert.equal(get("default-sku").value, "");
+  assert.deepEqual(Array.from(get("default-sku").options, option => option.value), ["", "KB-BK", "KB-WH"]);
+  assert.equal(get("default-sku-upload").hidden, false);
+  assert.equal(get("upload").checked, true);
+  assert.equal(get("run").disabled, true);
+  assert.equal(get("status").dataset.state, "needs-review");
+
+  get("default-sku").value = "KB-WH";
+  get("default-sku").dispatchEvent(new document.defaultView.Event("change"));
+  assert.equal(get("run").disabled, false);
+  tab = { id: 13, url: editor };
+  get("run").click();
+  await tick();
+  assert.equal(calls.length, 1);
+  assert.match(get("status").textContent, /切回刚才/);
+  tab = { id: 42, url: editor };
+  get("run").click();
+  await tick();
+  assert.equal(calls[1].tabId, 42);
+  assert.deepEqual(calls[1].input.shein, { ...input.shein, defaultSku: "KB-WH" });
+  assert.equal(calls[1].images.length, 1);
+  assert.equal(calls[1].uploadRequested, true);
+  assert.equal(get("status").dataset.state, "verified");
+  assert.equal(get("default-sku-row").hidden, true);
+
+  get("product").value = "1";
+  get("product").dispatchEvent(new document.defaultView.Event("change"));
+  assert.equal(get("default-sku").value, "");
+  get("run").click();
+  await tick();
+  assert.deepEqual(calls[2].input, { title: "Cup" });
+});

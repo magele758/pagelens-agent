@@ -14,7 +14,7 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
   const categorySelector = '[class*="commodityCategoryItem--"] [class*="categoryInfo--"]';
   const category = () => text(one(active(categorySelector))).split(/\s*>\s*/u).filter(Boolean);
   const desiredCategory = Array.isArray(categoryPath) ? categoryPath.map(clean) : [];
-  const modalSelector = 'dialog[open],[role="alertdialog"],[aria-modal="true"],.soui-modal-wrapper,.so-dialog';
+  const modalSelector = 'dialog[open],[role="alertdialog"],[aria-modal="true"],.soui-modal-wrapper,.so-dialog,.so-modal.so-modal-show .so-modal-panel';
   const blocked = () => active(modalSelector).length > 0;
   const isRoute = () => {
     const [path, search = ""] = location.hash.slice(1).split("?");
@@ -35,7 +35,7 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
   const trigger = select => select.querySelector(resultSelector + ',.so-select-selection,.so-select-result-wrapper') || select;
 
   if (!isRoute()) return fail("PAGE_CHANGED", "SHEIN 新建商品页面已切换。");
-  if (!["inspect", "fill"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 规格操作。");
+  if (!["inspect", "fill", "refreshSite"].includes(kind)) return fail("ACTION_UNSUPPORTED", "不支持此 SHEIN 规格操作。");
   if (blocked()) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再继续。");
   if (!onPage()) return fail("CATEGORY_CHANGED", "当前 SHEIN 商品分类与待填资料不一致，请核对。");
 
@@ -82,7 +82,7 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
       const hit = (control.labels?.length === 1 && control.labels[0]) || control.closest('label,.so-checkbox') || control;
       const name = clean(control.getAttribute("aria-label")) || text(hit.querySelector('.so-checkbox-label')) || text(hit);
       if (!visible(hit) || !name || /^(?:全选|全不选|select all)$/iu.test(name)) return [];
-      return [{ name, hit, disabled: control.matches(':disabled,[aria-disabled="true"]'),
+      return [{ name, hit, control, disabled: control.matches(':disabled,[aria-disabled="true"]'),
         checked: control.matches('input') ? control.checked : control.getAttribute("aria-checked") === "true" }];
     });
   }
@@ -92,7 +92,9 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
   const mappings = new Map();
   const report = (label, code, message) => issues.push({ label, code, message });
   const record = (label, status = "verified") => items.push({ label, status });
+  const defaultOnly = () => /无主规格发品.{0,24}默认生成\s*1\s*个\s*SKC.{0,24}不支持复色/iu.test(text(one(active('.spec_info_body'))));
   const receipt = () => ({ ok: true, categoryPath: category(), items, issues,
+    defaultOnly: defaultOnly(),
     groups: groupRows().map(({ label, name, selected }) => ({ label, name, values: selected,
       ...(mappings.has(label) && { matches: mappings.get(label).filter(({ value }) => selected.includes(value)) }) })),
     sites: siteRows().map(({ name, checked }) => ({ name, checked })) });
@@ -108,6 +110,29 @@ export async function sheinVariantPage({ href, categoryPath, kind = "inspect", i
     !unique(requested.map(group => group.name)) || !Array.isArray(requestedSites) || requestedSites.length > 30 ||
     requestedSites.some(site => !ifValidName(site)) || !unique(requestedSites)) {
     return fail("VARIANT_INPUT_INVALID", "商品规格和站点需提供页面上的准确名称，且不能有重名项。");
+  }
+
+  if (kind === "refreshSite") {
+    const name = requestedSites.length === 1 ? clean(requestedSites[0]) : "";
+    const readSite = () => one(siteRows().filter(site => site.name === name && !site.disabled &&
+      site.control.matches('input[type="checkbox"]') && site.hit.matches('label') && enabled(site.hit)));
+    const media = one(active('.detail_img_container'));
+    const initial = name && readSite();
+    if (!defaultOnly() || !initial?.checked || siteRows().filter(site => site.checked).length !== 1 || !media ||
+        media.childElementCount || text(media) || active('[class*="supplyInfoTable--"]').length || menus().length) {
+      return fail("SITE_REFRESH_NOT_NEEDED", "当前上架站点和空白表格不符合重新加载条件。");
+    }
+    initial.hit.click();
+    const wasUnchecked = await stable(() => readSite()?.checked === false ? "unchecked" : "", 1000, 60);
+    const after = readSite();
+    if (!after || !onPage()) return fail("SITE_REFRESH_UNVERIFIED", "上架站点未能恢复，请检查当前页面。");
+    if (!after.checked) after.hit.click();
+    if (!await stable(() => readSite()?.checked === true ? name : "", 1200)) {
+      return fail("SITE_REFRESH_UNVERIFIED", "上架站点未能恢复，请检查当前页面。");
+    }
+    if (!wasUnchecked) return fail("SITE_REFRESH_UNVERIFIED", "已核对上架站点仍然选中，但未观察到站点切换。");
+    record(name + " · 重新加载表格");
+    return receipt();
   }
 
   const currentGroup = index => {

@@ -7,7 +7,7 @@ const href = "https://sellerhub.shein.com/#/spmp/commoditiesInfo?mode=add&last_p
 const categoryPath = ["家居&生活", "厨房&餐厅", "饮具", "真空瓶和保温杯"];
 const stock = (quantity, siteLabel = "美国", options = ["黑色"]) => ({ options, quantity, siteLabel });
 
-function mount(t, { save = true, rowControls = "" } = {}) {
+function mount(t, { save = true, rowControls = "", defaultSku = "", modalSku = defaultSku } = {}) {
   const stockCell = id => rowControls === "anchor" ? `美国 -- <a id="${id}" href="/unrelated">编辑库存</a>` :
     rowControls === "button" ? `美国 -- <button id="${id}"><span>编辑库存</span></button>` : "0";
   const dom = new JSDOM(`
@@ -15,9 +15,10 @@ function mount(t, { save = true, rowControls = "" } = {}) {
     <button id="publish">发布商品</button><button id="draft">保存草稿</button><button id="other">确定</button>
     <div class="spmp_style__supplyInfoTable--fixture">
       ${rowControls ? "" : '<button id="edit">编辑库存</button>'}
-      <table><thead><tr><th>颜色</th><th>库存</th></tr></thead><tbody>
+      <table><thead><tr><th>${defaultSku ? "主规格" : "颜色"}</th><th>库存</th></tr></thead><tbody>
+        ${defaultSku ? `<tr><td>SKC：<span>${defaultSku}</span></td><td>${stockCell("edit-default")}</td></tr>` : `
         <tr><td><div>黑色</div><div>SKC：<span>fixture-black</span></div></td><td>${stockCell("edit-black")}</td></tr>
-        <tr><td><div>白色</div><div>SKC：<span>fixture-white</span></div></td><td>${stockCell("edit-white")}</td></tr>
+        <tr><td><div>白色</div><div>SKC：<span>fixture-white</span></div></td><td>${stockCell("edit-white")}</td></tr>`}
       </tbody></table>
     </div>`, { url: href, runScripts: "outside-only" });
   t.after(() => dom.window.close());
@@ -26,7 +27,8 @@ function mount(t, { save = true, rowControls = "" } = {}) {
   dom.window.HTMLElement.prototype.getClientRects = function () {
     return this.closest("[hidden]") ? [] : [{ width: 40, height: 30 }];
   };
-  const remote = { "黑色:美国": "0", "黑色:墨西哥": "7", "白色:美国": "0", "白色:墨西哥": "8" };
+  const remote = defaultSku ? { "默认:美国": "0", "默认:墨西哥": "7" } :
+    { "黑色:美国": "0", "黑色:墨西哥": "7", "白色:美国": "0", "白色:墨西哥": "8" };
   const actions = [];
   for (const id of ["publish", "draft", "other"]) document.getElementById(id).onclick = () => actions.push(id);
   const openModal = event => {
@@ -36,9 +38,10 @@ function mount(t, { save = true, rowControls = "" } = {}) {
     stockModal.innerHTML = `<div class="so-modal-mask"><section class="so-modal-panel">
       <div class="so-card-header so-modal-title">${rowControls === "anchor" ? "编辑库存" : "库存维护"}</div>
       <div class="so-table">
-      <div class="so-table-simple-header"><table><thead><tr><th>颜色</th><th>库存</th></tr></thead></table></div>
+      <div class="so-table-simple-header"><table><thead><tr><th>${defaultSku ? "主规格" : "颜色"}</th><th>库存</th></tr></thead></table></div>
       <div class="so-table-simple-body"><table><tbody>
-        ${["黑色", "白色"].map(color => `<tr><td><span>${color}</span><div>SKC：<span>fixture</span></div></td><td>
+        ${(defaultSku ? ["默认"] : ["黑色", "白色"]).map(color => `<tr>
+          ${defaultSku ? `<td>SKC：<span>${modalSku}</span></td>` : `<td><span>${color}</span><div>SKC：<span>fixture</span></div></td>`}<td>
           ${["美国", "墨西哥"].map(site => `<div><div>${site}</div><span><input type="text" placeholder="请输入" data-stock="${color}:${site}" value="${remote[`${color}:${site}`]}" /></span></div>`).join("")}
         </td></tr>`).join("")}
       </tbody></table></div></div>
@@ -53,7 +56,9 @@ function mount(t, { save = true, rowControls = "" } = {}) {
     for (const control of stockModal.querySelectorAll("input")) control.oninput = () => actions.push(control.dataset.stock);
     document.body.append(stockModal);
   };
-  for (const id of rowControls ? ["edit-black", "edit-white"] : ["edit"]) document.getElementById(id).onclick = openModal;
+  for (const id of rowControls ? defaultSku ? ["edit-default"] : ["edit-black", "edit-white"] : ["edit"]) {
+    document.getElementById(id).onclick = openModal;
+  }
   const run = async args => JSON.parse(JSON.stringify(await dom.window.eval(
     `(${sheinStockPage})(${JSON.stringify({ href, categoryPath, ...args })})`,
   )));
@@ -110,6 +115,28 @@ test("fills multiple matched rows and an explicitly supplied zero in the same co
   assert.equal(remote["黑色:美国"], "3");
   assert.equal(remote["白色:墨西哥"], "0");
   assert.equal(actions.filter(action => action === "confirm").length, 1);
+});
+
+test("fills only the requested site on a unique pinned default SKU", async t => {
+  const defaultSku = "se261119171434502395170";
+  const { run, remote, actions, document } = mount(t, { rowControls: "anchor", defaultSku });
+  const rows = [stock(3, "美国", [])];
+  assert.equal((await run({ rows })).code, "STOCK_INPUT_INVALID");
+  assert.equal((await run({ rows, defaultSku: "stale-key" })).code, "STOCK_ROW_NOT_FOUND");
+  assert.deepEqual(actions, []);
+  const result = await run({ rows, defaultSku });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.items.map(item => item.value), [3]);
+  assert.deepEqual(remote, { "默认:美国": "3", "默认:墨西哥": "7" });
+  assert.equal(document.location.href, href);
+});
+
+test("refuses a default stock dialog that shows a different SKC", async t => {
+  const defaultSku = "se261119171434502395170";
+  const { run, remote, actions } = mount(t, { rowControls: "anchor", defaultSku, modalSku: "another-sku" });
+  assert.equal((await run({ rows: [stock(3, "美国", [])], defaultSku })).code, "STOCK_TARGET_MISSING");
+  assert.deepEqual(remote, { "默认:美国": "0", "默认:墨西哥": "7" });
+  assert.deepEqual(actions, ["edit-default", "cancel"]);
 });
 
 test("does not report success if the confirmed stock does not persist in the dialog", async t => {

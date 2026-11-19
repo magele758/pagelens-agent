@@ -37,6 +37,9 @@ export function bindSheinListingPanel({
   const status = get("status");
   const results = get("results");
   const product = get("product");
+  const defaultSku = get("default-sku");
+  const defaultSkuRow = get("default-sku-row");
+  const defaultSkuUpload = get("default-sku-upload");
   const category = get("category");
   const upload = get("upload");
   const assist = get("ai");
@@ -45,6 +48,7 @@ export function bindSheinListingPanel({
   const stop = get("stop");
   let targetTab;
   let products = [];
+  let pendingSku;
   let operation;
   let revision = 0;
   const customerText = value => typeof value === "string" ? value.replaceAll("试填", "填写") : "";
@@ -60,7 +64,10 @@ export function bindSheinListingPanel({
     target.textContent = "切回已登录的 SHEIN 商家后台后即可开始上品。";
     get("link").hidden = supported;
     get("source").disabled = Boolean(operation);
-    get("run").disabled = Boolean(operation) || !supported || (!selectedProduct() && !notes());
+    const runButton = get("run");
+    runButton.disabled = Boolean(operation) || !supported || (!selectedProduct() && !notes()) ||
+      Boolean(pendingSku && !selectedDefaultSku());
+    runButton.textContent = pendingSku && !defaultSkuRow.hidden ? "继续填写" : "开始上品";
     stop.hidden = !operation;
     stop.disabled = Boolean(operation?.signal.aborted);
   }
@@ -72,6 +79,41 @@ export function bindSheinListingPanel({
   }
 
   const selectedProduct = () => products[Number(product.value)];
+  const selectedDefaultSku = () => pendingSku?.choices.has(defaultSku.value) ? defaultSku.value : "";
+
+  function showDefaultSkuUpload(show) {
+    defaultSkuUpload.hidden = !show;
+    if (show) defaultSku.setAttribute("aria-describedby", defaultSkuUpload.id);
+    else defaultSku.removeAttribute("aria-describedby");
+  }
+
+  function clearDefaultSku() {
+    pendingSku = undefined;
+    defaultSku.replaceChildren();
+    defaultSkuRow.hidden = true;
+    showDefaultSkuUpload(false);
+  }
+
+  function requestDefaultSku(outcome, seller, uploadAllowed) {
+    const anchor = { id: outcome.tabId ?? seller.tabId, url: outcome.url ?? seller.url };
+    const choices = new Map();
+    for (const choice of outcome.defaultSkuChoices) {
+      if (typeof choice?.sellerSku !== "string" || !choice.sellerSku.trim()) continue;
+      const label = typeof choice.label === "string" && choice.label.trim() ? choice.label : choice.sellerSku;
+      choices.set(choice.sellerSku, label);
+    }
+    if (!choices.size || !isSheinTab(anchor)) return false;
+    const previous = pendingSku?.anchor.id === anchor.id && pendingSku.anchor.url === anchor.url ? selectedDefaultSku() : "";
+    pendingSku = { anchor, choices };
+    targetTab = anchor;
+    defaultSku.replaceChildren(Object.assign(document.createElement("option"), { value: "", textContent: "请选择 SKU" }),
+      ...Array.from(choices, ([value, textContent]) => Object.assign(document.createElement("option"), { value, textContent })));
+    defaultSku.value = choices.has(previous) ? previous : "";
+    defaultSkuRow.hidden = false;
+    upload.checked = uploadAllowed;
+    showDefaultSkuUpload(uploadAllowed);
+    return true;
+  }
 
   function renderCategory(path) {
     const parts = Array.isArray(path) ? path : typeof path === "string" ? path.split(/[>›＞]/u) : [];
@@ -82,6 +124,7 @@ export function bindSheinListingPanel({
 
   function updateSelectedProduct() {
     const input = selectedProduct()?.input;
+    clearDefaultSku();
     renderCategory(input?.shein?.categoryPath ?? input?.categoryPath);
     upload.checked = false;
     assist.checked = false;
@@ -89,8 +132,11 @@ export function bindSheinListingPanel({
     renderTarget();
   }
 
-  function buildInput(selected, operatorNotes) {
-    if (selected?.input) return operatorNotes ? { ...selected.input, operatorNotes } : selected.input;
+  function buildInput(selected, operatorNotes, sku) {
+    if (selected?.input) {
+      const input = operatorNotes ? { ...selected.input, operatorNotes } : selected.input;
+      return sku ? { ...input, shein: { ...input.shein, defaultSku: sku } } : input;
+    }
     if (!operatorNotes) throw new Error("请选择商品目录或输入商品描述。");
     const lead = operatorNotes.split(/[。\r\n]/u, 1)[0].trim();
     return { title: (lead || operatorNotes).slice(0, 160), description: operatorNotes, operatorNotes };
@@ -119,9 +165,10 @@ export function bindSheinListingPanel({
     }
   }
 
-  async function withSeller(signal) {
+  async function withSeller(signal, anchor) {
     const tab = await getTargetTab();
     signal.throwIfAborted();
+    if (anchor && (tab?.id !== anchor.id || tab.url !== anchor.url)) throw new Error("请切回刚才的 SHEIN 商品编辑页，再继续填写所选 SKU。");
     targetTab = tab;
     if (!isSheinTab(tab)) throw new Error("当前标签已切换，请切回 SHEIN 商家后台。");
     if (await probeAccess(tab)) {
@@ -170,16 +217,22 @@ export function bindSheinListingPanel({
     renderResults();
     updateSelectedProduct();
   });
+  defaultSku.addEventListener("change", renderTarget);
+  upload.addEventListener("change", () => {
+    if (pendingSku) showDefaultSkuUpload(upload.checked);
+  });
 
   get("run").addEventListener("click", () => void run("正在核对商品资料…", async ({ signal, current }) => {
     const selected = selectedProduct();
-    const input = buildInput(selected, notes());
+    const sku = selectedDefaultSku();
+    if (pendingSku && !sku) throw new Error("请先选择要填写的 SKU。");
+    const input = buildInput(selected, notes(), sku);
     const uploadAllowed = upload.checked;
     const allowAI = assist.checked;
+    const seller = await withSeller(signal, pendingSku?.anchor);
     upload.checked = false;
-    const seller = await withSeller(signal);
     const files = selected && (uploadAllowed || allowAI) ? await readSheinProductImages(selected, { signal }) : { images: [], issues: [] };
-    const outcome = await replay({ ...seller, input, images: uploadAllowed ? files.images : [], allowAI,
+    const outcome = await replay({ ...seller, input, uploadRequested: uploadAllowed, images: uploadAllowed ? files.images : [], allowAI,
       referenceImages: allowAI ? files.images : [], onStep(progress) {
         if (!current()) return;
         if (progress?.categoryPath) renderCategory(progress.categoryPath);
@@ -188,12 +241,17 @@ export function bindSheinListingPanel({
     });
     if (!current()) return;
     if (outcome?.categoryPath) renderCategory(outcome.categoryPath);
+    const needsSku = Array.isArray(outcome?.defaultSkuChoices) && requestDefaultSku(outcome, seller, uploadAllowed);
     const issues = (outcome?.issues || []).map(issue => typeof issue === "string" ? issue :
       [issue?.label, issue?.message].filter(Boolean).join(" · "));
     renderResults([...files.issues, ...issues]);
-    const state = outcome?.ok && !issues.length && !files.issues.length ? "verified" : "needs-review";
+    const blockingIssues = (outcome?.issues || []).some(issue => issue?.code !== "DEFAULT_SKU_ONLY");
+    const state = outcome?.ok && !needsSku && !blockingIssues && !files.issues.length ? "verified" : "needs-review";
+    if (state === "verified") {
+      clearDefaultSku();
+    }
     report(state === "verified" ? "商品资料已填写，请在 SHEIN 核对并发布。" :
-      outcome?.message || "还有需要处理的问题，请查看下方提示。", state);
+      needsSku ? "选择一个 SKU 后继续填写。" : outcome?.message || "还有需要处理的问题，请查看下方提示。", state);
   }));
 
   stop.addEventListener("click", () => {
@@ -206,6 +264,7 @@ export function bindSheinListingPanel({
     operation?.abort();
     upload.checked = false;
     assist.checked = false;
+    clearDefaultSku();
     if (dialog.open) dialog.close();
   }
   get("close").addEventListener("click", close);
@@ -215,6 +274,7 @@ export function bindSheinListingPanel({
   return async function openSheinListing() {
     const opening = ++revision;
     targetTab = undefined;
+    clearDefaultSku();
     report();
     renderResults();
     renderTarget();

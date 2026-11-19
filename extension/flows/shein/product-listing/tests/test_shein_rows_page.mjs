@@ -124,6 +124,54 @@ test("writes the supplied sock shaft height in its own centimeter column", async
   assert.deepEqual(heights(), ["8", "17.5", "21", "10"]);
 });
 
+test("binds a default row to a unique visible SKC, reports required image headers, and uploads to the same row", async t => {
+  const { run, table, document, window, publishes, saves } = fixture(t);
+  const id = "se261119171434502395170";
+  const key = `SKC：${id}`;
+  table("supply", ["主规格", "价格(USD)", "商家SKU", "SKU图"], [[key, '<input id="price">', '<input id="code">', ""]]);
+  table("package", ["主规格", "含包装重量 (g)", "含包装尺寸"], [[key, '<input id="weight">', ""]]);
+  table("media", ["主规格", "SKC标题（商详标题）", '<div class="spmp_style__requiredTitle--test">方形图</div>', "色块图"],
+    [[key, '<textarea id="skc-title" placeholder="非必填，不填则默认展示SPU标题"></textarea><textarea id="translation"></textarea>',
+      '<div><input type="file" accept="image/png"></div>', ""]]);
+  const field = document.querySelector('#media input[type="file"]');
+  simulateFileInput(window, field);
+  field.onchange = () => appendThumbnail(field, "https://img.ltwebstatic.com/v4/j/spmp/fixture.png");
+  const initial = await run();
+  assert.equal(initial.tables.defaultSku, id);
+  assert.equal(initial.tables.defaultPackageSku, id);
+  assert.equal(initial.tables.defaultSellerSku, undefined);
+  assert.deepEqual(initial.tables.supply, [[]]);
+  assert.deepEqual(initial.tables.media, [[]]);
+  assert.equal(initial.tables.swatchRequired, false);
+  assert.deepEqual(initial.validation.map(({ code, label }) => [code, label]), [["IMAGE_REQUIRED", "方形图"]]);
+
+  const rows = [{ options: [], priceUsd: "39.90", sellerSku: "PL-KB-TKL-01", weightG: "800" }];
+  await run({ kind: "fill", defaultSku: "another-sku", rows });
+  assert.equal(document.getElementById("price").value, "");
+  const filled = await run({ kind: "fill", defaultSku: id, rows, skcTitle: "Compact wired keyboard" });
+  assert.deepEqual(filled.issues, []);
+  assert.equal(filled.tables.defaultSellerSku, "PL-KB-TKL-01");
+  assert.deepEqual(["price", "code", "weight"].map(name => document.getElementById(name).value), ["39.90", "PL-KB-TKL-01", "800"]);
+  assert.equal(document.getElementById("skc-title").value, "Compact wired keyboard");
+  assert.equal(document.getElementById("translation").value, "");
+  await run({ kind: "fill", defaultSku: id, rows, skcTitle: "Do not replace a nonempty title" });
+  assert.equal(document.getElementById("skc-title").value, "Compact wired keyboard");
+  const upload = { role: "square", options: [], files: [{ name: "photo.png", type: "image/png", base64: "aGVsbG8=" }] };
+  assert.equal((await run({ kind: "upload", upload })).ok, false);
+  assert.equal((await run({ kind: "upload", defaultSku: id, upload })).status, "verified");
+  assert.deepEqual((await run()).validation, []);
+  document.getElementById("media").hidden = true;
+  const partial = await run();
+  assert.equal(partial.tables.defaultPackageSku, id);
+  assert.equal(partial.tables.defaultSku, undefined);
+  assert.equal(partial.tables.defaultSellerSku, "PL-KB-TKL-01");
+  document.getElementById("media").hidden = false;
+  document.querySelector("#package tbody td").textContent = "SKC: different-id";
+  assert.equal((await run()).tables.defaultSku, undefined);
+  assert.equal((await run({ kind: "upload", defaultSku: id, upload })).ok, false);
+  assert.equal(publishes() + saves(), 0);
+});
+
 test("waits for the requested supply row and its price and merchant-code inputs, even when other SKUs are already visible", async t => {
   const { run, document, publishes, saves } = fixture(t);
   const body = document.querySelector("#supply tbody");

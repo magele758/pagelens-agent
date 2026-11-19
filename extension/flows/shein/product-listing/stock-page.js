@@ -1,5 +1,5 @@
 /** Updates the selected listing sites in the SHEIN inventory dialog, then reads the saved values back. */
-export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", index } = {}) {
+export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", index, defaultSku = "" } = {}) {
   const clean = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const text = node => clean(node?.innerText ?? node?.textContent);
   const stockArea = '[class*="supplyInfoTable--"]';
@@ -26,6 +26,7 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
     return expected.length > 0 && expected.every(Boolean) && JSON.stringify(expected) === JSON.stringify(current);
   };
   const onPage = () => routeMatches() && categoryMatches();
+  const isDefault = typeof defaultSku === "string" && /^[a-z0-9][a-z0-9_-]{4,63}$/iu.test(defaultSku);
 
   if (!routeMatches()) return fail("PAGE_CHANGED", "SHEIN 新建商品页面已切换。");
   if (!categoryMatches()) return fail("CATEGORY_CHANGED", "当前 SHEIN 商品分类与库存资料不一致。");
@@ -33,7 +34,7 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
   const requests = [];
   const keys = new Set();
   for (const row of rows) {
-    if (!Array.isArray(row?.options) || !row.options.length || row.options.length > 3 ||
+    if (!Array.isArray(row?.options) || (isDefault ? row.options.length !== 0 : !row.options.length) || row.options.length > 3 ||
         row.options.some(value => typeof value !== "string" || !clean(value) || clean(value).length > 90) ||
         typeof row.siteLabel !== "string" || !clean(row.siteLabel) || clean(row.siteLabel).length > 50 ||
         !["number", "string"].includes(typeof row.quantity) || !/^\d+$/u.test(clean(row.quantity)) || !Number.isSafeInteger(Number(clean(row.quantity)))) {
@@ -50,16 +51,29 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
   if (!noOtherOverlay(ownedPanel())) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再维护库存。");
 
   const skuLabel = cell => text(cell).split(/\s*(?:SKC|SKU)\s*:/iu)[0].trim();
-  const matchRow = (row, { options }) => options.every((name, index) => name === skuLabel(row.cells[index]));
-  const area = one(scan(document, stockArea).filter(node => !node.parentElement.closest(stockArea)));
-  const sourceRows = scan(area, "tbody tr").filter(row => row.cells.length > 1);
-  if (!area || requests.some(request => sourceRows.filter(row => matchRow(row, request)).length !== 1)) {
+  const plainSku = cell => /^SKC\s*:\s*([a-z0-9][a-z0-9_-]{4,63})$/iu.exec(text(cell))?.[1] || "";
+  const matchRow = (row, { options }) => options.length > 0 && options.every((name, index) => name === skuLabel(row.cells[index]));
+  const supplySection = () => one(scan(document, stockArea).filter(node => !node.parentElement.closest(stockArea)));
+  const supplyRows = area => scan(area, "tbody tr").filter(row => row.cells.length > 1);
+  const sourceDefaultRow = (area, candidates = supplyRows(area)) => {
+    const headers = scan(area, "thead th");
+    const row = one(candidates);
+    return row && text(headers[0]) === "主规格" && plainSku(row.cells[0]) === defaultSku ? row : null;
+  };
+  const area = supplySection();
+  const sourceRows = supplyRows(area);
+  if (!area || (isDefault ? !sourceDefaultRow(area, sourceRows) :
+    requests.some(request => sourceRows.filter(row => matchRow(row, request)).length !== 1))) {
     return fail("STOCK_ROW_NOT_FOUND", "当前商品销售表没有唯一匹配的库存规格行。");
   }
   function sourceButton() {
-    const section = one(scan(document, stockArea).filter(node => !node.parentElement.closest(stockArea)));
+    const section = supplySection();
     const all = scan(section, 'button,[role="button"],a').filter(node =>
       active(node) && /^(?:编辑库存|库存维护)$/u.test(text(node)));
+    if (isDefault) {
+      const row = sourceDefaultRow(section);
+      return row && one(all.filter(node => node.closest("tbody tr") === row));
+    }
     const global = all.filter(node => !node.closest("tbody tr"));
     if (global.length) return one(global);
     const related = requests.map(request => one(all.filter(node => {
@@ -82,7 +96,9 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
     const headersFor = table => scan(table, "thead th").filter(header => header.closest("table") === table);
     const headerTable = one(scan(panel, "table").filter(table => {
       const headers = headersFor(table);
-      return headers.length > 1 && text(headers.at(-1)) === "库存" && text(headers[0]) === "颜色";
+      if (text(headers.at(-1)).replace(/^[*＊]\s*/u, "") !== "库存") return false;
+      if (isDefault) return headers.length === 2 && text(headers[0]) === "主规格";
+      return headers.length > 1 && text(headers[0]) === "颜色";
     }));
     if (!headerTable) return null;
     const tableGroup = headerTable.closest(".so-table") || headerTable;
@@ -121,8 +137,9 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
   }
 
   function siteInput(modal, request) {
-    if (modal?.specCount !== request.options.length) return null;
-    const row = one(scan(modal?.body, "tr").filter(candidate => candidate.closest("tbody") === modal.body && matchRow(candidate, request)));
+    if (!modal || (isDefault ? !sourceDefaultRow(supplySection()) : modal.specCount !== request.options.length)) return null;
+    const row = one(scan(modal.body, "tr").filter(candidate => candidate.closest("tbody") === modal.body &&
+      (isDefault ? candidate.cells.length === 2 && plainSku(candidate.cells[0]) === defaultSku : matchRow(candidate, request))));
     const cell = row?.cells[row.cells.length - 1];
     if (!cell || row.cells.length <= request.options.length) return null;
     const candidates = scan(cell, 'input[placeholder="请输入"]').filter(node => active(node) && !node.readOnly && /^(?:number|text)$/u.test(node.type));
@@ -199,7 +216,7 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
     }, 2600);
     const closed = await close();
     return verified && closed ? { ok: true, items: requests.map(request => ({
-      label: `${request.options.join(" / ")} · ${request.siteLabel}库存`, status: "verified", value: request.quantity,
+      label: `${request.options.join(" / ") || "默认 SKU"} · ${request.siteLabel}库存`, status: "verified", value: request.quantity,
     })) } : fail("STOCK_SAVE_UNVERIFIED", "重新读取的库存与试填数量不一致。");
   }
   if (kind !== "fill" || !noOtherOverlay()) return fail("MODAL_BLOCKED", "请关闭当前 SHEIN 弹窗后再维护库存。");
@@ -264,7 +281,7 @@ export async function sheinStockPage({ href, categoryPath, rows, kind = "fill", 
       return fail("STOCK_SAVE_UNVERIFIED", "重新读取的库存与试填数量不一致。");
     }
     for (const [index, request] of requests.entries()) {
-      items.push({ key: `stock:${request.key}`, label: `${request.options.join(" / ")} · ${request.siteLabel}库存`,
+      items.push({ key: `stock:${request.key}`, label: `${request.options.join(" / ") || "默认 SKU"} · ${request.siteLabel}库存`,
         status: changed[index] ? "verified" : "unchanged", value: request.quantity });
     }
     if (!await close()) return fail("STOCK_DIALOG_OPEN", "库存已核对，但库存弹窗仍打开，请检查当前页面。");

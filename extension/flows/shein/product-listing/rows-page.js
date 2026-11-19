@@ -1,5 +1,6 @@
 /** Serialized into the verified SHEIN add-product page. */
-export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows = [], dimensions, upload, expectSupply = false } = {}) {
+export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows = [], dimensions, upload,
+  expectSupply = false, defaultSku = "", skcTitle = "" } = {}) {
   const clean = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const measureHeaders = { widthCm: "宽度", shaftHeightCm: "筒高", lengthCm: "长度", heightCm: "高度", diameterCm: "直径" };
   const supplyFields = [
@@ -24,8 +25,9 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
   const live = () => onPage() && !blocked();
   if (!live()) return fail("SHEIN_EDIT_CONTEXT_CHANGED", "SHEIN 商品、类目或弹窗已变化。");
 
-  const columns = table => [...table?.querySelectorAll('.so-table-head thead th') || []]
-    .map(cell => visible(cell) ? clean(cell.innerText || cell.textContent) : "");
+  const headerCells = table => [...table?.querySelectorAll('.so-table-head thead th') || []];
+  const columns = table => headerCells(table)
+    .map(cell => visible(cell) ? clean(cell.innerText || cell.textContent).replace(/^[*＊]\s*/u, "") : "");
   const cellText = cell => clean((cell?.innerText || cell?.textContent || "").split(/\bSKC\s*[:：]/iu)[0]);
   const wrappers = () => [...document.querySelectorAll(".so-table")].filter(visible);
   const tableRows = table => [...table?.querySelectorAll("tbody tr") || []].filter(row =>
@@ -34,7 +36,7 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
   const refs = {
     supply: () => one(wrappers().filter(table => table.matches('[class*="supplyInfoTable--"]') && columns(table).some(h => /^价格\s*\(USD\)/u.test(h)))),
     package: () => tableFor(h => /^含包装重量/u.test(h)),
-    media: () => one(wrappers().filter(table => table.closest(".detail_img_container") && columns(table).includes("方形图"))),
+    media: () => one(wrappers().filter(table => table.closest(".detail_img_container") && columns(table).some(title => /^方形图/u.test(title)))),
     size: () => one(wrappers().filter(table => table.closest('[class*="sizeContentBox--"]') && columns(table).some(h => /\(cm\)/iu.test(h)))),
   };
   const partition = (table, row, headers = columns(table)) => {
@@ -47,9 +49,25 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     }
     return names;
   };
+  const unnamedSku = (table, row, headers = columns(table)) => {
+    if (headers[0] !== "主规格" || row.cells.length !== headers.length) return "";
+    return /^SKC\s*:\s*([a-z0-9][a-z0-9_-]{4,63})$/iu.exec(clean(row.cells[0]?.innerText || row.cells[0]?.textContent))?.[1] || "";
+  };
+  const observedDefaultSku = () => {
+    const tables = [refs.media(), refs.package(), refs.supply()];
+    if (!tables[0] || !tables[1]) return "";
+    const ids = tables.filter(Boolean).map(table => {
+      const row = one(tableRows(table));
+      return row ? unnamedSku(table, row) : "";
+    });
+    return ids[0] && ids.every(id => id === ids[0]) ? ids[0] : "";
+  };
+  const isDefaultTarget = (table, row) => Boolean(defaultSku && observedDefaultSku() === defaultSku &&
+    unnamedSku(table, row) === defaultSku);
   const sameOptions = (names, opts) => names.length > 0 && names.length === opts.length &&
     opts.every((opt, index) => names[index] === clean(opt));
-  const rowFor = (table, opts) => one(tableRows(table).filter(row => sameOptions(partition(table, row), opts)));
+  const rowFor = (table, opts) => one(tableRows(table).filter(row => opts.length
+    ? sameOptions(partition(table, row), opts) : isDefaultTarget(table, row)));
   const writeableInputs = (cell, selector = 'input:not([type="file"]),textarea') =>
     [...cell?.querySelectorAll(selector) || []].filter(editable);
   const writeable = (cell, selector) => one(writeableInputs(cell, selector));
@@ -68,7 +86,7 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     return false;
   }
   async function waitForSupply() {
-    const targets = rows.filter(row => row.options?.length).map(row => ({ options: row.options,
+    const targets = rows.filter(row => Array.isArray(row.options) && (row.options.length || defaultSku)).map(row => ({ options: row.options,
       fields: supplyFields.filter(field => field.numeric ? safeNumber(row[field.key]) : clean(row[field.key])) }));
     if (!targets.length) return;
     const ambiguous = Symbol("ambiguous supply target");
@@ -77,11 +95,9 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     await waitUntil(() => {
       const table = refs.supply();
       const headers = columns(table);
-      const current = tableRows(table).map(row => ({ node: row, options: partition(table, row, headers) }));
       const snapshot = targets.flatMap(target => {
-        const found = current.filter(row => sameOptions(row.options, target.options));
-        if (found.length !== 1) return [found.length > 1 ? ambiguous : undefined];
-        const { node } = found[0];
+        const node = rowFor(table, target.options);
+        if (!node) return [undefined];
         return [node, ...target.fields.map(({ header }) => {
           const positions = headers.flatMap((text, index) => header.test(text) ? [index] : []);
           if (positions.length !== 1) return positions.length > 1 ? ambiguous : undefined;
@@ -172,6 +188,11 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
   const remoteImage = image => /^(?:https?:)?\/\//iu.test(image.currentSrc || image.getAttribute("src") || "") &&
     image.complete && image.naturalWidth > 0;
   const mediaIssue = /^(?:请(?:先)?上传|至少上传|最多上传|上传失败|图片(?:大小|尺寸|比例|格式).*(?:不符|错误|超出))/u;
+  const requiredMarker = '[class*="requiredTitle--"],[aria-required="true"],[data-required="true"]';
+  const requiredImage = cell => Boolean(cell && (cell.matches(requiredMarker) ||
+    /^[*＊]/u.test(clean(cell.innerText || cell.textContent)) ||
+    [...cell.querySelectorAll(`span,i,em,${requiredMarker}`)].filter(visible).some(marker => marker.matches(requiredMarker) ||
+      /^(?:\*|＊)$/u.test(clean(marker.innerText || marker.textContent)))));
   function imageValidation() {
     return ["media", "supply"].flatMap(role => {
       const table = refs[role]();
@@ -183,33 +204,56 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
           .map(node => clean(node.innerText || node.textContent))
           .filter(message => message.length <= 70 && mediaIssue.test(message));
         const options = partition(table, row, headers);
+        if (!options.length && !unnamedSku(table, row, headers)) return [];
         const label = [...options, header.split(" ")[0]].join(" · ");
-        return [...new Set(messages)].map(message => ({ label, code: "IMAGE_VALIDATION", message }));
+        const result = [...new Set(messages)].map(message => ({ label, code: "IMAGE_VALIDATION", message }));
+        if (!result.length && requiredImage(headerCells(table)[index]) &&
+            ![...cell?.querySelectorAll("img") || []].some(image => visible(image) && remoteImage(image))) {
+          result.push({ label, code: "IMAGE_REQUIRED", message: "SHEIN 当前类目标记此图片为必填，请上传后核对。" });
+        }
+        return result;
       }));
     });
   }
   const state = () => {
+    const id = observedDefaultSku();
+    const packageTable = refs.package();
+    const packageRow = one(tableRows(packageTable));
+    const defaultPackageSku = packageRow && unnamedSku(packageTable, packageRow);
+    const supplyTable = refs.supply();
+    const supplyRow = one(tableRows(supplyTable));
+    const sellerSkuIndex = one(columns(supplyTable).flatMap((header, index) => /^商家SKU/u.test(header) ? [index] : []));
+    const sellerSkuInput = supplyRow && defaultPackageSku && unnamedSku(supplyTable, supplyRow) === defaultPackageSku &&
+      one([...supplyRow.cells[sellerSkuIndex]?.querySelectorAll('input:not([type="file"]),textarea') || []].filter(visible));
+    const defaultSellerSku = clean(sellerSkuInput?.value);
     const tables = Object.fromEntries(Object.entries(refs).map(([key, find]) => {
       const table = find();
-      return [key, table ? tableRows(table).map(row => partition(table, row)) : []];
+      const headers = columns(table);
+      const defaultTable = key !== "size" && id && headers[0] === "主规格";
+      return [key, tableRows(table).map(row => partition(table, row, headers)).filter(options =>
+        options.length || key === "size" || defaultTable)];
     }));
     const media = refs.media();
     const headers = columns(media);
-    const swatchColumn = headers.indexOf("色块图");
-    const swatchRequired = media ? swatchColumn >= 0 : undefined;
-    const swatches = swatchRequired ? tableRows(media).flatMap(row => {
+    const swatchColumn = headers.findIndex(title => /^色块图/u.test(title));
+    const swatchAvailable = swatchColumn >= 0;
+    const swatchRequired = media ? swatchAvailable && (requiredImage(headerCells(media)[swatchColumn]) ||
+      tableRows(media).some(row => missingSwatch(row.cells[swatchColumn]))) : undefined;
+    const swatches = swatchAvailable ? tableRows(media).flatMap(row => {
       const cell = row.cells[swatchColumn];
       const loaded = [...cell?.querySelectorAll("img") || []].filter(image => visible(image) && remoteImage(image));
       return loaded.length === 1 && !missingSwatch(cell) ? [partition(media, row, headers)] : [];
     }) : [];
-    return { ...tables, swatchRequired, swatches };
+    return { ...tables, ...(id && { defaultSku: id }), ...(defaultPackageSku && { defaultPackageSku }),
+      ...(defaultSellerSku && { defaultSellerSku }), swatchRequired, swatchAvailable, swatches };
   };
   if (kind === "inspect") return { ok: true, tables: state(), validation: imageValidation() };
 
   if (kind === "upload") {
     const { role, options, files } = upload || {};
     const capacity = role === "detail" ? 5 : 1;
-    if (!["detail", "square", "variant", "swatch"].includes(role) || !Array.isArray(options) || !options.length ||
+    if (!["detail", "square", "variant", "swatch"].includes(role) || !Array.isArray(options) ||
+        !options.length && (!defaultSku || observedDefaultSku() !== defaultSku) ||
         !Array.isArray(files) || !files.length || files.length > capacity) {
       return fail("SHEIN_IMAGE_INPUT", "请为当前规格选择合适的 SHEIN 图片。");
     }
@@ -274,7 +318,7 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
     // The injection world is tied to this document. Receipts are only valid while the same thumbnails remain in the exact cell.
     const mediaReceipts = Symbol.for("pagelens.shein.mediaReceipts.v3");
     const receipts = document[mediaReceipts] ??= new Map();
-    const receiptGroup = imageRole => JSON.stringify([categoryPath, imageRole, options.map(clean)]);
+    const receiptGroup = imageRole => JSON.stringify([categoryPath, imageRole, options.map(clean), ...(!options.length ? [defaultSku] : [])]);
     const group = receiptGroup(role);
     const active = (receipts.get(group) || []).filter(entry => initial.includes(entry.thumb));
     const known = src => one(active.filter(entry => entry.thumb === src))?.fingerprint;
@@ -347,11 +391,23 @@ export async function sheinRowsPage({ href, categoryPath, kind = "inspect", rows
 
   if (kind !== "fill" && kind !== "retrySupply") return fail("SHEIN_ACTION_UNSUPPORTED", "此 SHEIN 表单操作不可用。");
   if (expectSupply) await waitForSupply();
+  if (kind === "fill" && typeof skcTitle === "string" && clean(skcTitle)) {
+    const mediaRows = new Map();
+    for (const { options } of rows) {
+      if (Array.isArray(options) && (options.length || defaultSku)) mediaRows.set(options[0] || "", options.slice(0, 1));
+    }
+    for (const [name, options] of mediaRows) {
+      const field = () => rowInput("media", options, /^SKC标题/u, 'textarea[placeholder*="SPU标题"]') ||
+        rowInput("media", options, /^SKC标题/u);
+      const control = field();
+      if (control && !clean(control.value)) await write(field, skcTitle, (name || "默认 SKU") + " 商详标题");
+    }
+  }
   for (const row of rows) {
     if (!live()) return fail("SHEIN_EDIT_CONTEXT_CHANGED", "SHEIN 商品、类目或弹窗已变化。");
-    const options = row.options || [];
-    if (!options.length) continue;
-    const label = options.join(" / ");
+    const options = row.options;
+    if (!Array.isArray(options) || !options.length && !defaultSku) continue;
+    const label = options.join(" / ") || "默认 SKU";
     if (kind === "fill" && !rowFor(refs.supply(), options) && !rowFor(refs.package(), options)) {
       issues.push({ label, code: "SHEIN_SKU_MISSING", message: "当前表格未找到唯一对应规格。" });
       continue;

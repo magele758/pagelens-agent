@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { replaySheinListing } from "../runtime.js";
+import { normalizeSheinListingInput, replaySheinListing } from "../runtime.js";
 
 const url = "https://sellerhub.shein.com/#/spmp/commoditiesInfo?mode=add&last_page=page_commodities_category";
 const categoryPath = ["服饰", "袜子"];
@@ -78,4 +78,54 @@ test("fills rows with verified variant values and keeps unmatched SKU values unt
   for (const call of app.calls.filter(call => call.rows?.length)) {
     assert.deepEqual(call.rows.map(row => row.options), [["黑色"]]);
   }
+});
+
+test("requires an explicit source SKU for multiple products on a default-only page and reports the blocked upload", async () => {
+  const variant = { ...variantState([{ label: "主规格", name: "默认", values: ["默认"] }]), defaultOnly: true };
+  const app = runtime({ variant });
+  const file = { path: "Black.jpg", role: "variant", file: new File(["image"], "Black.jpg", { type: "image/jpeg" }) };
+  const result = await app.replay(fixture(["Black", "White"]), [file]);
+  assert.deepEqual(result.defaultSkuChoices, [{ sellerSku: "SKU-Black", label: "Black" }, { sellerSku: "SKU-White", label: "White" }]);
+  assert.equal(result.tabId, 1);
+  assert.ok(result.issues.some(issue => issue.code === "MEDIA_UPLOAD_NOT_BOUND"));
+  assert.ok(!app.calls.some(call => call.kind === "upload" || call.page === "sheinStockPage"));
+});
+
+test("rebinds only the declared color and uploads its images to the same default platform SKC", async () => {
+  const platformSku = "se261119171434502395170";
+  const current = tableState({ media: [[]], package: [[]], supply: [[]] });
+  current.tables.defaultSku = platformSku;
+  const variant = { ...variantState([{ label: "主规格", name: "默认", values: ["默认"] }]), defaultOnly: true };
+  const app = runtime({ variant, current });
+  const input = fixture(["Black", "White"]);
+  input.shein.defaultSku = "SKU-White";
+  const image = (path, role) => ({ path, role, file: new File([path], path, { type: "image/jpeg" }) });
+  const result = await app.replay(input, [image("Black.jpg", "variant"), image("White.jpg", "variant"),
+    image("White.jpg", "variant-square"), image("detail.jpg", "shared-gallery")]);
+  const pinned = app.calls.filter(call => call.rows?.length || call.kind === "upload");
+  assert.equal(result.issues[0].code, "DEFAULT_SKU_ONLY");
+  assert.ok(pinned.every(call => call.defaultSku === platformSku));
+  assert.deepEqual(pinned[0].rows.map(row => [row.sellerSku, row.options]), [["SKU-White", []]]);
+  const uploads = pinned.filter(call => call.kind === "upload");
+  assert.deepEqual(uploads.map(call => [call.upload.role, call.upload.options, call.upload.files.map(file => file.name)]), [
+    ["detail", [], ["White.jpg", "detail.jpg"]], ["square", [], ["White.jpg"]], ["variant", [], ["White.jpg"]],
+  ]);
+});
+
+test("does not infer dangerous-goods classification from product prose or the absence of batteries", () => {
+  assert.deepEqual(normalizeSheinListingInput({ description: "无内置电池，该商品不属于危险品" }).attributes, {});
+  assert.deepEqual(normalizeSheinListingInput({ operatorNotes: "危险品分类：该商品不属于危险品。" }).attributes,
+    { 危险品分类: "该商品不属于危险品" });
+});
+
+test("does not replace a different seller SKU already associated with a default SKC", async () => {
+  const current = tableState({ media: [[]], package: [[]], supply: [[]] });
+  Object.assign(current.tables, { defaultSku: "se261119171434502395170", defaultSellerSku: "SKU-Black" });
+  const variant = { ...variantState([{ label: "主规格", name: "默认", values: ["默认"] }]), defaultOnly: true };
+  const app = runtime({ variant, current });
+  const input = fixture(["Black", "White"]);
+  input.shein.defaultSku = "SKU-White";
+  const result = await app.replay(input);
+  assert.ok(result.issues.some(issue => issue.code === "SKU_DEFAULT_ALREADY_BOUND"));
+  assert.ok(!app.calls.some(call => call.rows?.length || call.kind === "upload"));
 });

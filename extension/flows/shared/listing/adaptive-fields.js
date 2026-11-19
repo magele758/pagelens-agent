@@ -1,5 +1,5 @@
 const kinds = new Set(["text", "number", "select", "checkbox"]);
-const guarded = /认证|证书|合规|专利|品牌|生产商|生产日期|产地|原产|重量|承重|容量|价格|库存|条码|货号|成分比例|危险品|过敏|许可证|医疗|条款|同意|电池|price|stock|inventory|origin|licen[sc]e|hazard|certif|manufacturer|barcode|compliance|weight|capacity|brand|consent|battery|sku/iu;
+const guarded = /认证|证书|合规|专利|品牌|生产商|生产日期|产地|原产|重量|承重|容量|价格|库存|条码|货号|成分比例|危险品|危险货物|过敏|许可证|医疗|条款|同意|电池|price|stock|inventory|origin|licen[sc]e|hazard|dangerous goods|certif|manufacturer|barcode|compliance|weight|capacity|brand|consent|battery|sku/iu;
 const expiry = 14 * 24 * 60 * 60 * 1000;
 const unique = values => [...new Set(values)];
 const text = value => typeof value === "string" ? value.trim() : "";
@@ -40,10 +40,12 @@ export function createListingFieldCache({ storage = globalThis.chrome?.storage?.
   };
 }
 
-export function isAdaptiveField(field) {
+export function isAdaptiveField(field, includeOptional = false) {
   return Boolean(field?.key && field.label && kinds.has(field.type) && !guarded.test(field.label) &&
-    (field.error || field.required && !filled(field.value)));
+    (field.error || (field.required || includeOptional) && !filled(field.value)));
 }
+
+const priority = field => field.error ? 2 : field.required ? 1 : 0;
 
 function verifiedValue(field, raw) {
   if (field.type === "checkbox") return typeof raw === "boolean" ? raw : undefined;
@@ -64,27 +66,39 @@ function verifiedValue(field, raw) {
 
 /** Runs at most two batched planning rounds, with a live readback after each write. */
 export async function recoverListingFields({ scope, snapshot, read, readOptions, apply, suggest, cache = createListingFieldCache(),
-  signal, onPhase } = {}) {
+  includeOptional = false, signal, onPhase } = {}) {
   const items = [];
   const receipts = [];
-  const attempted = new Set();
+  const attempted = new Map();
+  const refresh = new Set();
   let state = snapshot;
   for (let round = 0; round < 2; round++) {
     signal?.throwIfAborted();
     if (!state?.ok) break;
-    const candidates = (state.fields || []).filter(field => isAdaptiveField(field) && !attempted.has(field.key)).slice(0, 24);
+    const available = (state.fields || []).filter(field => {
+      const previous = attempted.get(field.key);
+      return isAdaptiveField(field, includeOptional) &&
+        (!previous || includeOptional && previous.emptyOptions && previous.dependency !== field.dependency);
+    });
+    if (includeOptional) available.sort((a, b) => priority(b) - priority(a));
+    const candidates = available.slice(0, 24);
     if (!candidates.length) break;
     const fields = [];
     for (const field of candidates) {
       signal?.throwIfAborted();
-      attempted.add(field.key);
+      const attempt = { dependency: field.dependency, emptyOptions: false };
+      attempted.set(field.key, attempt);
       if (field.type !== "select") { fields.push(field); continue; }
-      const cached = await cache.get(scope, field);
+      const cached = refresh.delete(field.key) ? [] : await cache.get(scope, field);
       const options = cached.length ? cached : choices(await readOptions(field));
+      attempt.emptyOptions = options.length === 0;
       if (!cached.length && options.length) await cache.set(scope, field, options);
       if (options.length) fields.push({ ...field, options, cached: Boolean(cached.length) });
     }
-    if (!fields.length) break;
+    if (!fields.length) {
+      if (!includeOptional) break;
+      continue;
+    }
     onPhase?.();
     const proposed = await suggest(fields);
     signal?.throwIfAborted();
@@ -92,7 +106,18 @@ export async function recoverListingFields({ scope, snapshot, read, readOptions,
       const value = verifiedValue(field, Object.hasOwn(proposed || {}, field.key) ? proposed[field.key] : undefined);
       return value === undefined ? [] : [[field.key, value]];
     }));
-    if (!Object.keys(values).length) break;
+    if (includeOptional) {
+      for (const field of fields) {
+        if (field.cached && priority(field) && !Object.hasOwn(values, field.key)) {
+          refresh.add(field.key);
+          attempted.delete(field.key);
+        }
+      }
+    }
+    if (!Object.keys(values).length) {
+      if (!includeOptional) break;
+      continue;
+    }
     const result = await apply(values);
     if (!result?.ok) return { state: result, items, issues: receipts };
     items.push(...(result.items || []));
@@ -105,6 +130,7 @@ export async function recoverListingFields({ scope, snapshot, read, readOptions,
     }
     state = await read();
   }
-  const unresolved = new Set((state?.fields || []).filter(field => field.error || field.required && !filled(field.value)).map(field => field.key));
+  const unresolved = new Set((state?.fields || []).filter(field => field.error ||
+    (field.required || includeOptional) && !filled(field.value)).map(field => field.key));
   return { state, items, issues: receipts.filter(issue => unresolved.has(issue.key)) };
 }

@@ -75,6 +75,85 @@ test("batches direct text, numeric and checkbox repairs and rejects a value outs
   assert.deepEqual(recovery.issues, []);
 });
 
+test("opts in to blanks in required-first order while preserving populated and guarded fields", async () => {
+  const optional = { ...material, key: "connectivity", label: "连接方式", required: false };
+  const title = { ...material, key: "subtitle", label: "副标题", type: "text", required: false };
+  const known = { ...title, key: "known", value: "已有资料" };
+  const hazard = { ...material, key: "hazard", label: "危险品分类", error: "请填写" };
+  const input = [optional, title, known, hazard, material];
+  const writes = [];
+  for (const includeOptional of [false, true]) {
+    let current = state(input);
+    const result = await recoverListingFields({ scope: shop, snapshot: current, includeOptional,
+      read: async () => current,
+      readOptions: async field => field.key === "material" ? ["ABS"] : ["有线", "无线"],
+      suggest: async fields => {
+        assert.deepEqual(fields.map(field => field.key), includeOptional
+          ? ["material", "connectivity", "subtitle"] : ["material"]);
+        return { material: "ABS", connectivity: "有线", known: "覆盖", hazard: "无危险品" };
+      },
+      apply: async chosen => {
+        writes.push(chosen);
+        current = state(input.map(field => Object.hasOwn(chosen, field.key) ? { ...field, value: chosen[field.key] } : field));
+        return { ok: true };
+      },
+    });
+    assert.deepEqual(result.issues, []);
+  }
+  assert.deepEqual(writes, [{ material: "ABS" }, { material: "ABS", connectivity: "有线" }]);
+});
+
+test("refreshes a cached blocking selector after the model cannot match it, without probing abstained optional selectors", async () => {
+  const storage = memoryStorage();
+  const cache = createListingFieldCache({ storage });
+  const optional = { ...material, key: "pattern", label: "图案", required: false };
+  await cache.set(shop, material, ["金属"]);
+  await cache.set(shop, optional, ["纯色", "条纹"]);
+  let current = state([material, optional]);
+  let modelCalls = 0;
+  const liveReads = [];
+  const result = await recoverListingFields({ scope: shop, snapshot: current, read: async () => current, cache, includeOptional: true,
+    readOptions: async field => { liveReads.push(field.key); return ["ABS", "玻璃"]; },
+    suggest: async fields => {
+      modelCalls++;
+      if (modelCalls === 1) assert.deepEqual(fields.map(field => field.key), ["material", "pattern"]);
+      return fields[0].options.includes("ABS") ? { material: "ABS" } : {};
+    },
+    apply: async values => {
+      assert.deepEqual(values, { material: "ABS" });
+      current = state([{ ...material, value: "ABS" }, optional]);
+      return { ok: true };
+    },
+  });
+  assert.deepEqual(liveReads, ["material"]);
+  assert.deepEqual(await cache.get(shop, material), ["ABS", "玻璃"]);
+  assert.equal(modelCalls, 2);
+  assert.deepEqual(result.issues, []);
+});
+
+test("rechecks an initially empty selector when an upstream choice changes its options", async () => {
+  const dependent = { ...material, key: "port", label: "接口", required: false, dependency: "" };
+  const unused = { ...material, key: "style", label: "款式", required: false, dependency: "" };
+  let current = state([material, dependent, unused]);
+  const reads = [];
+  const writes = [];
+  const result = await recoverListingFields({ scope: shop, snapshot: current, read: async () => current, includeOptional: true,
+    readOptions: async field => {
+      reads.push(field.key);
+      return field.key === "port" ? field.dependency ? ["USB-C"] : [] : ["ABS"];
+    },
+    suggest: async fields => fields.some(field => field.key === "port") ? { port: "USB-C" } : { material: "ABS" },
+    apply: async values => {
+      writes.push(values);
+      current = state(current.fields.map(field => ({ ...field, dependency: "ABS", value: values[field.key] || field.value })));
+      return { ok: true };
+    },
+  });
+  assert.deepEqual(reads, ["material", "port", "style", "port"]);
+  assert.deepEqual(writes, [{ material: "ABS" }, { port: "USB-C" }]);
+  assert.deepEqual(result.issues, []);
+});
+
 test("sends category and field instructions with only the selected product photo and scoped options", async () => {
   const settings = { text: { baseUrl: "http://localhost:1234/v1", model: "text" },
     multimodal: { baseUrl: "http://localhost:1234/v1", model: "vision" } };
@@ -93,6 +172,23 @@ test("sends category and field instructions with only the selected product photo
   const content = calls[1].payload.messages.at(-1).content;
   assert.match(content[0].text, /纯金属/u);
   assert.match(content[1].image_url.url, /^data:image\/png;base64,/u);
+});
+
+test("includes nested source facts and required status for optional matching", async () => {
+  const advisor = createListingAdvisor({
+    settings: { text: { baseUrl: "http://localhost:1234/v1", model: "text" } },
+    product: { title: "有线键盘", attributes: { 键数: 87 }, shein: { attributes: { 材质: "ABS", 带背光: false } } },
+    async request(_model, payload) {
+      const [instructions, data] = payload.messages;
+      assert.match(instructions.content, /选填字段也应填写/u);
+      const { product, fields } = JSON.parse(data.content);
+      assert.deepEqual(product.attributes, { 键数: 87, 材质: "ABS", 带背光: false });
+      assert.deepEqual(fields, [{ key: "material", label: "材质", type: "select", required: false,
+        section: "商品属性", options: ["ABS", "铝"] }]);
+      return '{"material":"ABS"}';
+    },
+  });
+  assert.deepEqual(await advisor.fields([{ ...material, required: false, options: ["ABS", "铝"] }]), { material: "ABS" });
 });
 
 test("judges category choices only by supplied whole path indices", async () => {

@@ -13,6 +13,10 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
   const modal = 'dialog[open],[role="alertdialog"],[aria-modal="true"],.soui-modal-wrapper,.so-dialog';
   const dropdown = '.soui-select-picker-wrapper.merchant-ui-select-options,.soui-select-dropdown,[role="listbox"]';
   const option = '[role="option"],.soui-select-dropdown-item,.soui-select-option';
+  const attributeItem = '[class*="productAttrItem--"].soui-form-item-wrapper';
+  const requiredItem = '.soui-form-item-wrapper-required,.so-form-item-required,[aria-required="true"],[data-required="true"]';
+  const labelSelector = '.soui-form-item-label,.soui-form-item-label-wrapper,.so-form-label,[class*="productAttrLabel--"],label';
+  const starMarkers = new WeakMap();
   const basic = [
     ["englishTitle", "商品标题（英语）", ".main_name", "input", true, 250],
     ["englishDescription", "商品描述（英语）", ".main_desc", "textarea", false, 5000],
@@ -100,7 +104,38 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
       const visibleLabel = text(result.querySelector('.soui-select-result-text-wrapper,.soui-select-result'));
       if (visibleLabel && visibleLabel !== clean(result.querySelector('input')?.placeholder)) labels.push(visibleLabel);
     }
-    return [...new Set(labels)];
+    return [...new Set(labels.filter(label => !/^(?:请(?:输入|选择)(?:或搜索)?|please (?:enter|select)(?: or search)?)$/iu.test(label)))];
+  }
+
+  function red(color) {
+    const rgb = String(color || "").match(/rgba?\(\s*(\d+)[, ]+\s*(\d+)[, ]+\s*(\d+)/u);
+    return rgb && Number(rgb[1]) >= 155 && Number(rgb[1]) - Math.max(Number(rgb[2]), Number(rgb[3])) >= 75;
+  }
+
+  function requiredField(section, node, heading) {
+    if (section.matches(requiredItem) || node.matches('[required],[aria-required="true"],[data-required="true"]') ||
+        node.querySelector('[required],[aria-required="true"]')) return true;
+    if (!heading || !visible(heading)) return false;
+    if (heading.matches(requiredItem)) return true;
+    if (section.matches('.soui-form-item-wrapper-hide-required')) return false;
+    if (/^[*＊]\s*\S/u.test(text(heading))) return true;
+    const signature = section.className + "\n" + heading.outerHTML;
+    const previous = starMarkers.get(heading);
+    if (previous?.signature === signature) return previous.required;
+    const star = value => /^[*＊]$/u.test(clean(value).replace(/^["']|["']$/gu, ""));
+    const labelParts = [heading, ...query(heading, 'span,i,em,b,label,[class*="required" i]')];
+    const required = labelParts.some(part => {
+      if (part.matches('.soui-form-item-label-required,.so-form-label-required,[aria-required="true"]')) return true;
+      if (star(text(part)) && (red(getComputedStyle(part).color) || /required|asterisk/iu.test(part.className))) return true;
+      if (typeof globalThis.CSS?.supports !== "function") return false;
+      return ['::before', '::after'].some(pseudo => {
+        const style = getComputedStyle(part, pseudo);
+        return star(style?.content) && style.display !== "none" && style.visibility !== "hidden" &&
+          style.opacity !== "0" && red(style.color);
+      });
+    });
+    starMarkers.set(heading, { signature, required });
+    return required;
   }
 
   function inlineError(section, node) {
@@ -110,10 +145,8 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     const invalid = node.matches('[aria-invalid="true"]') ||
       section.matches('.soui-form-item-wrapper-error,.so-form-item-has-error,[aria-invalid="true"]') ||
       section.querySelector('[aria-invalid="true"]');
-    const border = [node, node.querySelector('.soui-select-result-wrapper')].filter(Boolean).some(control => {
-      const color = getComputedStyle(control).borderTopColor.match(/rgba?\(\s*(\d+)[, ]+\s*(\d+)[, ]+\s*(\d+)/u);
-      return color && Number(color[1]) >= 155 && Number(color[1]) - Math.max(Number(color[2]), Number(color[3])) >= 75;
-    });
+    const border = [node, node.querySelector('.soui-select-result-wrapper')].filter(Boolean)
+      .some(control => red(getComputedStyle(control).borderTopColor));
     return invalid || border ? "SHEIN 标记此项需要核对。" : "";
   }
 
@@ -134,28 +167,53 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     const entries = basic.flatMap(([key, label, selector, control, required, limit]) => {
       const section = one(query(document, `.so-form-item${selector}`));
       const node = section && one(query(section, control).filter(enabled));
-      return node && (control === '.soui-select' || !node.readOnly) ? [describe(section, node, key, label, required, limit)] : [];
+      return node && (control === '.soui-select' || !node.readOnly) ? [describe(section, node, key, label,
+        required || requiredField(section, node, section.querySelector(labelSelector)), limit)] : [];
     });
-    for (const section of query(document, '[class*="productAttrItem--"].soui-form-item-wrapper').slice(0, 100)) {
-      const heading = section.querySelector('.soui-form-item-label,.soui-form-item-label-wrapper,[class*="productAttrLabel--"]');
-      const label = text(heading).replace(/^[*＊]\s*/u, "");
+    for (const section of query(document, attributeItem).slice(0, 100)) {
+      const heading = section.querySelector(labelSelector);
+      const label = text(heading).replace(/^(?:[*＊]\s*)+|\s*[*＊]$/gu, "");
       const nodes = query(section, '.soui-select,input,textarea').filter(node => enabled(node) &&
         (node.matches('.soui-select') || /^(?:text|search|number|textarea|checkbox)$/u.test(node.type) && !node.readOnly && !node.closest('.soui-select')));
       const node = one(nodes);
       if (!label || !node || label.length > 140) continue;
-      const required = section.matches('.soui-form-item-wrapper-required,[aria-required="true"]') || node.required === true;
+      const required = requiredField(section, node, heading);
       entries.push(describe(section, node, `attribute:${label}`, label, required,
         node.maxLength > 0 ? Math.min(node.maxLength, 500) : 500));
     }
-    return entries.filter(entry => entries.filter(other => fieldKey(entry.field.key) === fieldKey(other.field.key)).length === 1);
+    const groupBy = (list, identify) => {
+      const groups = new Map();
+      for (const item of list) {
+        const id = identify(item);
+        if (!groups.has(id)) groups.set(id, []);
+        groups.get(id).push(item);
+      }
+      return groups;
+    };
+    return [...groupBy(entries, entry => fieldKey(entry.field.key)).values()].flatMap(group => {
+      if (group.length === 1) return group;
+      const byId = groupBy(group, ({ section, node }) => clean(section.getAttribute("data-attribute-id") ||
+        section.getAttribute("data-attr-id") || node.getAttribute("name")));
+      return [...byId].flatMap(([id, matches]) => /^[\p{L}\d_.:-]{1,100}$/u.test(id) && matches.length === 1
+        ? [{ ...matches[0], explicitKeyOnly: true,
+          field: { ...matches[0].field, key: `${matches[0].field.key} [${id}]` } }] : []);
+    });
   }
 
-  function requestedValue(entry) {
+  function requestedValue(entry, available) {
     const { key, label } = entry.field;
     if (!key.startsWith("attribute:")) return input[key];
-    const names = namesFor(label);
-    names.add(fieldKey(key));
-    const values = Object.entries(input.attributes ?? {}).filter(([name]) => names.has(fieldKey(name))).map(([, value]) => value);
+    if (entry.explicitKeyOnly) return input.attributes?.[key];
+    const supplied = Object.entries(input.attributes ?? {});
+    const exact = new Set([fieldKey(key), fieldKey(label)]);
+    const fullMatches = supplied.filter(([name]) => exact.has(fieldKey(name)));
+    const aliases = namesFor(label);
+    const matches = fullMatches.length ? fullMatches : supplied.filter(([name]) => {
+      const alias = fieldKey(name);
+      return aliases.has(alias) && !available.some(other => other !== entry &&
+        other.field.key.startsWith("attribute:") && namesFor(other.field.label).has(alias));
+    });
+    const values = matches.map(([, value]) => value);
     return values.length && values.every(value => JSON.stringify(value) === JSON.stringify(values[0])) ? values[0] : undefined;
   }
 
@@ -174,6 +232,27 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
       await delay(45);
     } while (Date.now() < deadline);
     return null;
+  }
+
+  async function expandAttributes() {
+    const label = /^(?:展开所有属性|Expand all attributes)$/iu;
+    const matches = query(document, 'button,a,[role="button"],span,div').filter(node => enabled(node) &&
+      label.test(text(node)) && ![...node.children].some(child => visible(child) && label.test(text(child))));
+    const toggle = one(matches.filter(node => {
+      for (let area = node.parentElement, depth = 0; area && area !== document.body && depth < 7; area = area.parentElement, depth++) {
+        if (area.matches('form,main,[role="dialog"]')) break;
+        if (area.querySelector(attributeItem)) return true;
+      }
+      return false;
+    }));
+    if (!toggle || !editContext() || blocked() || menus().length) return;
+    const before = query(document, attributeItem).length;
+    toggle.click();
+    await stable(() => {
+      const after = query(document, attributeItem).length;
+      return after > before || toggle.isConnected && /^(?:收起所有属性|Collapse all attributes)$/iu.test(text(toggle))
+        ? { key: String(after) } : null;
+    }, 1300);
   }
 
   function menus() {
@@ -369,6 +448,9 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     return read ? { ok: true, status: "filled" } : fail("VALUE_UNVERIFIED", "写入后未回读到实际值。");
   }
 
+  if (kind === "fill" || kind === "review") await expandAttributes();
+  if (!editContext() || blocked()) return fail("PAGE_CHANGED", "SHEIN 商品页面、分类或弹窗状态变化。");
+
   const items = [];
   const issues = [];
   const initial = controls();
@@ -379,6 +461,10 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
       const label = text(node);
       return label.length < 80 && label.match(/店铺\s*(GS\d{3,})\b/u) ? [label.match(/店铺\s*(GS\d{3,})\b/u)[1]] : [];
     }));
+    const shopHeader = '[class*="soc-fe-sso-sdk_userInfo"] [class*="soc-fe-sso-sdk_companyName"]';
+    for (const node of query(document, shopHeader)) {
+      if (/^GS\d{4,20}$/iu.test(text(node))) ids.add(text(node).toUpperCase());
+    }
     return { ok: true, status: "inspected", categoryPath: readCategoryPath(), fields, items, issues,
       storeKey: ids.size === 1 ? [...ids][0] : "" };
   }
@@ -401,16 +487,18 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     return fillText(entry, value);
   }
   const attempted = new Set();
+  const blank = field => ![].concat(field.value).some(value => clean(value));
   for (let round = 0; round < 3; round++) {
     const pending = controls().filter(entry => !attempted.has(entry.field.key));
     if (!pending.length) break;
     for (const { field } of pending) {
       if (!editContext() || blocked()) return fail("PAGE_CHANGED", "SHEIN 商品页面、分类或弹窗状态变化。");
       attempted.add(field.key);
-      const entry = controls().find(control => control.field.key === field.key);
+      const available = controls();
+      const entry = available.find(control => control.field.key === field.key);
       if (!entry) continue;
-      const value = kind === "repair" ? (field.error || field.required && ![].concat(field.value).some(value => clean(value)))
-        && Object.hasOwn(input.values || {}, field.key) ? input.values[field.key] : undefined : requestedValue(entry);
+      const value = kind === "repair" ? (entry.field.error || blank(entry.field))
+        && Object.hasOwn(input.values || {}, field.key) ? input.values[field.key] : undefined : requestedValue(entry, available);
       if (value == null || value === "" || Array.isArray(value) && !value.length) continue;
       const { ok, status, code, message } = await apply(entry, value);
       if (ok) items.push({ key: field.key, label: field.label, status });
@@ -419,7 +507,7 @@ export async function sheinEditorPage({ href, kind = "inspect", input = {} } = {
     }
   }
   const fields = controls().map(({ field }) => field);
-  for (const field of fields) if (field.required && ![].concat(field.value).some(value => clean(value)) &&
+  for (const field of fields) if (field.required && blank(field) &&
       !issues.some(issue => issue.key === field.key)) {
     issues.push({ key: field.key, label: field.label, code: "VALUE_REQUIRED", message: "SHEIN 当前类目要求填写此项。" });
   }
