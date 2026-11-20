@@ -647,12 +647,37 @@ async function createDraft(url, rate) {
   return dir;
 }
 
+async function staggerConcurrentCreate() {
+  const lockDir = path.join(home, "tiktok-mx-stagger.lock");
+  const stampFile = path.join(home, "tiktok-mx-stagger.json");
+  let delayMs = 0;
+  for (let i = 0; i < 60; i++) {
+    try {
+      await fs.mkdir(lockDir, { mode: 0o700 });
+      try {
+        const prev = await lookup(stampFile);
+        const now = Date.now();
+        const nextAt = Math.max(now, (Number(prev?.nextAt) || 0));
+        delayMs = Math.max(0, nextAt - now);
+        await write(stampFile, { nextAt: nextAt + 4500 });
+      } finally {
+        await fs.rmdir(lockDir).catch(() => {});
+      }
+      break;
+    } catch {
+      await sleep(80);
+    }
+  }
+  if (delayMs > 0) await sleep(delayMs);
+}
+
 // Native Messaging gives each workflow its own host process and private port.
 export async function createHostedDraft(sourceId, rate, dispatch) {
   if (nativeDispatch || !/^\d{12,22}$/.test(sourceId) || !Number.isFinite(rate) || rate <= 0)
     throw Error("Invalid native draft task");
   nativeDispatch = dispatch;
   try {
+    await staggerConcurrentCreate();
     const dir = await createDraft("https://shop.tiktok.com/jp/pdp/" + sourceId, rate);
     return { dir, receipt: await read(path.join(dir, "receipt.json")) };
   } finally {

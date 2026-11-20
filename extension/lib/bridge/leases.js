@@ -151,12 +151,13 @@ export function createTabLeases({ now = () => Date.now(), groups = null } = {}) 
 export function chromeTabGroups(api = globalThis.chrome) {
   if (typeof api?.tabs?.group !== "function" || typeof api?.tabGroups?.update !== "function") return null;
   return {
-    async group(tabIds, groupId) {
+    async group(tabIds, groupId, windowId) {
+      const createProps = Number.isInteger(windowId) ? { createProperties: { windowId } } : {};
       try {
-        return await api.tabs.group(groupId == null ? { tabIds } : { tabIds, groupId });
+        return await api.tabs.group(groupId == null ? { tabIds, ...createProps } : { tabIds, groupId });
       } catch (err) {
         if (groupId == null) throw err;
-        return api.tabs.group({ tabIds });
+        return api.tabs.group({ tabIds, ...createProps });
       }
     },
     update: (groupId, props) => api.tabGroups.update(groupId, props),

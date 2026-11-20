@@ -247,7 +247,7 @@ export function createBridgeTools(env) {
           for (const result of opened) if (result.status === "fulfilled") ids.push(result.value.id);
           const failed = opened.find(result => result.status === "rejected");
           if (failed) throw failed.reason;
-          const groupId = await env.tabGroups.group(ids, anchor?.groupId);
+          const groupId = await env.tabGroups.group(ids, anchor?.groupId, anchor ? undefined : tab.windowId);
           if (anchor && groupId !== anchor.groupId) throw Error("目标分组已关闭");
           if (!anchor) await env.tabGroups.update(groupId, { title: args.groupTitle.trim().slice(0, 64), color: "green" });
           return { tabId: tab.id, groupId, url, ...(background.length && { backgroundTabIds: ids.slice(1) }) };
