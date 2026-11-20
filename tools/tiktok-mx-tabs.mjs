@@ -27,7 +27,7 @@ export class DraftTabs {
     const page = this.validate(url);
     for (const related of backgroundUrls) this.validate(related);
     const anchor = this.owned.values().next().value;
-    const { tabId, groupId, backgroundTabIds } = await this.bridge("open_tab", {
+    const { tabId, groupId, windowId, backgroundTabIds } = await this.bridge("open_tab", {
       url: page.href,
       active: active ?? (page.origin === "https://seller.tiktokshopglobalselling.com" && page.pathname !== "/product/manage"),
       ...(backgroundUrls.length && { backgroundUrls }),
@@ -38,8 +38,11 @@ export class DraftTabs {
       this.owned.add(id);
       this.tabs.set(backgroundUrls[i], id);
     }
-    if (!Number.isInteger(groupId) || groupId < 0) throw Error("Chrome did not group the task tab");
-    this.groupId = groupId;
+    const grouped = Number.isInteger(groupId) && groupId >= 0;
+    const windowed = !grouped && Number.isInteger(windowId) && windowId >= 0;
+    if (!grouped && !windowed) throw Error("Chrome did not group or isolate the task tab");
+    if (grouped) this.groupId = groupId;
+    if (Number.isInteger(windowId) && windowId >= 0) this.windowId = windowId;
     this.tabs.set(url, tabId);
     return tabId;
   }
@@ -72,7 +75,10 @@ export class DraftTabs {
     if (!/^\/product\/edit-draft\/\d+$/.test(page.pathname)) throw Error("Expected a saved draft URL");
     const current = this.owned.has(tabId) && (await this.bridge("list_tabs", {})).find(tab => tab.id === tabId);
     // Seller Center may return to the draft list or close the editor on save.
-    if (current && current.groupId === this.groupId) {
+    const sameScope = this.groupId >= 0
+      ? current?.groupId === this.groupId
+      : (this.windowId >= 0 && current?.windowId === this.windowId);
+    if (current && sameScope) {
       if (current.url === page.href) {
         this.recordNavigation(tabId, page.href);
         return tabId;

@@ -155,6 +155,9 @@ export function createBrowserTools(env, { obj, TAB_ID, refs, trusted, wrapCdpToo
     needsTab: true,
     async execute(_args, ctx) {
       refs.drop(ctx.tab.id);
+      if (ctx.tab.groupId != null && ctx.tab.groupId >= 0 && typeof env.tabs.ungroup === "function") {
+        await env.tabs.ungroup(ctx.tab.id).catch(() => {});
+      }
       await env.tabs.remove(ctx.tab.id);
       return { tabId: ctx.tab.id, closed: true };
     },

@@ -742,7 +742,10 @@ export function createAgentTools(ctx) {
         if (groupId == null || groupId < 0) return "当前任务还没有标签分组。";
         const tabs = await chrome.tabs.query({ ...tabQuery(ctx.getWindowId?.(), false), groupId });
         const ids = tabs.map((t) => t.id).filter((id) => id != null);
-        if (ids.length) await chrome.tabs.remove(ids);
+        if (ids.length) {
+          await chrome.tabs.ungroup?.(ids).catch(() => {});
+          await chrome.tabs.remove(ids);
+        }
         ctx.setTaskGroupId?.(null);
         await ctx.onTabsMutated?.();
         return `已关闭任务分组（${ids.length} 个标签）。`;

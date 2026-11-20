@@ -1177,9 +1177,12 @@ export async function save(
       : listState.matches;
     let id = skipList ? knownId : writableDraftId({ matches, knownId, previous });
     let replacing = false;
-    if (!readOnly && previous.groupOwned && Number.isInteger(previous.startedGroup) && previous.startedTab) {
+    if (!readOnly && previous.groupOwned && (Number.isInteger(previous.startedGroup) || Number.isInteger(previous.startedWindow)) && previous.startedTab) {
       const live = (await bridge("list_tabs", {})).find(t => t.id === previous.startedTab);
-      if (live?.groupId === previous.startedGroup && live.url === createUrl) {
+      const sameScope = Number.isInteger(previous.startedGroup)
+        ? live?.groupId === previous.startedGroup
+        : (Number.isInteger(previous.startedWindow) && live?.windowId === previous.startedWindow);
+      if (sameScope && live.url === createUrl) {
         group.owned.add(live.id);
         if (!id) group.pendingForm = live.id;
       } else if (!live && !id && replaceClosed && previous.saving && ["提交失败", "保存失败"].includes(previous.saveMessage) &&
@@ -1214,7 +1217,7 @@ export async function save(
       if (readOnly) throw new Error("No existing draft ID to verify");
       const retryRejectedSave = previous.saving &&
         ["提交失败", "保存失败"].includes(previous.saveMessage) && group.pendingForm === previous.startedTab &&
-        Number.isInteger(previous.startedGroup);
+        (Number.isInteger(previous.startedGroup) || Number.isInteger(previous.startedWindow));
       if ((previous.saving && !retryRejectedSave && !replacing) || previous.id)
         throw new Error(
           "Previous save pending or draft missing. Reconcile the draft list before retrying.",
@@ -1234,6 +1237,7 @@ export async function save(
       const pending = {
         groupOwned: true,
         startedGroup: previous.startedTab && !replacing ? previous.startedGroup : group.groupId,
+        ...(group.windowId != null && { startedWindow: previous.startedTab && !replacing ? previous.startedWindow : group.windowId }),
         draftIdsBefore: previous.draftIdsBefore ?? seenIds,
         startedTab: tab,
         galleryOrder: copy.gallery,

@@ -220,7 +220,7 @@ export function createBridgeTools(env) {
         throw new BridgeError(ERROR_CODES.ORIGIN_NOT_ALLOWED, `URL 不在白名单：${url}`);
       }
       const grouped = args.groupTitle != null || args.groupWithTab != null;
-      if (grouped && (ctx.session || !env.tabGroups || (args.groupTitle != null && args.groupWithTab != null)))
+      if (grouped && (ctx.session || (args.groupTitle != null && args.groupWithTab != null)))
         throw new BridgeError(ERROR_CODES.BAD_ARGS, "网关会话自动分组。本机分组需开启分组权限，并指定组名或组内标签之一。");
       const background = args.backgroundUrls || [];
       if (background.length && (background.length > 2 || !args.groupTitle || ctx.session))
@@ -231,11 +231,16 @@ export function createBridgeTools(env) {
       if (args.groupWithTab != null) {
         anchor = await ctx.authorizeTab(args.groupWithTab);
         ctx.checkTabLease(anchor.id);
-        if (!(anchor.groupId >= 0)) throw new BridgeError(ERROR_CODES.BAD_ARGS, "目标标签当前没有分组。");
+        const canReuseWindow = args.newWindow === true && Number.isInteger(anchor.windowId);
+        if (!(anchor.groupId >= 0) && !canReuseWindow) throw new BridgeError(ERROR_CODES.BAD_ARGS, "目标标签当前没有分组。");
       }
+      const useDedicatedWindow = args.newWindow === true && !anchor && !ctx.session && typeof env.windows?.create === "function";
+      const useWindowIsolation = useDedicatedWindow || (args.newWindow === true && anchor && !(anchor.groupId >= 0));
+      if (grouped && !useWindowIsolation && !env.tabGroups)
+        throw new BridgeError(ERROR_CODES.BAD_ARGS, "网关会话自动分组。本机分组需开启分组权限，并指定组名或组内标签之一。");
       let tab;
       let createdWindowId = null;
-      if (args.newWindow === true && !anchor && !ctx.session && typeof env.windows?.create === "function") {
+      if (useDedicatedWindow) {
         const win = await env.windows.create({ url, focused: false, state: "normal" });
         createdWindowId = win.id;
         tab = win.tabs?.[0] || (await env.tabs.query({ windowId: win.id }))[0];
@@ -249,6 +254,14 @@ export function createBridgeTools(env) {
           for (const result of opened) if (result.status === "fulfilled") ids.push(result.value.id);
           const failed = opened.find(result => result.status === "rejected");
           if (failed) throw failed.reason;
+          if (useWindowIsolation) {
+            return {
+              tabId: tab.id,
+              url,
+              windowId: createdWindowId ?? anchor.windowId,
+              ...(background.length && { backgroundTabIds: ids.slice(1) }),
+            };
+          }
           const groupId = await env.tabGroups.group(ids, anchor?.groupId, anchor ? undefined : tab.windowId);
           if (anchor && groupId !== anchor.groupId) throw Error("目标分组已关闭");
           if (!anchor) await env.tabGroups.update(groupId, { title: args.groupTitle.trim().slice(0, 64), color: "green" });
@@ -260,6 +273,7 @@ export function createBridgeTools(env) {
             ...(background.length && { backgroundTabIds: ids.slice(1) }),
           };
         } catch (error) {
+          if (typeof env.tabs.ungroup === "function") await env.tabs.ungroup(ids).catch(() => {});
           await Promise.allSettled(ids.map(id => env.tabs.remove(id)));
           if (createdWindowId != null) await env.windows?.remove?.(createdWindowId).catch(() => {});
           throw error;
