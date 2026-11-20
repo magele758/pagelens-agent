@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { sellerSubmitPage, submitShopeeListing } from '../submit-listing.mjs';
+import { checkShopeeSubmission, sellerSubmitPage, submitShopeeListing } from '../submit-listing.mjs';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 const origin = 'https://seller.shopee.cn';
@@ -86,13 +86,15 @@ function fake({ failAfterClick = false, mode = 'create', redirectWithoutShop = f
     category: replayReceipt.category, categoryReady: true, validation: [], missingRequired: 0,
     fields: { title: { value: input.title }, sku: { value: input.sku } }, image: { readyCount: 1, count: 1, coverReady: true },
   });
-  return { steps, run: () => submitShopeeListing({ tabId: 12, shopId, input, mode, replayReceipt, tabs, scripting, storage, call }) };
+  const context = { tabId: 12, shopId, input, mode, tabs, scripting, storage, call };
+  return { steps, run: () => submitShopeeListing({ ...context, replayReceipt }), check: () => checkShopeeSubmission(context) };
 }
 
-test('creates a product once and confirms its exact global item ID', async () => {
-  const { run, steps } = fake({ redirectWithoutShop: true });
+test('creates a product once and checks the existing record before replay on a later run', async () => {
+  const { run, steps, check } = fake({ redirectWithoutShop: true });
+  assert.equal(await check(), null);
   assert.equal((await run()).globalItemId, '456');
-  assert.equal((await run()).status, 'skipped');
+  assert.equal((await check()).status, 'skipped');
   assert.deepEqual(steps, ['create', 'read']);
 });
 

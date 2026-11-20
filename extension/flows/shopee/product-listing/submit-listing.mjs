@@ -163,9 +163,13 @@ export async function reconcileShopeeCreated({ tabId, shopId, skus, signal, tabs
   return matches;
 }
 
-export async function submitShopeeListing({ tabId, shopId, input, mode, replayReceipt, signal, call, onStep,
+export function checkShopeeSubmission(args) {
+  return submitShopeeListing({ ...args, preflight: true });
+}
+
+export async function submitShopeeListing({ tabId, shopId, input, mode, replayReceipt, signal, call, onStep, preflight = false,
   tabs = chrome.tabs, scripting = chrome.scripting, storage = chrome.storage.local }) {
-  if (!['create', 'publish'].includes(mode) || replayReceipt?.status !== 'verified') {
+  if (!['create', 'publish'].includes(mode) || !preflight && replayReceipt?.status !== 'verified') {
     return { status: 'needs-review', details: '商品表单尚未核对。' };
   }
   const sku = clean(input.sku), title = clean(input.title);
@@ -241,6 +245,7 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
     try {
       const prior = (await storage.get(key))[key];
       globalItemId = /^\d+$/u.test(prior?.globalItemId) ? prior.globalItemId : undefined;
+      if (preflight && (!prior || mode === 'publish' && globalItemId && prior.stage === 'created')) return null;
       if (prior?.stage === 'creating' || prior?.stage === 'publishing') {
         const recoveringPublish = prior.stage === 'publishing';
         await tabs.update(tabId, { url: recoveringPublish ? `${ORIGIN}${SHOP_LIST}?cnsc_shop_id=${shopId}` : globalListUrl });
@@ -255,6 +260,7 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
       if (globalItemId && (mode === 'create' || prior.stage === 'published')) {
         return result('skipped', '该货号已有本店的创建记录。');
       }
+      if (preflight) return null;
       if (!globalItemId) {
         const form = await call('flow_page_state', { tabId, category: replayReceipt.category });
         if (!form.categoryReady || form.category !== replayReceipt.category || form.modal ||
