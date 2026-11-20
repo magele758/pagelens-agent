@@ -456,8 +456,22 @@ export async function generateListing(
   const verifiedAttributes = previous?.attributePlan ?? controls?.attributePlan;
   if (verifiedAttributes) copy.attributePlan = verifiedAttributes;
   if (controls?.axis && sales) sales.axis = controls.axis;
-  const proposed = copy.variantOptions ?? results.commerce?.variantOptions;
+  let proposed = copy.variantOptions ?? results.commerce?.variantOptions;
   delete copy.variantOptions;
+  if (generate === generateText && !previous) {
+    try {
+      bindHostSales(structuredClone(copy), previous, rate, variants, controls, proposed);
+    } catch (err) {
+      if (/variant label|variantOptions/.test(err.message)) {
+        const fix = await generateJson(
+          generate,
+          variantOptionsContract + '\nReturn JSON {"variantOptions":[{"sourceSkuId":"...","label":"..."}]} covering every SKU in this exact list:\n' +
+            JSON.stringify(variants.skus.map(s => ({ sourceSkuId: s.id, options: s.options }))),
+        );
+        proposed = fix?.variantOptions;
+      }
+    }
+  }
   bindHostSales(copy, previous, rate, variants, controls, proposed);
   commercialPlan(copy, source);
   return { copy, ptc };
