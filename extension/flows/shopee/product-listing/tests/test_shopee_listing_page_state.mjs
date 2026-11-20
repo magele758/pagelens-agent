@@ -150,3 +150,21 @@ test('counts a visible red CSS star without making hidden or non-red decoration 
   assert.deepEqual(app.read(category).attributes.map(({ label, required }) => [label, required]),
     [['红色', true], ['隐藏', false], ['装饰', false]]);
 });
+
+test('resets only the sole variation control of the bound, unsaved product form', t => {
+  const app = fixture(t, `<section class="product-basic-info">
+    <div class="product-category-text">${category}</div>
+    <div class="edit-row"><label class="edit-label">商品名称</label><input value="同款商品"></div>
+  </section><section class="product-sales-info"><div class="variation-edit-item">
+    <span class="variation-delete-btn" id="local">×</span>
+  </div></section><span class="variation-delete-btn" id="other">×</span>`);
+  const clicks = [];
+  for (const control of app.document.querySelectorAll('.variation-delete-btn')) {
+    control.onclick = () => clicks.push(control.id);
+  }
+  const args = { action: 'variant-reset', selector: '#local', category, label: '清除新表单预带规格', value: '同款商品' };
+  assert.equal(app.change({ ...args, value: '错商品' }, url).ok, false);
+  assert.equal(app.change({ ...args, selector: '#other' }, url).ok, false);
+  assert.equal(app.change(args, url).ok, true);
+  assert.deepEqual(clicks, ['local']);
+});

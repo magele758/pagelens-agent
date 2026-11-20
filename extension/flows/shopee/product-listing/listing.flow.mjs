@@ -487,6 +487,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   }
   try {
     await read();
+    const freshForm = input.resetUnownedDraftVariants === true && state.fields.title?.value === '';
     checkpoint('basic');
     if (state.category && category && norm(state.category) !== category) throw new Pause('different-category', { actual: state.category });
     await fill(state.fields.title, input.title);
@@ -646,6 +647,12 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
 
     checkpoint('sales');
     const variant = input.variant;
+    if (freshForm && state.variant.reset && !variant && (state.fields.variantName || state.variant.rows.length)) {
+      await native('flow_control_click', {
+        action: 'variant-reset', selector: state.variant.reset, category, label: '清除新表单预带规格', value: input.title,
+      });
+      await readUntil(current => !current.fields.variantName && !current.variant.rows.length);
+    }
     if (variant) {
       const allowedOptions = new Set(variants.map(item => item.option));
       if (state.variant.enable) {
@@ -654,21 +661,30 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         });
         await readUntil((current) => Boolean(current.fields.variantName));
       }
-      if (state.fields.variantName?.value && state.fields.variantName.value !== variant.name ||
-          state.variant.options.some(existing => !allowedOptions.has(existing))) throw new Pause('different-variant');
-      if (state.fields.variantName?.value !== variant.name) {
+      // A category can start with an empty, predefined variation axis. A generic
+      // one-axis import can use that label without changing any of its option values.
+      const name = variant.name === '规格' && state.variant.options.every(option => allowedOptions.has(option)) && state.fields.variantName?.value
+        ? state.fields.variantName.value : variant.name;
+      if (state.fields.variantName?.value && state.fields.variantName.value !== name ||
+          state.variant.options.some(existing => !allowedOptions.has(existing))) {
+        throw new Pause('different-variant', {
+          actual: [state.fields.variantName?.value, ...state.variant.options].filter(Boolean),
+          expected: [variant.name, ...allowedOptions],
+        });
+      }
+      if (state.fields.variantName?.value !== name) {
         if (!state.fields.variantName?.selector) throw new Pause('variant-control-changed', { kind: 'name' });
         await native('flow_variant_write', {
-          kind: 'name', selector: state.fields.variantName.selector, category, name: variant.name, existingOptions: state.variant.options,
+          kind: 'name', selector: state.fields.variantName.selector, category, name, existingOptions: state.variant.options,
         });
-        await readUntil((current) => current.fields.variantName?.value === variant.name);
-        if (state.fields.variantName?.value !== variant.name) throw new Pause('variant-name-readback', { name: variant.name });
+        await readUntil((current) => current.fields.variantName?.value === name);
+        if (state.fields.variantName?.value !== name) throw new Pause('variant-name-readback', { name });
       }
       for (const { option } of variants) {
         if (state.variant.options.includes(option)) continue;
         if (!state.fields.variantOption?.selector) throw new Pause('variant-control-changed', { kind: 'option', option });
         await native('flow_variant_write', {
-          kind: 'option', selector: state.fields.variantOption.selector, category, name: variant.name, option,
+          kind: 'option', selector: state.fields.variantOption.selector, category, name, option,
           existingOptions: state.variant.options,
         });
         await readUntil(current => Boolean(rowFor(option, current)));
@@ -695,7 +711,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         if (!image?.selector) throw new Pause('sku-image-control-missing', { option });
         await unique(image.selector, 'input');
         await native('upload_file', { selector: image.selector, paths: [item.imagePath] });
-        await readUntil(current => Boolean(rowFor(option, current)?.image?.present), 8000);
+        await readUntil(current => Boolean(rowFor(option, current)?.image?.present), 18000);
         if (!rowFor(option)?.image?.present) throw new Pause('sku-image-readback', { option });
         uploadedOptions.add(option);
       }

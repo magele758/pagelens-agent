@@ -12,6 +12,8 @@ const STEPS = [
   ["sales", "填写规格、SKU 与图片"],
   ["shipping", "填写运费并回读"],
   ["size-chart", "填写并核对尺码表"],
+  ["submit-create", "创建全球商品"],
+  ["submit-publish", "确认店铺上架"],
 ];
 const STEP_LABELS = new Map(STEPS);
 const REASONS = new Map([
@@ -51,6 +53,8 @@ const REASONS = new Map([
   ["upload-denied", "此主图尚未获同意上传。"],
   ["flow-busy", "此标签已有流程正在运行。"],
   ["batch-product-error", "无法完成该商品。"],
+  ["batch-tabs-not-closed", "有工作标签未关闭。"],
+  ["batch-submit-unknown", "提交结果待核实。"],
 ]);
 const LABELS = { label: "属性", choice: "选项", category: "类目", recommendations: "页面推荐类目", option: "规格选项", key: "字段",
   expected: "预期", actual: "当前", text: "提示", error: "工具错误", message: "提示" };
