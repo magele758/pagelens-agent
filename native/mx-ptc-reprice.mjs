@@ -315,7 +315,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       }
       const staged = await runCode(tab, snapshot);
       if (!verifyPreserved(before, staged, prices, "before saving")) throw Error("Draft prices differ before saving");
-      verifyAttributeSelections(before.attributeCatalog, await readAttributeSelections(staged, "before saving"), "before saving");
+      verifyAttributeSelections(before.attributeCatalog, await readAttributeSelections(staged, "before saving", copy.attributePlan?.values), "before saving");
       if (multiplier === 100) await writeJson(planPath, {
         ...identity, caps: [...caps].map(([label, maxPriceMXN]) => ({ label, maxPriceMXN })),
       });
@@ -329,7 +329,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
         if (delay) await sleep(delay);
         saved = await readFreshDocument(link, inEditor, snapshot);
         if (verifyPreserved(before, saved, prices, "after refresh")) {
-          saved.attributeCatalog = await readAttributeSelections(saved, "after refresh");
+          saved.attributeCatalog = await readAttributeSelections(saved, "after refresh", copy.attributePlan?.values);
           break;
         }
       }

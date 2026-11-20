@@ -209,6 +209,7 @@ export function createBridgeTools(env) {
         groupTitle: { type: "string", description: "本机调用：用新标签创建任务分组。" },
         groupWithTab: { type: "integer", description: "本机调用：将新标签加入指定标签所在分组。" },
         backgroundUrls: { type: "array", items: { type: "string" }, description: "本机新建任务分组时一起加载的后台页面，最多两个。" },
+        newWindow: { type: "boolean", description: "本机调用：在独立非聚焦新窗口中创建该任务分组，避免并发窗口抢前台标签。" },
       },
       ["url"],
     ),
@@ -232,7 +233,15 @@ export function createBridgeTools(env) {
         ctx.checkTabLease(anchor.id);
         if (!(anchor.groupId >= 0)) throw new BridgeError(ERROR_CODES.BAD_ARGS, "目标标签当前没有分组。");
       }
-      const tab = await env.tabs.create({ url, active: args.active === true, ...(anchor && { windowId: anchor.windowId }) });
+      let tab;
+      let createdWindowId = null;
+      if (args.newWindow === true && !anchor && !ctx.session && typeof env.windows?.create === "function") {
+        const win = await env.windows.create({ url, focused: false, state: "normal" });
+        createdWindowId = win.id;
+        tab = win.tabs?.[0] || (await env.tabs.query({ windowId: win.id }))[0];
+      } else {
+        tab = await env.tabs.create({ url, active: args.active === true, ...(anchor && { windowId: anchor.windowId }) });
+      }
       if (grouped) {
         const ids = [tab.id];
         try {
@@ -240,16 +249,23 @@ export function createBridgeTools(env) {
           for (const result of opened) if (result.status === "fulfilled") ids.push(result.value.id);
           const failed = opened.find(result => result.status === "rejected");
           if (failed) throw failed.reason;
-          const groupId = await env.tabGroups.group(ids, anchor?.groupId);
+          const groupId = await env.tabGroups.group(ids, anchor?.groupId, anchor ? undefined : tab.windowId);
           if (anchor && groupId !== anchor.groupId) throw Error("目标分组已关闭");
           if (!anchor) await env.tabGroups.update(groupId, { title: args.groupTitle.trim().slice(0, 64), color: "green" });
-          return { tabId: tab.id, groupId, url, ...(background.length && { backgroundTabIds: ids.slice(1) }) };
+          return {
+            tabId: tab.id,
+            groupId,
+            url,
+            ...(createdWindowId != null && { windowId: createdWindowId }),
+            ...(background.length && { backgroundTabIds: ids.slice(1) }),
+          };
         } catch (error) {
           await Promise.allSettled(ids.map(id => env.tabs.remove(id)));
+          if (createdWindowId != null) await env.windows?.remove?.(createdWindowId).catch(() => {});
           throw error;
         }
       }
-      return { tabId: tab.id, url: tab.pendingUrl || tab.url || url };
+      return { tabId: tab.id, url: tab.pendingUrl || tab.url || url, ...(createdWindowId != null && { windowId: createdWindowId }) };
     },
   });
 

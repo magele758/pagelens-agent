@@ -391,16 +391,23 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
   const tab = await group.open(url, reuseSourceForCreate ? [drafts] : [], true);
   await waitForSourceTab(tab, url);
   let data;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const retryDelays = [2500, 5000, 9000, 14000];
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
       data = await js(tab, extract, id);
       break;
     } catch (error) {
-      if (attempt === 2 || !/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed/i.test(error.message)) throw error;
+      if (attempt === retryDelays.length || !/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed|did not finish navigating/i.test(error.message)) throw error;
       mark("sourceReload");
-      await bridge("activate_tab", { tabId: tab });
-      if (attempt === 1) await bridge("reload_tab", { tabId: tab });
-      await sleep(1200);
+      await sleep(retryDelays[attempt]);
+      await bridge("activate_tab", { tabId: tab }).catch(() => {});
+      if (!bridgeOverride && /showing error page/i.test(error.message)) {
+        await bridge("navigate_tab", { tabId: tab, url });
+        await waitForSourceTab(tab, url).catch(() => {});
+      } else {
+        await bridge("reload_tab", { tabId: tab });
+      }
+      await sleep(1500);
     }
   }
   mark("sourceRead");
@@ -647,12 +654,37 @@ async function createDraft(url, rate) {
   return dir;
 }
 
+async function staggerConcurrentCreate() {
+  const lockDir = path.join(home, "tiktok-mx-stagger.lock");
+  const stampFile = path.join(home, "tiktok-mx-stagger.json");
+  let delayMs = 0;
+  for (let i = 0; i < 60; i++) {
+    try {
+      await fs.mkdir(lockDir, { mode: 0o700 });
+      try {
+        const prev = await lookup(stampFile);
+        const now = Date.now();
+        const nextAt = Math.max(now, (Number(prev?.nextAt) || 0));
+        delayMs = Math.max(0, nextAt - now);
+        await write(stampFile, { nextAt: nextAt + 4500 });
+      } finally {
+        await fs.rmdir(lockDir).catch(() => {});
+      }
+      break;
+    } catch {
+      await sleep(80);
+    }
+  }
+  if (delayMs > 0) await sleep(delayMs);
+}
+
 // Native Messaging gives each workflow its own host process and private port.
 export async function createHostedDraft(sourceId, rate, dispatch) {
   if (nativeDispatch || !/^\d{12,22}$/.test(sourceId) || !Number.isFinite(rate) || rate <= 0)
     throw Error("Invalid native draft task");
   nativeDispatch = dispatch;
   try {
+    await staggerConcurrentCreate();
     const dir = await createDraft("https://shop.tiktok.com/jp/pdp/" + sourceId, rate);
     return { dir, receipt: await read(path.join(dir, "receipt.json")) };
   } finally {
@@ -755,6 +787,7 @@ async function listDrafts(list, title, draftId = null, waitForMatch = false) {
 }
 async function refreshDraftList(list, title, waitForMatch = false) {
   if (!bridgeOverride) {
+    await bridge("activate_tab", { tabId: list });
     try {
       return await inbox("refresh_mx_draft_list", { action: "refresh_mx_draft_list",
         tabId: list, url: drafts, title, waitForMatch });
@@ -932,6 +965,16 @@ export async function resolveCategory(tab, url, source, copy, dir, persistListin
     const flex = await choose(source, scope.leaves, undefined, { flexibleScope: true });
     const leafTerm = flex.choice.label.split(/\s+[>/-]\s+/).at(-1);
     const flexChoice = { label: flex.choice.label, search: leafTerm };
+    try {
+      await runCode(tab, sellerCategorySearchCode(url));
+      const typed = await bridge("trusted_type", { tabId: tab, value: leafTerm });
+      if (typed?.ok) {
+        const res = await runCode(tab, sellerCategoryOptionsCode(url, flex.choice.label));
+        if (categoryPath(res.choice) === categoryPath(flex.choice.label)) {
+          return { choice: flexChoice, ptc: flex.ptc, selected: { selected: true, label: flex.choice.label, shown: res.choice } };
+        }
+      }
+    } catch {}
     const applied = await category(tab, flexChoice);
     if (!applied?.selected) return null;
     return { choice: flexChoice, ptc: flex.ptc, selected: applied };
@@ -1186,6 +1229,7 @@ export async function save(
           );
         tab = previous.startedTab;
       } else if (tab == null) tab = await openCreateForm();
+      else if (!bridgeOverride) await bridge("activate_tab", { tabId: tab });
       group.pendingForm = tab;
       const pending = {
         groupOwned: true,
@@ -1544,11 +1588,14 @@ export async function save(
     mark("verified");
     const started =
       (knownId && !resave) || previous.startedTab || readOnly ? invocationStarted : data.start;
+    const { getPtcTokenLedger } = await import("./tiktok-mx-ptc.mjs");
+    const tokenUsage = getPtcTokenLedger();
     const receipt = {
       id,
       link,
       title: copy.title,
       verified: true,
+      tokenUsage,
       formRuns,
       skuWrites,
       firstPersisted,

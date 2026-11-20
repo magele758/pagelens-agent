@@ -113,8 +113,12 @@ export function mxSellerUrlAllowed(parameters, url, { destination = false } = {}
   if (parameters.mode === "reprice_draft" || parameters.mode === "publish_draft") {
     if (page.href === mxDraftUrl(parameters.draftId)) return true;
   }
+  if (page.pathname === "/product/listing" && !destination && parameters.mode === "publish_draft") {
+    return true;
+  }
   if (page.pathname === "/product/manage") {
     if (parameters.mode === "reprice_draft" && destination) return false;
+    if (!destination && parameters.mode === "publish_draft") return true;
     const tabs = page.searchParams.getAll("tab");
     return [...page.searchParams.keys()].every(key => ["shop_region", "tab"].includes(key)) &&
       (!tabs.length || (tabs.length === 1 && ["all", "draft", "active", "deactivate", "reviewing"].includes(tabs[0])));

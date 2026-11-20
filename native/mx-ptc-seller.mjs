@@ -89,12 +89,12 @@ function returnedProductId(signal, draftId) {
   return ids.size === 1 ? [...ids][0] : draftId;
 }
 
-async function waitForListing(send, productId) {
+async function waitForListing(send, productId, expectedTitle = null) {
   const url = mxManageUrl + "&tab=all";
   const readCode = sellerListCode(url, productId);
   return withSellerTab(send, url, async call => {
     let current;
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 6; attempt++) {
       try {
         current = attempt === 0
           ? (await call("run_js", { code: readCode })).result
@@ -103,7 +103,26 @@ async function waitForListing(send, productId) {
         current = { error: error.message };
       }
       if (releasedStatus(current?.status)) break;
-      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 800));
+      if (expectedTitle && attempt >= 1 && current?.status === "not_found") {
+        const byTitle = await call("run_js", {
+          code: `
+            const want = ${JSON.stringify(expectedTitle)}.trim();
+            for (const r of document.querySelectorAll("tbody tr")) {
+              if (!r.getClientRects().length || !r.innerText.includes(want)) continue;
+              const id = (r.innerText.match(/ID\\s*[:：]\\s*(\\d{12,22})/) || [])[1];
+              const txt = r.innerText;
+              const st = /在售|\\bActiva?\\b/i.test(txt) ? "active" : /审核中|En revisi/i.test(txt) ? "under_review" : "";
+              if (id && st) return { productId: id, status: st, title: want, url: location.href };
+            }
+            return null;
+          `,
+        }).catch(() => null);
+        if (releasedStatus(byTitle?.result?.status)) {
+          current = byTitle.result;
+          break;
+        }
+      }
+      if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 1500));
     }
     return current;
   }, true).catch(error => ({ error: error.message }));
@@ -160,8 +179,13 @@ async function publishDraft(send, { sourceId, draftId, offer }) {
     const call = (tool, args) => send(tool, { tabId: tab, ...args });
     const inspected = await inspectWithPtc({ sourceId, draftId }, async () => {
       const saved = (await call("run_js", { code: snapshotCode(true, true, true) })).result;
-      if (saved.hasCategoryAttributes)
-        saved.attributeCatalog = (await call("run_js", { code: attributeCode(link) })).result;
+      if (saved.hasCategoryAttributes) {
+        for (let a = 0; a < 5; a++) {
+          saved.attributeCatalog = (await call("run_js", { code: attributeCode(link) })).result;
+          if (saved.attributeCatalog?.some(f => f.selected?.length) || a === 4) break;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
       return saved;
     });
     const executor = await ptcVerify(() => compareOffer(inspected, offer));
@@ -184,7 +208,7 @@ async function publishDraft(send, { sourceId, draftId, offer }) {
     }
     const productCandidateId = returnedProductId(signal, draftId);
     if (productCandidateId !== draftId) await writeState(statePath, { ...state, productCandidateId, signal });
-    const current = await waitForListing(send, productCandidateId);
+    const current = await waitForListing(send, productCandidateId, inspected.saved?.title || null);
     const verified = releasedStatus(current.status);
     const result = { ...state, status: verified ? current.status : "submission_unconfirmed", verified,
       submitted: verified, productCandidateId, ...(verified && { productId: current.productId }), signal, readback: current };
