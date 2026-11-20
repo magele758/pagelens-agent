@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SOCKET_PROTOCOL, connectGateway, createBroker, defaultSocketPath } from "./gateway.mjs";
+import { MAX_PORT_MESSAGE_BYTES, SOCKET_PROTOCOL, connectGateway, createBroker, defaultSocketPath } from "./gateway.mjs";
 import { shellPolicyBlock } from "../extension/lib/agent/shell-policy.js";
 import { loadProductDirectory, readProductSizeChartChunk } from "./product-directory.mjs";
 import { pickProductDirectory } from "./product-directory-picker.mjs";
@@ -292,13 +292,20 @@ function scanSkillTreeFromPath(root, { maxSkills = MAX_SKILL_COUNT, maxDepth = M
   return { files, truncated };
 }
 
+function productDirectoryResponse(directory) {
+  if (Buffer.byteLength(JSON.stringify(directory), "utf8") > MAX_PORT_MESSAGE_BYTES) {
+    return { ok: false, error: "商品目录资料超过 Chrome 单次读取上限，请分成较小的目录读取。" };
+  }
+  return directory;
+}
+
 export function handleFs(req) {
   const action = String(req?.action || "").trim();
   const agentScope = req?.scope === "agent";
   try {
     if (action === "loadProductDirectory") {
       if (agentScope) return { ok: false, op: "fs", action, error: "请在 PageLens 中手动选择商品目录。" };
-      return loadProductDirectory(resolveAbs(req.path));
+      return productDirectoryResponse(loadProductDirectory(resolveAbs(req.path)));
     }
     if (action === "readProductSizeChartChunk") {
       if (agentScope) return { ok: false, op: "fs", action, error: "请通过 PageLens 商品目录读取图片。" };
@@ -495,7 +502,7 @@ export async function handleRequest(req, { pickDirectory = pickProductDirectory 
       if (typeof selected !== "string" || !path.isAbsolute(selected) || /[\0\r\n]/u.test(selected)) {
         return { ok: false, error: "系统返回了无效的商品目录。" };
       }
-      return { ...loadProductDirectory(selected), directoryName: path.basename(selected) };
+      return productDirectoryResponse({ ...loadProductDirectory(selected), directoryName: path.basename(selected) });
     } catch (error) {
       return { ok: false, error: error?.code === "ENOENT" ? "所选目录已不存在，请重新选择。" : error.message };
     }

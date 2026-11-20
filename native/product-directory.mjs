@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const MAX_PRODUCTS = 20;
+const MAX_PRODUCTS = 30;
 const MAX_JSON = 512 * 1024;
 const MAX_IMAGE = 20 * 1024 * 1024;
 const MAX_SIZE_CHART_IMAGE = 4 * 1024 * 1024;
@@ -134,7 +134,7 @@ export function loadProductDirectory(root) {
   const folders = (single ? [{ name: path.basename(canonical) }] : entries
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .sort((a, b) => a.name.localeCompare(b.name, "zh-CN")));
-  if (folders.length > MAX_PRODUCTS) throw new Error("单批最多读取 20 个商品子目录。");
+  if (folders.length > MAX_PRODUCTS) throw new Error(`单批最多读取 ${MAX_PRODUCTS} 个商品子目录。`);
   const issues = [];
   const products = [];
   for (const { name: folder } of folders) {

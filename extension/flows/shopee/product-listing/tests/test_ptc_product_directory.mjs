@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { handleFs } from "../../../../../native/pagelens-host.mjs";
+import { handleFs, handleRequest } from "../../../../../native/pagelens-host.mjs";
 import { chooseShopeeProductDirectory, completeDirectorySizeChartInput, directoryAttributeAdvice,
   loadProductDirectory, prepareSizeChartInput, readSizeChartImage } from "../sidepanel/product-directory.js";
 
@@ -199,5 +199,32 @@ try {
   assert.equal(cached.products[0].input.sizeChartImagePath, undefined);
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
+}
+
+const largeBatch = fs.mkdtempSync(path.join(os.tmpdir(), "pl-bulk-directory-"));
+try {
+  const folders = Array.from({ length: 30 }, (_, index) => String(index + 1).padStart(2, "0"));
+  const picker = () => handleRequest({ op: "chooseProductDirectory" }, { pickDirectory: async () => largeBatch });
+  const request = { action: "loadProductDirectory", path: largeBatch };
+  for (const folder of folders) {
+    const dir = path.join(largeBatch, folder);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "product.json"), JSON.stringify({ title: `商品 ${folder}` }));
+  }
+  const manual = handleFs(request);
+  assert.equal(manual.ok, true);
+  assert.deepEqual(manual.products.map(({ folder }) => folder), folders);
+  assert.deepEqual(await picker(), { ...manual, directoryName: path.basename(largeBatch) });
+
+  fs.mkdirSync(path.join(largeBatch, "31"));
+  assert.match(handleFs(request).error, /最多读取 30 个商品子目录/u);
+  fs.rmdirSync(path.join(largeBatch, "31"));
+  for (const folder of folders) {
+    fs.writeFileSync(path.join(largeBatch, folder, "product.json"), JSON.stringify({ title: `商品 ${folder}`, description: "商品详情".repeat(3500) }));
+  }
+  assert.match(handleFs(request).error, /Chrome 单次读取上限/u);
+  assert.match((await picker()).error, /Chrome 单次读取上限/u);
+} finally {
+  fs.rmSync(largeBatch, { recursive: true, force: true });
 }
 console.log("OK native PTC product directory responses");
