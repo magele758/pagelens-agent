@@ -1,6 +1,7 @@
 import "./panel-log.js";
 import { bindWindowMail } from "./window-mail.js";
 import { allowCurrentSite, renderAllowCurrentSite } from "./allow-current-site.js";
+import { bindMxApprovalPanel } from "./mx-approval-panel.js";
 import { createAgentGatewayPanel } from "./agent-gateway-panel.js";
 import { captureTab, lastUserAskedForSkill, resumeInterruptedRun, sendPrompt } from "./agent-loop.js";
 import {
@@ -647,6 +648,7 @@ function wire() {
   });
   paintInboxActivity();
   bindExternalPromptBridge();
+  bindMxApprovalPanel($("settings-group-mx-approval"));
   createAgentGatewayPanel({
     root: $("view-settings"),
     copyText,

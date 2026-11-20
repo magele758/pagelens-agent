@@ -51,7 +51,9 @@ node tools/agent-inbox.mjs wait "$JOB_ID" --extension-id "$EXTENSION_ID"
 
 Use the PTC receipt's `verified` and `status` fields to decide which seller action can run next. Keep the exact saved editor open when the publish result is uncertain.
 
-With the Inbox and seller bridge enabled, PageLens records verified submissions awaiting review and checks one due product ID about once a minute, including when the side panel is closed. An initial listing approval requires the seller's refreshed product row to say 在售. A title update also requires the expected new title on that product row. PageLens records each approval once in the Inbox activity log and sends a desktop notification when notifications are available.
+Approval tracking is off by default. Enable it in Settings → Advanced → TikTok Shop 审核跟踪 before submitting a product or title change. With the file Inbox, seller bridge and seller origin enabled, PageLens reads one due product about once a minute from an already open Mexico **All products** list. Automatic tracking never opens, refreshes or closes tabs. A list loaded before submission is marked stale until the user refreshes it or opens a new list. A matching 在售 row confirms a listing, and a title update also requires the expected title. PageLens records the approval in Inbox activity and sends a desktop notification when available.
+
+The tracking panel shows the last observation, deadline and outcome for each product. You can stop one record or turn tracking off to end all pending records. Missing products and closed lists can wait up to 24 hours from submission. A fresh opt-in applies to future submissions. On upgrade, unfinished records from the earlier automatic tracker move to history. A directed `listing_status` job remains available for an on-demand, refreshed check.
 
 Run these commands in the checkout that Chrome loads as an unpacked extension:
 

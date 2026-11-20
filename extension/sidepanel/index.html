@@ -631,6 +631,29 @@
               </div>
             </details>
 
+            <details class="accordion settings-group" id="settings-group-mx-approval">
+              <summary>
+                <span class="group-icon"><svg class="ico"><use href="#i-history"/></svg></span>
+                <span class="group-text"><strong>TikTok Shop 审核跟踪</strong></span>
+                <span class="state settings-state" id="mx-approval-summary">读取中…</span>
+                <span class="chev">›</span>
+              </summary>
+              <div class="inner">
+                <label class="check">
+                  <input type="checkbox" id="mx-approval-enabled" aria-describedby="mx-approval-hint" disabled />
+                  跟踪新提交的商品和标题审核
+                </label>
+                <p class="hint" id="mx-approval-hint">启用文件 Inbox 和外部 Agent 控制，并打开已获授权的「墨西哥商品管理 → 全部」列表，即可检查审核结果。每条最多跟踪 24 小时，关闭开关会结束当前跟踪。</p>
+                <p class="status bad" id="mx-approval-error" role="status"></p>
+                <p id="mx-approval-empty" hidden>暂无待跟踪商品</p>
+                <ul class="mx-approval-list" id="mx-approval-pending" aria-label="正在跟踪的审核"></ul>
+                <details class="plain-detail" id="mx-approval-history" hidden>
+                  <summary id="mx-approval-history-label">已结束的跟踪</summary>
+                  <ul class="mx-approval-list" id="mx-approval-finished" aria-labelledby="mx-approval-history-label"></ul>
+                </details>
+              </div>
+            </details>
+
             <details class="accordion settings-group" id="settings-group-agents">
               <summary>
                 <span class="group-icon">

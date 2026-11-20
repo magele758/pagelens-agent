@@ -35,6 +35,8 @@ import { offscreenDoc } from "../offscreen-doc.js";
 import { requireOptionalFeature } from "../optional-permissions.js";
 import { markJobStarted, recordJobFinished } from "./inbox-activity.js";
 import { createMxApprovalWatcher } from "./mx-approval-watch.js";
+import { readOpenMxApprovalStatus } from "./mx-approval-read.js";
+import { mxManageUrl } from "../../skills/tiktok-mx-draft/tiktok-mx-seller-request.mjs";
 import { developmentInboxJob } from "./inbox-development.js";
 import { cancelAgentPrompt, settleHeadless, startAgentPrompt, takeCompletion, takeExpired } from "./inbox-agent.js";
 
@@ -67,6 +69,22 @@ function getMxApprovalWatcher() {
     },
   });
   return mxApprovalWatcher;
+}
+
+export async function manageMxApproval(message) {
+  const watcher = getMxApprovalWatcher();
+  switch (message.type) {
+    case "pl.mxApproval.get":
+      return watcher.getState();
+    case "pl.mxApproval.setEnabled":
+      if (typeof message.enabled !== "boolean") throw Error("审核跟踪开关需要布尔值");
+      return watcher.setEnabled(message.enabled);
+    case "pl.mxApproval.cancel":
+      if (typeof message.key !== "string" || !message.key) throw Error("请选择要停止的审核跟踪");
+      return watcher.cancel(message.key);
+    default:
+      throw Error("未知的审核跟踪操作");
+  }
 }
 
 function sleep(ms) {
@@ -661,6 +679,8 @@ export async function executeJob(
     auth = res.record;
   }
   if (repairing || sellerAction || action === "ptc_inspect_mx_draft" || action === "ptc_create_mx_draft") {
+    if (typeof job.id !== "string" || !job.id.trim())
+      return { ok: false, error: "TikTok MX tasks require a job ID" };
     const bridge = getBridge();
     if (!bridge) return { ok: false, error: "PageLens bridge unavailable" };
     const run = action === "ptc_inspect_mx_draft" ? inspectDraftJob : runNativeDraft;
@@ -899,6 +919,7 @@ export async function pollAgentInboxOnce(deps = {}) {
   let receiptError;
   let reloadAccepted = false;
   let scheduleFollowUp = false;
+  let checkApprovals = false;
 
   // Only execution overlaps. Outbox and activity writes are applied here, one at a time.
   async function finishNextDraft() {
@@ -923,6 +944,7 @@ export async function pollAgentInboxOnce(deps = {}) {
     await expireAgentPrompt();
     const settings = await loadSettings();
     if (settings.agentInboxEnabled !== true) return { skipped: true, reason: "disabled" };
+    checkApprovals = true;
     if (!gate.canPoll()) return { skipped: true, reason: "backoff", retryInMs: gate.retryInMs() };
 
     let names;
@@ -1000,18 +1022,21 @@ export async function pollAgentInboxOnce(deps = {}) {
         scheduleFollowUp = true;
     }
     await drainDrafts();
-    if (!reloadAccepted && settings.agentBridgeEnabled === true) {
-      await getMxApprovalWatcher().poll(productId => executeJob({
-        action: "ptc_mx_seller_action",
-        request: { mode: "listing_status", productId },
-      }, { ...deps, settings, directed: true })).catch(() => {});
-    }
     return { ok: true, processed: results.length, results };
   } finally {
     try { await drainDrafts(); }
     finally {
       polling = false;
       if (scheduleFollowUp && !reloadAccepted) pollForNextStep();
+    }
+    // A suspended seller tab must never hold the Inbox lock or delay a queued job.
+    if (checkApprovals && !reloadAccepted) {
+      await getMxApprovalWatcher().poll(async (productId, startedAt) => {
+        const settings = await loadSettings();
+        if (!settings.agentInboxEnabled || !settings.agentBridgeEnabled || !isUrlAllowed(mxManageUrl, settings.agentBridgeOrigins))
+          return { productId, status: "access_disabled", verified: false };
+        return readOpenMxApprovalStatus(productId, chrome, startedAt);
+      }).catch(() => {});
     }
   }
 }

@@ -52,6 +52,10 @@ try {
   const refusal = { ok: false, error: "TikTok MX seller action requires a directed inbox request without a token" };
   assert.deepEqual(await executeJob({ ...job, directed: true }), refusal);
   assert.deepEqual(await executeJob({ ...job, token: "forbidden" }, { directed: true }), refusal);
+  const anonymousStatus = { action, request: { mode: "listing_status", productId: draftId } };
+  assert.deepEqual(await executeJob(anonymousStatus, { directed: true }), {
+    ok: false, error: "TikTok MX tasks require a job ID",
+  });
   const bridge = { call: () => assert.fail("the mocked native port sent no tool calls") };
   await assert.rejects(runNativeDraft({ ...job, token: "forbidden" }, bridge), /does not accept a token/);
   assert.equal(await runNativeDraft({ ...job, action: ` ${action} ` }, bridge), receipt);
