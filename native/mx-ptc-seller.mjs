@@ -122,7 +122,7 @@ async function waitForListing(send, productId, expectedTitle = null) {
           break;
         }
       }
-      if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 1000));
+      if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 1500));
     }
     return current;
   }, true).catch(error => ({ error: error.message }));

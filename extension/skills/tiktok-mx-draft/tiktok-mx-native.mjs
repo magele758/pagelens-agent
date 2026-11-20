@@ -49,10 +49,13 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
     } else if (tool !== "list_tabs" && !owned.has(args.tabId)) throw Error("Tab outside draft task");
     else if (tool !== "list_tabs" && (repairUrl || tool !== "close_tab")) {
       const currentUrl = await tabUrl(args.tabId);
-      const reopening = tool === "navigate_tab" && isMxSellerManageReturn(currentUrl) &&
-        /^\/product\/edit-draft\/\d+$/.test(new URL(args.url).pathname);
+      const reopening = isMxSellerManageReturn(currentUrl) &&
+        (tool === "activate_tab" || (tool === "navigate_tab" && /^\/product\/edit-draft\/\d+$/.test(new URL(args.url).pathname)));
       const cleanup = repairUrl && tool === "close_tab" && isMxSellerManageReturn(currentUrl);
-      if (!reopening && !cleanup && !allowedDestination(currentUrl)) throw Error("Task tab navigated outside draft workflow");
+      const transientError = !repairUrl && ["activate_tab", "reload_tab", "navigate_tab"].includes(tool) &&
+        (currentUrl === "about:blank" || String(currentUrl || "").startsWith("chrome-error://"));
+      if (!reopening && !cleanup && !transientError && !allowedDestination(currentUrl))
+        throw Error("Task tab navigated outside draft workflow");
     }
     const effectiveArgs = tool === "open_tab" && args?.groupTitle != null ? { ...args, newWindow: true } : args;
     const reply = await call(tool, effectiveArgs);

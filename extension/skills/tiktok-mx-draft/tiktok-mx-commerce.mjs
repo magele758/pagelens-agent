@@ -417,9 +417,9 @@ export async function sellerVariants(ui, plan) {
     input.select();
     if (!document.execCommand?.("insertText", false, sku.option) || input.value !== sku.option) {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, sku.option);
-      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: sku.option, inputType: "insertText" }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
     }
-    await sleep(150);
+    await sleep(350);
     if (matches()) continue;
     if (!input.isConnected || input.value !== sku.option) {
       const committedEarly = await wait(matches, "early option " + sku.option, 8).catch(() => null);
@@ -435,8 +435,7 @@ export async function sellerVariants(ui, plan) {
         bubbles: true,
       }),
     );
-    input.blur();
-    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    ui.blurOut(input);
     field("product_name")?.focus();
     await wait(matches, "committed option " + sku.option, 45);
   }

@@ -16,37 +16,22 @@ function sameCategory(a, b) {
 }
 
 export function formState() {
-  const title = document.querySelector(
-    '[data-id="product.publish.product_name"]',
-  );
-  const editor = document.querySelector(
-    '[data-id="product.publish.description.local_lang"] .ProseMirror',
-  );
-  const realImage = (i) =>
-    i.getAttribute("src") &&
-    !/placeholder|ProseMirror-separator/.test(i.src + " " + i.className);
-  const gallery = [
-    ...document.querySelectorAll('[data-id^="product.widget.main_image."]'),
-  ].filter(slot => !slot.querySelector('[role="progressbar"],[class*="_uploading_"]') &&
-    [...slot.querySelectorAll("img")].some(realImage)).length;
+  const q = s => document.querySelector(s), qa = s => [...document.querySelectorAll(s)], bt = document.body.innerText;
+  const title = q('[data-id="product.publish.product_name"]');
+  const editor = q('[data-id="product.publish.description.local_lang"] .ProseMirror');
+  const realImage = i => i.getAttribute("src") && !/placeholder|ProseMirror-separator/.test(i.src + " " + i.className);
+  const gallery = qa('[data-id^="product.widget.main_image."]')
+    .filter(slot => !slot.querySelector('[role="progressbar"],[class*="_uploading_"]') && [...slot.querySelectorAll("img")].some(realImage)).length;
   return {
     url: location.href,
     title: title?.value || "",
     description: editor?.innerText?.trim() || "",
-    enTitle: document.querySelector(
-      '[data-id="product.publish.title.input_lang"]',
-    )?.value,
-    enDescription: document
-      .querySelector(
-        '[data-id="product.publish.description.input_lang"] .ProseMirror',
-      )
-      ?.innerText.trim(),
+    enTitle: q('[data-id="product.publish.title.input_lang"]')?.value,
+    enDescription: q('[data-id="product.publish.description.input_lang"] .ProseMirror')?.innerText.trim(),
     gallery,
     detailImages: editor
       ? (() => {
-          const urls = [...editor.querySelectorAll("img")]
-            .filter(i => realImage(i) && /^https?:/.test(i.src))
-            .map(i => i.src.split("?")[0]);
+          const urls = [...editor.querySelectorAll("img")].filter(i => realImage(i) && /^https?:/.test(i.src)).map(i => i.src.split("?")[0]);
           editor.pmViewDesc?.node?.forEach?.(n => {
             const s = n.type?.name === "image" && n.attrs?.src;
             if (s && /^https?:/.test(s) && !/placeholder/.test(s)) urls.push(s.split("?")[0]);
@@ -54,29 +39,14 @@ export function formState() {
           return new Set(urls).size;
         })()
       : 0,
-    category:
-      (document.querySelector("#product-cascader-select-view")?.innerText || "").split("\n")[0].trim(),
-    hasCategoryAttributes: [...document.querySelectorAll('[role="combobox"][aria-haspopup="listbox"]')]
+    category: (q("#product-cascader-select-view")?.innerText || "").split("\n")[0].trim(),
+    hasCategoryAttributes: qa('[role="combobox"][aria-haspopup="listbox"]')
       .some(e => e.getClientRects().length && !e.closest('[data-id],table,[role="row"]')),
-    singleSku: document.body.innerText.includes("价格和库存"),
-    attributes: [...document.querySelectorAll("[role=combobox]")]
-      .filter((e) => !e.closest("[data-id]"))
-      .map((e) => e.innerText.trim())
-      .filter(Boolean),
-    captcha: /拖动完成上方拼图|请完成下列验证后继续|Verify to continue/.test(
-      document.body.innerText,
-    ),
-    fields: [...document.querySelectorAll("[data-id]")]
-      .map((e) => e.getAttribute("data-id"))
-      .filter((id) =>
-        /brand|sku|weight|length|height|width|price|stock/i.test(id),
-      )
-      .slice(0, 60),
-    advice: document.body.innerText
-      .split("预览")[0]
-      .split("建议")
-      .pop()
-      ?.slice(-700),
+    singleSku: bt.includes("价格和库存"),
+    attributes: qa("[role=combobox]").filter(e => !e.closest("[data-id]")).map(e => e.innerText.trim()).filter(Boolean),
+    captcha: /拖动完成上方拼图|请完成下列验证后继续|Verify to continue/.test(bt),
+    fields: qa("[data-id]").map(e => e.getAttribute("data-id")).filter(id => /brand|sku|weight|length|height|width|price|stock/i.test(id)).slice(0, 60),
+    advice: bt.split("预览")[0].split("建议").pop()?.slice(-700),
   };
 }
 // Kept within the run_js size limit; the caller checks all values against its plan.
@@ -768,8 +738,9 @@ export function mxEditor(bridge, runCode, skuWrites) {
           }));
           await runCode(tab, commerceScript(async (ui, label) => {
             await ui.wait(() => {
-              const tags = ui.options().map(ui.optionLabels).filter(parts => parts.includes(label));
-              return tags.length === 1 && ui.rows().filter(row => tags[0].includes(row.label)).length === 1;
+              const tags = ui.options().map(ui.optionLabels).filter(parts => parts.some(p => ui.norm(p) === ui.norm(label)));
+              const normTags = tags[0]?.map(ui.norm) || [];
+              return tags.length === 1 && ui.rows().filter(row => normTags.includes(ui.norm(row.label))).length === 1;
             }, "SKU row " + label);
             return true;
           }, option));
@@ -782,11 +753,12 @@ export function mxEditor(bridge, runCode, skuWrites) {
         for (let attempt = 0; attempt < 2; attempt++) {
           if (creating && !force && attempt === 0) {
             await runCode(tab, commerceScript(async (ui, sku) => {
-              const labels = ui.options().map(ui.optionLabels).filter(aliases => aliases.includes(sku.option));
+              const labels = ui.options().map(ui.optionLabels).filter(aliases => aliases.some(a => ui.norm(a) === ui.norm(sku.option)));
               if (labels.length !== 1) throw Error("Ambiguous option " + sku.option);
+              const normAliases = labels[0].map(ui.norm);
               const touched = [];
               for (const [field, value] of [["stock", sku.stock], ["price", sku.priceMXN]]) {
-                const rows = ui.rows().filter(r => labels[0].includes(r.label));
+                const rows = ui.rows().filter(r => normAliases.includes(ui.norm(r.label)));
                 if (rows.length !== 1) throw Error("Cannot identify SKU row " + sku.option);
                 if (ui.numeric(rows[0][field]) !== value) {
                   ui.set(rows[0][field], value);
@@ -898,18 +870,30 @@ export function mxEditor(bridge, runCode, skuWrites) {
           throw Error("Source-language copy changed before uploading images");
       } else checkCopy(written, copy);
       phases.copyRead = Date.now();
+      const waitGalleryTarget = async (targetCount, errMsg) => {
+        for (let round = 0; round < 2; round++) {
+          const check = await runCode(tab, "const until=Date.now()+22000;do{const s=(" + formState.toString() +
+            ")();if(s.captcha)throw Error('Seller verification');const busy=[...document.querySelectorAll('[data-id^=\"product.widget.main_image.\"]')].some(el=>el.querySelector('[role=\"progressbar\"],[class*=\"_uploading_\"]'));if(s.gallery>=" + targetCount +
+            ")return {ok:true,gallery:s.gallery};if(!busy&&roundDone)return {ok:false,busy:false,gallery:s.gallery};await new Promise(r=>setTimeout(r,150));var roundDone=Date.now()>until-18000}while(Date.now()<until);return {ok:false,busy:true,gallery:(" + formState.toString() + ")().gallery}");
+          if (check?.ok) return;
+          if (!check?.busy && Number.isInteger(check?.gallery) && check.gallery < targetCount) {
+            await bridge("upload_file", {
+              tabId: tab,
+              selector: gallerySelector,
+              paths: gallery.slice(check.gallery, targetCount),
+            });
+          }
+        }
+        throw Error(errMsg);
+      };
       const finishGallery = async () => {
         if (phases.gallerySubmitted) return;
         for (let offset = startOffset; offset < gallery.length; offset += batchSize) {
-          await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
-            ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + offset +
-            ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Previous gallery batch still uploading')");
+          await waitGalleryTarget(offset, "Previous gallery batch still uploading");
           await uploadBatch(offset);
         }
         if (!detailsSubmitted || preuploaded >= gallery.length) {
-          await runCode(tab, "const until=Date.now()+25000;do{const s=(" + formState.toString() +
-            ")();if(s.captcha)throw Error('Seller verification');if(s.gallery===" + gallery.length +
-            ")return true;await new Promise(r=>setTimeout(r,120))}while(Date.now()<until);throw Error('Gallery upload still pending')");
+          await waitGalleryTarget(gallery.length, "Gallery upload still pending");
         }
         phases.gallerySubmitted = Date.now();
       };

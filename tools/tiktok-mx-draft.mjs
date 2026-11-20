@@ -391,16 +391,23 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
   const tab = await group.open(url, reuseSourceForCreate ? [drafts] : [], true);
   await waitForSourceTab(tab, url);
   let data;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const retryDelays = [2500, 5000, 9000, 14000];
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
       data = await js(tab, extract, id);
       break;
     } catch (error) {
-      if (attempt === 2 || !/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed/i.test(error.message)) throw error;
+      if (attempt === retryDelays.length || !/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed|did not finish navigating/i.test(error.message)) throw error;
       mark("sourceReload");
-      await bridge("activate_tab", { tabId: tab });
-      if (attempt === 1) await bridge("reload_tab", { tabId: tab });
-      await sleep(1200);
+      await sleep(retryDelays[attempt]);
+      await bridge("activate_tab", { tabId: tab }).catch(() => {});
+      if (!bridgeOverride && /showing error page/i.test(error.message)) {
+        await bridge("navigate_tab", { tabId: tab, url });
+        await waitForSourceTab(tab, url).catch(() => {});
+      } else {
+        await bridge("reload_tab", { tabId: tab });
+      }
+      await sleep(1500);
     }
   }
   mark("sourceRead");

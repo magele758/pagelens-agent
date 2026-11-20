@@ -1,10 +1,11 @@
 export function isMxSellerManageReturn(value) {
   if (typeof value !== "string" || !value) return false;
-  const page = new URL(value);
+  let page;
+  try { page = new URL(value); } catch { return false; }
   const tab = page.searchParams.get("tab");
   return page.origin === "https://seller.tiktokshopglobalselling.com" && !page.username && !page.password &&
     page.searchParams.get("shop_region") === "MX" &&
-    ((page.pathname === "/product/manage" && (tab === null || tab === "draft" || tab === "all")) ||
+    ((page.pathname === "/product/manage" && (tab === null || tab === "draft")) ||
       page.pathname === "/product/listing");
 }
 
