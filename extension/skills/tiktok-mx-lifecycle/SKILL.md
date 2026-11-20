@@ -63,7 +63,7 @@ node tools/agent-inbox.mjs enqueue --action ptc_mx_seller_action --request-json 
 
 ### 5. 审核通过通知
 
-提审成功后等待后台两个完整轮询周期（约每分钟一轮，共约 2 分钟）再手动核对：
+审核跟踪默认关闭。在提审前已通过「设置 → 高级配置 → TikTok Shop 审核跟踪」开启、且用户在提审后打开或刷新过墨西哥商品管理的「全部」列表时，可等待两个完整轮询周期。设置里可查看等待原因或停止跟踪。需要立即核对或未启用跟踪时，使用本次任务的手动查询：
 
 ```bash
 node tools/agent-inbox.mjs enqueue --action ptc_mx_seller_action --request-json '{

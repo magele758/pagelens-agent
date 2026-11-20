@@ -20,6 +20,9 @@ const extensionPattern = /^[a-p]{32}$/;
 const productPattern = /^\d{12,22}$/;
 const tests = [
   "extension/tools/test_agent_inbox.mjs",
+  "extension/tools/test_mx_approval_watch.mjs",
+  "extension/tools/test_mx_approval_read.mjs",
+  "extension/tools/test_mx_approval_panel.mjs",
   "extension/tools/test_inbox_development.mjs",
   "native/test_host.mjs",
   "tools/test-tiktok-mx-commerce.mjs",

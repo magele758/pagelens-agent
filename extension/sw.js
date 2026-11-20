@@ -4,6 +4,7 @@ import {
   syncAgentInboxAlarm,
   wireAgentInboxAlarm,
   pollAgentInboxOnce,
+  manageMxApproval,
   completeAgentPrompt,
   completeHeadlessAgentPrompt,
 } from "./lib/agent/inbox.js";
@@ -55,6 +56,13 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (typeof msg?.type === "string" && msg.type.startsWith("pl.mxApproval.")) {
+    if (_sender?.id !== chrome.runtime.id || _sender?.url !== chrome.runtime.getURL("sidepanel/index.html")) return false;
+    manageMxApproval(msg)
+      .then(state => sendResponse({ ok: true, state }))
+      .catch(error => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
   if (msg?.type === "pl.ptc.readDirectory" || msg?.type === "pl.ptc.readSizeChartChunk") {
     if (_sender?.id !== chrome.runtime.id || _sender?.url !== chrome.runtime.getURL("sidepanel/index.html")) return false;
     const { path, root, folder, expectedPath, offset, revision, asset } = msg;
