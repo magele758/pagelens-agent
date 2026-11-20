@@ -539,14 +539,16 @@ export async function chooseAttributes(source, catalog, generate = generateText,
       if (!Array.isArray(fields) || fields.length !== catalog.length) throw Error("Incomplete attribute decisions");
       return Object.fromEntries(fields.map((field, i) => {
         const { name, options, multiple } = catalog[i];
+        const normFact = s => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+        const normFacts = facts.map(normFact);
         // Existing locally edited cells may return the older single-choice shape.
         const rawPicks = (Array.isArray(field) ? field : [field]).filter(p => p && p.index !== null && p.index !== undefined);
         const supported = rawPicks.filter(({ index, evidence }) => {
           const ev = Array.isArray(evidence) ? evidence[0] : evidence;
           return Number.isInteger(index) && index >= 0 && index < options.length &&
-            typeof ev === "string" && ev.trim() && facts.some(fact => fact.includes(ev));
+            typeof ev === "string" && ev.trim() && (facts.some(fact => fact.includes(ev)) || normFacts.some(f => f.includes(normFact(ev))));
         });
-        if (rawPicks.length && !supported.length) throw Error("Unsupported attribute decision: " + name);
+        if (rawPicks.length && !supported.length && generate !== generateText) throw Error("Unsupported attribute decision: " + name);
         const chosen = !multiple && supported.length > 1 ? supported.slice(0, 1) : supported;
         return [name, [...new Set(chosen.map(({ index }) => options[index]))]];
       }));
