@@ -4,6 +4,8 @@ import { recoverListingFields } from '../../shared/listing/adaptive-fields.js';
 export const id = 'shopee-listing';
 export const version = 1;
 const origin = 'https://seller.shopee.cn';
+const imageReadbackMs = 45000;
+const imagePollMs = 250;
 
 class Pause extends Error {
   constructor(code, details) {
@@ -252,6 +254,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   let step = 'bind-page';
   let originalUrl;
   let state;
+  let freshForm = false;
   let coverUploaded = false;
   let galleryUploaded = 0;
   let skuRows;
@@ -286,7 +289,13 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       originalUrl && current.url !== originalUrl) throw new Pause('page-changed', { url: url.origin + url.pathname });
     originalUrl = current.url;
     if (current.modal) throw new Pause('modal', current.modal);
-    const validation = current.unscopedValidation ?? current.validation;
+    const inOwnedDataPass = freshForm && ['sales', 'shipping', 'size-chart'].includes(step);
+    if (inOwnedDataPass && (current.fields.title?.value !== input.title ||
+        current.fields.sku?.value && input.sku != null && current.fields.sku.value !== input.sku)) {
+      throw new Pause('page-changed', { text: '商品名称或货号已变化' });
+    }
+    const validation = (inOwnedDataPass && current.categoryReady ? current.validationOutsideSalesAndShipping : undefined) ??
+      current.unscopedValidation ?? current.validation;
     if (validation?.length) throw new Pause('page-validation', validation);
     if (!['bind-page', 'basic', 'category'].includes(step) && norm(current.category) !== category) {
       throw new Pause('different-category', { actual: current.category });
@@ -298,12 +307,12 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     await new Promise((resolve) => setTimeout(resolve, ms));
     signal?.throwIfAborted();
   };
-  const readUntil = async (predicate, timeoutMs = 1600) => {
+  const readUntil = async (predicate, timeoutMs = 1600, pollMs = 100) => {
     const deadline = Date.now() + timeoutMs;
     while (true) {
       await read();
       if (predicate(state) || Date.now() >= deadline) return;
-      await pause(100);
+      await pause(pollMs);
     }
   };
   const unique = async (selector, tag) => {
@@ -446,6 +455,10 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   const saleMatches = (row, key, wanted) => Boolean(row &&
     (key === 'sku' ? row.sku === wanted : matchedNumber(row[key], wanted)));
   const rowMatches = (row, wanted) => salesKeys.every(key => saleMatches(row, key, wanted[key]));
+  function skuReadbackError(row, wanted) {
+    const key = salesKeys.find(key => !saleMatches(row, key, wanted[key]));
+    return new Pause('sku-readback', { option: wanted.option, key, actual: row?.[key] || '空', expected: String(wanted[key]) });
+  }
   async function fillSkuRow(wanted, commit) {
     const row = () => rowFor(wanted.option);
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -465,8 +478,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       await readUntil(current => rowMatches(rowFor(wanted.option, current), wanted), 2100);
       if (rowMatches(row(), wanted)) return;
     }
-    const key = salesKeys.find(key => !saleMatches(row(), key, wanted[key]));
-    throw new Pause('sku-readback', { option: wanted.option, key, actual: row()?.[key] || '空', expected: String(wanted[key]) });
+    throw skuReadbackError(row(), wanted);
   }
   async function pickCategory(path, searchWords = []) {
     const operate = (action, args = {}) => native('flow_category_picker_action', { action, ...args });
@@ -530,7 +542,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   }
   try {
     await readUntil(current => Boolean(current.fields.title?.selector && current.fields.description?.selector), 5000);
-    const freshForm = input.resetUnownedDraftVariants === true && state.fields.title?.value === '';
+    freshForm = input.resetUnownedDraftVariants === true && state.fields.title?.value === '';
     checkpoint('basic');
     if (state.category && category && norm(state.category) !== category) throw new Pause('different-category', { actual: state.category });
     await fillNamedField('title', input.title);
@@ -677,8 +689,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     if (input.imagePath && !state.image.count) {
       await unique(state.image.selector, 'input');
       await native('upload_file', { selector: state.image.selector, paths: [input.imagePath] });
-      await native('wait_for', { text: '封面', timeoutMs: 8000 });
-      await readUntil(current => photosReady(current, 1), 18000);
+      await readUntil(current => photosReady(current, 1), imageReadbackMs, imagePollMs);
       coverUploaded = photosReady(state, 1);
       if (!coverUploaded) throw new Pause('cover-readback');
     }
@@ -689,7 +700,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       const previous = state.image.count;
       await unique(state.image.selector, 'input');
       await native('upload_file', { selector: state.image.selector, paths: [path] });
-      await readUntil(current => photosReady(current, previous + 1), 18000);
+      await readUntil(current => photosReady(current, previous + 1), imageReadbackMs, imagePollMs);
       if (!photosReady(state, previous + 1)) throw new Pause('gallery-upload-unverified', { count: state.image.readyCount });
       galleryUploaded++;
     }
@@ -803,11 +814,12 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         if (!image?.selector) throw new Pause('sku-image-control-missing', { option });
         await unique(image.selector, 'input');
         await native('upload_file', { selector: image.selector, paths: [item.imagePath] });
-        await readUntil(current => resetNeeded(current) || Boolean(rowFor(option, current)?.image?.present), 18000);
+        const imageReady = current => resetNeeded(current) || Boolean(rowFor(option, current)?.image?.present);
+        await readUntil(imageReady, imageReadbackMs - 10000, imagePollMs);
         assertVariation();
         if (!rowFor(option)?.image?.present && rowFor(option)?.image?.pending) {
           if (freshForm) await read(true);
-          await readUntil(current => resetNeeded(current) || Boolean(rowFor(option, current)?.image?.present), 12000);
+          await readUntil(imageReady, 10000, imagePollMs);
           assertVariation();
         }
         if (!rowFor(option)?.image?.present) throw new Pause('sku-image-readback', { option });
@@ -827,7 +839,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       if (state.variant.rows.length !== variants.length) throw new Pause('sku-row-not-unique');
       skuRows = variants.map(item => {
         const row = rowFor(item.option);
-        if (!rowMatches(row, item)) throw new Pause('sku-readback', { option: item.option });
+        if (!rowMatches(row, item)) throw skuReadbackError(row, item);
         const { option, price, quantity, sku } = row;
         if (!item.imagePath) return { option, price, quantity, sku };
         if (!row.image?.present) throw new Pause('sku-image-readback', { option });
@@ -835,7 +847,12 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       });
     }
     async function fillShipping() {
-      for (const key of shipping) await fillNamedField(key, input[key], freshForm);
+      for (const key of shipping) {
+        if (matchedNumber(state.fields[key]?.value, input[key])) continue;
+        await fillNamedField(key, input[key], freshForm);
+        // Re-rendering a shipping field can move the next control.
+        if (freshForm) await read();
+      }
       if (input.sku != null) await fillNamedField('sku', input.sku);
       await read();
       assertVariation();
@@ -848,8 +865,8 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         }
       }
     }
-    const retryableDrift = new Set(['different-variant', 'variants-already-enabled', 'variant-control-changed',
-      'sku-control-missing', 'sku-row-not-unique', 'sku-readback', 'field-missing', 'readback-mismatch']);
+    const retryableVariation = new Set(['different-variant', 'variants-already-enabled', 'variant-control-changed']);
+    const retryableValues = new Set(['sku-control-missing', 'sku-row-not-unique', 'sku-readback', 'field-missing', 'readback-mismatch']);
     const completedBeforeSales = completed.length;
     for (let attempt = 0; ; attempt++) {
       try {
@@ -872,9 +889,11 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         verifySalesAndShipping();
         break;
       } catch (error) {
-        // A different product's saved options can arrive after the field pass has started.
-        if (attempt || !freshForm || !resetNeeded(state) || !retryableDrift.has(error.code)) throw error;
+        // SKU and shipping values can disappear even when the same option labels remain.
+        if (attempt || !freshForm || !state.categoryReady ||
+            !(retryableValues.has(error.code) || resetNeeded(state) && retryableVariation.has(error.code))) throw error;
         expected('title', input.title);
+        if (input.sku != null && state.fields.sku?.value) expected('sku', input.sku);
         completed.length = completedBeforeSales;
         skuRows = undefined;
         step = 'sales';
