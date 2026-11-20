@@ -176,7 +176,10 @@ test("the receipt opens the retained form from the same shop", async () => {
       }),
       startBatch: async ({ onJob }) => {
         onJob(0, { phase: "submission-unknown", tabId: retainedTab.id,
-          receipt: { status: "submission-unknown", details: "1个错误需调整" } });
+          receipt: { status: "submission-unknown", details: { text: "2个错误需调整", issues: [
+            { key: "品牌", label: "品牌", kind: "missing", message: "请输入商品品牌名称" },
+            { key: "shipDays", label: "发货时间", kind: "invalid", message: "Your days to ship is now out of range" },
+          ] } } });
       },
     });
     const byId = id => document.getElementById(id);
@@ -190,6 +193,8 @@ test("the receipt opens the retained form from the same shop", async () => {
     await nextTurn();
 
     assert.match(byId("ptc-batch-status").textContent, /待处理 1 · 保留 1 个标签/u);
+    assert.match(byId("ptc-batch-jobs").textContent, /品牌 · 请输入商品品牌名称/u);
+    assert.match(byId("ptc-batch-jobs").textContent, /发货时间 · Your days to ship is now out of range/u);
     const inspect = byId("ptc-batch-jobs").querySelector("button");
     assert.equal(inspect.textContent, "查看表单");
     assert.equal(inspect.hidden, false);

@@ -173,6 +173,79 @@ test('separates validation in the exact SKU and shipping controls from unrelated
   assert.deepEqual(state.validationOutsideSalesAndShipping, ['请填写商品描述']);
 });
 
+test('pins seller validation to the exact brand and shipping controls and ignores decorative red text', t => {
+  const app = fixture(t, `<section class="product-basic-info">
+    <div class="edit-row"><label class="edit-label"><span style="color:red">*</span><span>商品名称</span></label><input id="name"></div>
+    <div class="edit-row"><label class="edit-label">商品描述</label><textarea required>已填写</textarea></div>
+    <div class="edit-row"><label class="edit-label">* 商品类目</label><div class="product-category-text">${category}</div></div>
+  </section><section class="product-specification-new">
+    <div class="edit-row"><div class="edit-label"><span class="mandatory">*</span><span>品牌</span></div>
+      <div class="eds-select"><div id="brand" class="eds-selector" style="border:1px solid red">
+        <div class="eds-selector__inner">请选择</div></div></div>
+      <small id="brand-error" style="color:red">请输入商品品牌名称</small>
+    </div>
+    <div class="edit-row"><label class="edit-label"><span style="color:red">*</span><span>等待解锁</span></label><input disabled required></div>
+    <div class="edit-row"><label class="edit-label">颜色</label><input value="红色">
+      <span style="color:red">节日推荐</span><span role="alert">编辑已保存</span></div>
+  </section><section class="mtsku-product-shipping">
+    <div class="edit-row"><div class="edit-label">* 重量</div><input value="0.10"></div>
+    <div class="edit-row"><div class="edit-label">* 发货时间</div>
+      <span>发货天数（您可以填写1,4到10）</span><input id="shipDays" value="0" style="border:1px solid red">
+      <p id="days-error" style="color:red">Your days to ship is now out of range, please change it</p>
+    </div>
+  </section><p role="alert" style="color:red">2个错误需调整</p>`);
+  assert.deepEqual(app.read(category).requiredIssues, [
+    { section: 'category-attributes', key: '品牌', label: '品牌', kind: 'missing', message: '请输入商品品牌名称', value: '' },
+    { section: 'basic', key: 'title', label: '商品名称', kind: 'missing', value: '' },
+    { section: 'shipping', key: 'shipDays', label: '发货时间', kind: 'invalid',
+      message: 'Your days to ship is now out of range, please change it', value: '0' },
+  ]);
+  const { document } = app;
+  document.getElementById('name').value = '收纳盒';
+  document.getElementById('brand').style.border = '';
+  document.querySelector('#brand .eds-selector__inner').textContent = 'NoBrand';
+  document.getElementById('brand-error').hidden = true;
+  document.getElementById('shipDays').value = '4';
+  document.getElementById('shipDays').style.border = '';
+  document.getElementById('days-error').hidden = true;
+  assert.deepEqual(app.read(category).requiredIssues, []);
+  document.getElementById('shipDays').value = '2';
+  assert.deepEqual(app.read(category).requiredIssues, [
+    { section: 'shipping', key: 'shipDays', label: '发货时间', kind: 'invalid', value: '2' },
+  ]);
+});
+
+test('detects required main media, a required missing SKU price, and a bad price with a red border', t => {
+  const row = (price, invalid = '') => `<div class="data-group">
+    <div class="table-cell"><div class="model-edit-input"><div class="price-input"><input value="${price}" ${invalid}></div></div></div>
+    <div class="table-cell stock-column"><input value="0" required></div>
+  </div>`;
+  const { read } = fixture(t, `<section class="product-basic-info">
+    <div class="product-category-text">${category}</div><div class="edit-row">
+      <div class="edit-label">* 商品图片</div><div class="shopee-image-manager"><div class="shopee-image-manager__upload">
+        <span class="shopee-image-manager__upload__content__text">添加图片 (0/9)</span><input type="file" accept="image/*">
+      </div></div>
+    </div>
+  </section><section class="product-sales-info">
+    <div class="variation-name-panel"><input value="颜色"></div>
+    <div class="variation-option-panel"><div class="options-item"><input value="蓝"></div><div class="options-item"><input value="白"></div>
+      <div class="options-item"><input value="粉"></div></div>
+    <div class="variation-model-table-fixed-left"><div class="variation-model-table-body">
+      <div class="first-variation-cell">蓝</div><div class="first-variation-cell">白</div><div class="first-variation-cell">粉</div>
+    </div></div>
+    <div class="variation-model-table-middle-scroll">
+      <div class="variation-model-table-header"><div role="columnheader"><span style="color:red">*</span><span>全球商品价格</span></div></div>
+      <div class="variation-model-table-body">
+      ${row('15.01', 'style="border:1px solid red"')}${row('19.99')}${row('')}
+    </div></div>
+  </section>`);
+  assert.deepEqual(read(category).requiredIssues, [
+    { section: 'image', key: 'image', label: '商品图片', kind: 'missing', value: false },
+    { section: 'sales', key: 'price', label: '全球商品价格', option: '蓝', kind: 'invalid', value: '15.01' },
+    { section: 'sales', key: 'price', label: '全球商品价格', option: '粉', kind: 'missing', value: '' },
+  ]);
+});
+
 test('resets only the sole variation control of the bound, unsaved product form', t => {
   const app = fixture(t, `<section class="product-basic-info">
     <div class="product-category-text">${category}</div>

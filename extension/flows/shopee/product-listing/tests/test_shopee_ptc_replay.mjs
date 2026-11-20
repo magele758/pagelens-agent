@@ -467,6 +467,123 @@ test('rechecks attributes revealed during a later form section', async () => {
   assert.deepEqual(receipt.skuRows, input.variant.options);
 });
 
+function showRequiredIssues(page, issues) {
+  const call = page.call;
+  page.call = async (tool, args) => {
+    if (tool === 'flow_page_state') {
+      page.state.requiredIssues = issues(page.state);
+      page.state.validation = page.state.requiredIssues.map(issue => issue.message).filter(Boolean);
+    }
+    return call(tool, args);
+  };
+}
+
+const noBrandIssue = { section: 'category-attributes', key: '品牌', label: '品牌',
+  kind: 'missing', message: '请输入商品品牌名称' };
+const shipDaysIssue = { section: 'shipping', key: 'shipDays', label: '发货时间',
+  kind: 'invalid', message: 'Your days to ship is now out of range, please change it' };
+
+test('restores a supplied missing NoBrand selection and invalid shipping days before yielding a verified form', async () => {
+  const page = mockPage();
+  const call = page.call;
+  page.call = async (tool, args) => {
+    const result = await call(tool, args);
+    if (tool === 'fill' && args.selector === '#sku') {
+      page.state.attributes[0].value = '';
+      page.state.fields.shipDays.value = '0';
+    }
+    return result;
+  };
+  showRequiredIssues(page, state => [
+    ...(!state.attributes[0].value ? [noBrandIssue] : []),
+    ...(state.fields.shipDays.value === '0' ? [shipDaysIssue] : []),
+  ]);
+  const receipt = await run(page, { ...input, resetUnownedDraftVariants: true });
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.equal(page.state.attributes[0].value, 'NoBrand');
+  assert.equal(page.state.fields.shipDays.value, input.shipDays);
+  assert.equal(page.calls.filter(({ tool, args }) => tool === 'flow_control_click' && args.text === 'NoBrand').length, 2);
+  assert.equal(page.calls.filter(({ tool }) => tool === 'upload_file').length, 1);
+  assert.equal(page.calls.filter(({ tool, args }) => tool === 'fill' && args.selector === '#weight').length, 1);
+});
+
+test('repairs only fresh invalid SKU cells and restores the observed shipping default on the bound form', async () => {
+  const page = mockPage();
+  page.state.fields.shipDays.value = '4';
+  const [first] = input.variant.options;
+  showRequiredIssues(page, state => [
+    ...(!state.attributes[0].value ? [noBrandIssue] : []),
+    ...(state.fields.shipDays.value === '0' ? [shipDaysIssue] : []),
+    ...(state.variant.rows.some(row => row.option === first.option && !row.price) ?
+      [{ section: 'sales', key: 'price', label: '全球商品价格', option: first.option, kind: 'missing' }] : []),
+  ]);
+  let recover;
+  const progress = [];
+  const receipt = await replayShopeeListing({
+    call: page.call, tabId: 10, input: { ...input, shipDays: undefined, resetUnownedDraftVariants: true },
+    registerRecovery: (next) => { recover = next; }, onStep: event => progress.push(event),
+  });
+  assert.equal(receipt.status, 'verified');
+  assert.doesNotThrow(() => structuredClone(receipt));
+  assert.ok(!page.calls.some(({ tool, args }) => tool === 'fill' && args.selector === '#shipDays'));
+  const row = page.state.variant.rows.find(row => row.option === first.option);
+  row.price = '';
+  page.state.attributes[0].value = '';
+  page.state.fields.shipDays.value = '0';
+  const priorCalls = page.calls.length;
+  const priorProgress = progress.length;
+  const binding = { url: page.state.url, documentId: 'test-document' };
+  assert.equal(await recover({ tabId: 11, binding }), false);
+  assert.equal(await recover({ tabId: 10, binding: { ...binding, url: binding.url + '&other' } }), false);
+  assert.equal(page.calls.length, priorCalls);
+  assert.equal(await recover({ tabId: 10, binding, phase: 'after-validation' }), true);
+  assert.equal(await recover({ tabId: 10, binding, phase: 'after-validation' }), false);
+  assert.equal(progress.length, priorProgress);
+  assert.equal(row.price, first.price);
+  assert.equal(page.state.attributes[0].value, 'NoBrand');
+  assert.equal(page.state.fields.shipDays.value, '4');
+  const changes = page.calls.slice(priorCalls);
+  assert.deepEqual(changes.filter(({ tool }) => tool === 'fill').map(({ args }) => args.selector).sort(),
+    [row.selectors.price, '#shipDays'].sort());
+  assert.ok(!changes.some(({ tool }) => tool === 'upload_file'));
+});
+
+test('reports an invalid shipping default when there is no safe observed or supplied value', async t => {
+  advancePollingDeadline(t);
+  const page = mockPage();
+  page.state.fields.shipDays.value = '0';
+  showRequiredIssues(page, () => [shipDaysIssue]);
+  const receipt = await run(page, { ...input, shipDays: undefined, resetUnownedDraftVariants: true });
+  assert.equal(receipt.status, 'needs-review');
+  assert.equal(receipt.details.key, 'shipDays');
+  assert.deepEqual(receipt.details.issues, [shipDaysIssue]);
+  assert.ok(!page.calls.some(({ tool, args }) => tool === 'fill' && args.selector === '#shipDays'));
+});
+
+test('returns exact issues for manual review and preserves a selected brand with a red validation marker', async t => {
+  advancePollingDeadline(t);
+  const page = mockPage();
+  let recover;
+  const receipt = await replayShopeeListing({ call: page.call, tabId: 10, input: { ...input, resetUnownedDraftVariants: true },
+    registerRecovery: (next) => { recover = next; } });
+  assert.equal(receipt.status, 'verified');
+  page.state.attributes[0].value = '另一个已选品牌';
+  page.state.requiredIssues = [{ ...noBrandIssue, kind: 'invalid' }];
+  page.state.validation = [noBrandIssue.message];
+  const start = page.calls.length;
+  assert.equal(await recover({ tabId: 10, binding: { url: page.state.url } }), false);
+  assert.equal(page.state.attributes[0].value, '另一个已选品牌');
+  assert.ok(!page.calls.slice(start).some(({ tool }) => tool === 'flow_control_click'));
+
+  const fresh = mockPage();
+  const missing = { section: 'shipping', key: 'unsafeDeliveryOption', label: '额外运费资料', kind: 'missing' };
+  showRequiredIssues(fresh, () => [missing]);
+  const blocked = await run(fresh, { ...input, resetUnownedDraftVariants: true });
+  assert.equal(blocked.status, 'needs-review');
+  assert.equal(blocked.step, 'shipping');
+  assert.deepEqual(blocked.details.issues, [missing]);
+});
+
 test('still stops on a validation error outside the category attributes', async () => {
   const page = mockPage();
   const call = page.call;
@@ -478,6 +595,36 @@ test('still stops on a validation error outside the category attributes', async 
   assert.equal(receipt.code, 'page-validation');
   assert.equal(receipt.step, 'image');
   assert.ok(!page.calls.some(({ args }) => args.selector === '#enable'));
+});
+
+test('passes an isolated summary to the submitter only when the owned form verifies', async () => {
+  for (const scenario of [
+    { fresh: true, messages: ['1 个错误需调整。'], expected: 'verified' },
+    { fresh: false, messages: ['1 个错误需调整。'], expected: 'needs-review' },
+    { fresh: true, messages: ['1 个错误需调整。', '网络异常'], expected: 'needs-review' },
+  ]) {
+    const page = mockPage();
+    const call = page.call;
+    page.call = async (tool, args) => {
+      if (tool === 'fill' && args.selector === '#weight') {
+        page.state.validation = scenario.messages;
+        page.state.unscopedValidation = scenario.messages;
+        page.state.validationOutsideSalesAndShipping = scenario.messages;
+      }
+      return call(tool, args);
+    };
+    let recover;
+    const actual = await replayShopeeListing({
+      call: page.call, tabId: 10, input: { ...input, resetUnownedDraftVariants: scenario.fresh },
+      registerRecovery: next => { recover = next; },
+    });
+    assert.equal(actual.status, scenario.expected, JSON.stringify(actual));
+    if (scenario.expected === 'verified') assert.equal(typeof recover, 'function');
+    else {
+      assert.equal(recover, undefined);
+      assert.equal(actual.code, 'page-validation');
+    }
+  }
 });
 
 test('reconsiders an old supplied choice only against the current category dropdown', async t => {
