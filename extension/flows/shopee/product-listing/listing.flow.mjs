@@ -40,15 +40,18 @@ function normalizeVariants(variant) {
 
 function validate(input, tabId) {
   if (!Number.isSafeInteger(tabId) || tabId <= 0) throw new TypeError('需要明确的 tabId');
-  for (const key of ['shopId', 'title', 'description', 'category']) {
+  for (const key of ['shopId', 'title', 'description']) {
     if (typeof input?.[key] !== 'string' || !input[key].trim()) throw new TypeError('缺少参数 ' + key);
   }
-  if (!/^\d+$/.test(input.shopId) || input.title.length > 180 || input.description.length > 4000 || input.category.length > 220) {
+  if (!/^\d+$/.test(input.shopId) || input.title.length > 180 || input.description.length > 4000 ||
+      input.category != null && (typeof input.category !== 'string' || input.category.length > 220)) {
     throw new TypeError('店铺、标题、描述或类目参数格式不符');
   }
   const fields = input.attributes ?? {};
   if (!fields || typeof fields !== 'object' || Array.isArray(fields) ||
-    Object.entries(fields).some(([label, value]) => !label.trim() || typeof value !== 'string' || !value.trim())) {
+    Object.entries(fields).some(([label, value]) => !label.trim() ||
+      (typeof value === 'string' ? !value.trim() : typeof value !== 'boolean' && !Number.isFinite(value) &&
+        !(Array.isArray(value) && value.length && value.every(nonemptyText))))) {
     throw new TypeError('attributes 应为页面标签到选项文本的映射');
   }
   const variants = normalizeVariants(input.variant);
@@ -60,7 +63,10 @@ function validate(input, tabId) {
   for (const key of ['width', 'length', 'height', 'shipDays']) {
     if (input[key] != null && (!/^\d+$/.test(String(input[key])) || Number(input[key]) <= 0)) throw new TypeError('无效参数 ' + key);
   }
-  if (!validImage(input.imagePath)) throw new TypeError('imagePath 应为本地商品图片的绝对路径');
+  if (!validImage(input.imagePath) || input.galleryImages != null && (!Array.isArray(input.galleryImages) ||
+      input.galleryImages.length > 8 || input.galleryImages.some(path => !path || !validImage(path)))) {
+    throw new TypeError('商品主图和详情图应为本地图片的绝对路径');
+  }
   return variants;
 }
 
@@ -247,10 +253,12 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   let originalUrl;
   let state;
   let coverUploaded = false;
+  let galleryUploaded = 0;
   let skuRows;
   let sizeChartReceipt;
-  const category = norm(input.category);
+  let category = norm(input.category);
   const allowAttributeAdvice = input.completeMissingAttributes === true;
+  const hints = Array.isArray(input.categoryKeywords) ? input.categoryKeywords.filter(nonemptyText).slice(0, 6) : [];
   const uploadedOptions = new Set();
   const native = async (tool, args) => {
     signal?.throwIfAborted();
@@ -278,10 +286,11 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       originalUrl && current.url !== originalUrl) throw new Pause('page-changed', { url: url.origin + url.pathname });
     originalUrl = current.url;
     if (current.modal) throw new Pause('modal', current.modal);
-    const recoverablePhase = allowAttributeAdvice && ['bind-page', 'basic', 'category', 'category-attributes'].includes(step);
-    const validation = recoverablePhase && Array.isArray(current.unscopedValidation) ?
-      current.unscopedValidation : current.validation;
+    const validation = current.unscopedValidation ?? current.validation;
     if (validation?.length) throw new Pause('page-validation', validation);
+    if (!['bind-page', 'basic', 'category'].includes(step) && norm(current.category) !== category) {
+      throw new Pause('different-category', { actual: current.category });
+    }
     state = current;
     return state;
   };
@@ -350,13 +359,41 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     await readUntil(current => !menuOpen(current), 650);
     if (menuOpen()) throw new Pause('unexpected-open-menu', { label });
   };
+  const present = value => Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null && value !== '';
+  const equalValue = (field, choice) => field.type === 'number' ? matchedNumber(field.value, choice) :
+    Array.isArray(choice) ? Array.isArray(field.value) && choice.length === field.value.length && choice.every(value => field.value.includes(value)) :
+      field.value === choice;
   const setAttribute = async (label, choice, { preserve = false } = {}) => {
     const field = currentAttribute(label);
-    if (field.value === choice) {
+    if (equalValue(field, choice)) {
       if (menuOpen() && state.optionOwner === label) await closeAttribute(label);
       return 'unchanged';
     }
-    if (preserve && field.value && !field.error) throw new Pause('attribute-changed', { label });
+    if (preserve && present(field.value) && !field.error) throw new Pause('attribute-changed', { label });
+    if (!field.selector || field.type === 'unsupported') throw new Pause('attribute-changed', { label });
+    if (['number', 'text', 'checkbox'].includes(field.type) || field.nativeOptions) {
+      await native('flow_control_click', { action: 'attribute-set', selector: field.selector, category, label, value: choice });
+      await readUntil(current => current.attributes.some(attribute => attribute.label === label && equalValue(attribute, choice)));
+      if (!equalValue(currentAttribute(label), choice)) throw new Pause('attribute-readback', { label, choice });
+      return 'verified';
+    }
+    if (field.multiple && Array.isArray(choice)) {
+      if (Array.isArray(field.value) && field.value.some(value => !choice.includes(value))) throw new Pause('attribute-changed', { label });
+      for (const value of choice) {
+        if (currentAttribute(label).value?.includes(value)) continue;
+        await openAttribute(label);
+        const found = current => current.optionOwner === label && current.options.some(item => item.text === value);
+        if (!found(state) && state.optionSearch) await fill({ selector: state.optionSearch }, value);
+        await readUntil(found, 1700);
+        const matches = state.optionOwner === label ? state.options.filter(option => option.text === value) : [];
+        if (matches.length !== 1) { await closeAttribute(label); throw new Pause('attribute-option-changed', { label, choice: value }); }
+        await native('flow_control_click', { action: 'attribute-option', selector: matches[0].selector, category, label, text: value });
+        await readUntil(current => current.attributes.some(attribute => attribute.label === label && attribute.value?.includes(value)));
+      }
+      await closeAttribute(label);
+      if (!equalValue(currentAttribute(label), choice)) throw new Pause('attribute-readback', { label, choice });
+      return 'verified';
+    }
     await openAttribute(label);
     const matching = current => current.optionOwner === label && current.options.some(({ text }) => text === choice);
     if (!matching(state) && state.optionSearch && state.optionOwner === label) {
@@ -388,10 +425,70 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   };
   const rowMatches = (row, wanted) => Boolean(row && matchedNumber(row.price, wanted.price) &&
     matchedNumber(row.quantity, wanted.quantity) && row.sku === wanted.sku);
+  async function pickCategory(path, searchWords = []) {
+    const operate = (action, args = {}) => native('flow_category_picker_action', { action, ...args });
+    async function readPicker(check, timeout = 2400) {
+      const deadline = Date.now() + timeout;
+      do {
+        const picker = await operate('read');
+        if (check(picker) || Date.now() >= deadline) return picker;
+        await pause(100);
+      } while (true);
+    }
+    let picker = await operate('read');
+    if (!picker.open) {
+      await operate('open');
+      picker = await readPicker(current => current.open && current.levels?.[0]?.length);
+    }
+    if (path && picker.query) {
+      await operate('search', { query: '', expectedPath: picker.selectedPath });
+      picker = await readPicker(current => current.query === '' && current.levels?.[0]?.length);
+    }
+    for (const query of path ? [] : searchWords.slice(0, 4)) {
+      const before = JSON.stringify(picker.levels?.[0]);
+      await operate('search', { query, expectedPath: picker.selectedPath });
+      picker = await readPicker(current => current.query === query &&
+        (current.noResults || current.levels?.[0]?.length && JSON.stringify(current.levels[0]) !== before), 1600);
+      if (picker.query === query && picker.levels?.[0]?.length && JSON.stringify(picker.levels[0]) !== before) break;
+    }
+    if (!path && picker.query && !picker.levels?.[0]?.length) {
+      await operate('search', { query: '', expectedPath: picker.selectedPath });
+      picker = await readPicker(current => current.query === '' && current.levels?.[0]?.length);
+    }
+    const wanted = path ? path.split(' > ') : [];
+    let selected = picker.selectedPath ?? [];
+    for (let level = 0; level < 6; level++) {
+      const choices = (picker.levels?.[level] ?? []).filter(option => !option.disabled);
+      if (!choices.length) break;
+      let label = wanted[level];
+      if (!wanted.length && allowAttributeAdvice) {
+        const options = choices.slice(0, 24);
+        const match = await native('flow_category_advice', { candidates: options.map(option => [...selected, option.label]), hints });
+        label = Number.isInteger(match?.index) ? options[match.index]?.label : undefined;
+      }
+      if (!label || choices.filter(option => option.label === label).length !== 1) {
+        throw new Pause('category-option-missing', { category: path, candidates: choices.map(option => option.label) });
+      }
+      await operate('select', { level, label, expectedPath: selected });
+      picker = await readPicker(current => current.selectedPath?.[level] === label &&
+        (current.canConfirm || current.levels?.[level + 1]?.length));
+      selected = picker.selectedPath ?? [];
+      if (selected[level] !== label) throw new Pause('category-not-ready', { category: path, selected });
+      if (picker.canConfirm && (!wanted.length || selected.length === wanted.length)) {
+        const chosen = selected.join(' > ');
+        if (path && chosen !== path) throw new Pause('category-not-ready', { category: path, actual: chosen });
+        await operate('confirm', { category: chosen });
+        const closed = await readPicker(current => !current.open);
+        if (closed.open) throw new Pause('category-not-ready', { category: chosen });
+        return chosen;
+      }
+    }
+    throw new Pause('category-not-ready', { category: path, selected });
+  }
   try {
     await read();
     checkpoint('basic');
-    if (state.category && norm(state.category) !== category) throw new Pause('different-category', { actual: state.category });
+    if (state.category && category && norm(state.category) !== category) throw new Pause('different-category', { actual: state.category });
     await fill(state.fields.title, input.title);
     await fill(state.fields.description, input.description);
     await read();
@@ -399,20 +496,44 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     expected('description', input.description);
 
     checkpoint('category');
+    let usedPicker = false;
+    category ||= norm(state.category);
     if (!state.category) {
       if (!state.recommendation) {
-        await readUntil(current => Boolean(current.recommendation || current.category), 3800);
+        await readUntil(current => Boolean(current.recommendation || current.category || !category && current.categoryRecommendations?.length), 3800);
       }
       if (!state.category) {
-        if (!state.recommendation) {
-          throw new Pause('category-option-missing', { category, recommendations: state.recommendations ?? [] });
+        let recommendation = state.recommendation;
+        let searchWords = hints;
+        if (!category && allowAttributeAdvice) {
+          const cached = await native('flow_category_advice', { mode: 'cache', hints });
+          category = norm(cached?.path);
+          if (cached?.keywords?.length) searchWords = [...cached.keywords, ...hints];
+          if (!category && state.categoryRecommendations?.length) {
+            const options = state.categoryRecommendations.slice(0, 24);
+            const suggestion = await native('flow_category_advice', { candidates: options.map(item => norm(item.path).split(' > ')), hints });
+            const chosen = Number.isInteger(suggestion?.index) ? options[suggestion.index] : null;
+            if (chosen) { category = norm(chosen.path); recommendation = chosen.selector; }
+          }
+          if (!category && searchWords === hints) {
+            const proposed = await native('flow_category_advice', { mode: 'keywords', hints });
+            searchWords = [...(proposed?.keywords ?? []), ...hints];
+          }
         }
-        await click(state.recommendation, category);
-        await readUntil(current => Boolean(current.category));
-        if (!state.category && state.recommendation) {
-          const target = await unique(state.recommendation);
+        if (recommendation && category) {
+          await click(recommendation, category);
+          await readUntil(current => Boolean(current.category));
+        }
+        if (!state.category && recommendation && category) {
+          const target = await unique(recommendation);
           if (norm(target.text) !== category) throw new Pause('category-control-changed', { category, actual: target.text });
-          await native('flow_category_click', { selector: state.recommendation, category });
+          await native('flow_category_click', { selector: recommendation, category });
+        } else if (!state.category) {
+          if (!state.categoryPickerAvailable || !category && !allowAttributeAdvice) {
+            throw new Pause('category-option-missing', { category, recommendations: state.recommendations ?? [] });
+          }
+          category = await pickCategory(category, [...new Set(searchWords)].filter(nonemptyText));
+          usedPicker = true;
         }
       }
       if (!state.categoryReady) await readUntil(current => current.categoryReady, 3800);
@@ -420,9 +541,20 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     if (norm(state.category) !== category || !state.categoryReady) {
       throw new Pause('category-not-ready', { category, actual: state.category, recommendations: state.recommendations ?? [] });
     }
+    if (usedPicker || !input.category && allowAttributeAdvice) await native('flow_category_remember', { category });
 
     checkpoint('category-attributes');
     const supplied = input.attributes ?? {};
+    const attributeTargets = new Map(Object.entries(supplied));
+    const attributeFailures = new Map();
+    let adviceFailure;
+    const deferAttribute = async (label, error) => {
+      const controlChanged = ['control-changed', 'field-kind-changed'].includes(error.code);
+      if (!controlChanged && !['attribute-changed', 'attribute-option-changed', 'attribute-readback'].includes(error.code)) throw error;
+      if (controlChanged) await read();
+      if (menuOpen()) await closeAttribute(label);
+      attributeFailures.set(label, error);
+    };
     // Shopee can render sales controls before the category attribute panel is hydrated.
     // Wait for these category-specific controls instead of immediately treating them as missing.
     const requestedAttributes = Object.keys(supplied);
@@ -430,72 +562,86 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       await readUntil(current => requestedAttributes.every(label =>
         current.attributes.some(field => field.label === label && field.selector)), 4800);
     }
-    const missing = () => state.attributes.find(field => field.required && !field.value && !Object.hasOwn(supplied, field.label));
-    if (!allowAttributeAdvice && missing()) throw new Pause('required-attribute-missing', { label: missing().label });
-    const staleChoices = new Map();
     for (const [label, choice] of Object.entries(supplied)) {
       try { await setAttribute(label, choice); }
-      catch (error) {
-        if (!allowAttributeAdvice || error.code !== 'attribute-option-changed') throw error;
-        const field = currentAttribute(label);
-        if (field.value && !field.error) throw error;
-        staleChoices.set(label, error);
-      }
+      catch (error) { await deferAttribute(label, error); }
     }
 
     if (allowAttributeAdvice) {
-      const snapshot = () => {
-        if (norm(state.category) !== category) throw new Pause('different-category', { actual: state.category });
-        return { ok: true, fields: state.attributes.filter(field => field.type === 'select' && field.selector &&
-          !/品牌|\bbrand\b/iu.test(field.label) && (!Object.hasOwn(supplied, field.label) || staleChoices.has(field.label)) &&
+      const snapshot = () => ({ ok: true, fields: state.attributes.filter(field => ['text', 'number', 'checkbox', 'select'].includes(field.type) && field.selector &&
+          !/品牌|\bbrand\b/iu.test(field.label) && (!Object.hasOwn(supplied, field.label) || attributeFailures.has(field.label)) &&
           state.attributes.filter(other => other.label === field.label).length === 1)
           .map(field => ({ key: field.label, label: field.label, section: 'category-attributes',
-            type: field.type, value: field.value, required: field.required,
-            error: field.error || (staleChoices.has(field.label) ? '原选项已不在当前下拉中' : undefined) })) };
-      };
+            type: field.type, value: field.value, required: field.required, multiple: field.multiple,
+            min: field.min, max: field.max, maxLength: field.maxLength, nativeOptions: field.nativeOptions,
+            error: field.error || (attributeFailures.has(field.label) && !present(field.value) ? '未能填写原值' : undefined) })) });
       await recoverListingFields({
         scope: { platform: 'shopee', store: input.shopId, categoryPath: category.split(' > ') },
-        snapshot: snapshot(), signal,
+        snapshot: snapshot(), signal, includeOptional: true,
         read: async () => { await read(); return snapshot(); },
         async readOptions(field) {
-          await openAttribute(field.label);
-          const choices = state.optionOwner === field.label ? state.options.map(item => item.text) : [];
-          await closeAttribute(field.label);
-          return choices;
+          if (field.nativeOptions) return field.nativeOptions;
+          try {
+            await openAttribute(field.label);
+            const choices = state.optionOwner === field.label ? state.options.map(item => item.text) : [];
+            await closeAttribute(field.label);
+            return choices;
+          } catch (error) {
+            await deferAttribute(field.label, error);
+            return [];
+          }
         },
         async suggest(fields) {
-          return (await native('flow_attribute_advice', { fields })).values;
+          try {
+            return (await native('flow_attribute_advice', { fields })).values;
+          } catch (error) {
+            if (!['attribute-advice-not-approved', 'attribute-advice-unavailable'].includes(error.code)) throw error;
+            adviceFailure = error.details?.error;
+            return {};
+          }
         },
         async apply(values) {
           const issues = [];
           for (const [label, choice] of Object.entries(values)) {
             try {
               await setAttribute(label, choice, { preserve: true });
-              staleChoices.delete(label);
+              attributeTargets.set(label, choice);
+              attributeFailures.delete(label);
             }
             catch (error) {
-              if (error.code !== 'attribute-option-changed') throw error;
-              issues.push({ key: label, code: 'OPTION_MISSING' });
+              await deferAttribute(label, error);
+              issues.push({ key: label, code: error.code === 'attribute-option-changed' ? 'OPTION_MISSING' : 'ATTRIBUTE_UNVERIFIED' });
             }
           }
           return { ok: true, issues };
         },
       });
-      if (staleChoices.size) throw staleChoices.values().next().value;
-      if (missing()) throw new Pause('required-attribute-missing', { label: missing().label });
-      if (state.validation?.length) throw new Pause('page-validation', state.validation);
     }
 
     checkpoint('image');
+    const gallery = [...new Set(input.galleryImages ?? [])].filter(path => path !== input.imagePath);
+    const photosReady = (current, expectedCount) => current.image.cover && current.image.coverReady &&
+      current.image.count === expectedCount && current.image.readyCount === expectedCount;
     if (input.imagePath && state.image.count == null) throw new Pause('cover-count-unknown');
     if (input.imagePath && state.image.count && !input.retainExistingCover) throw new Pause('cover-already-present');
     if (input.imagePath && !state.image.count) {
       await unique(state.image.selector, 'input');
       await native('upload_file', { selector: state.image.selector, paths: [input.imagePath] });
       await native('wait_for', { text: '封面', timeoutMs: 8000 });
-      await readUntil((current) => current.image.cover && current.image.count === 1, 2500);
-      coverUploaded = state.image.cover && state.image.count === 1;
+      await readUntil(current => photosReady(current, 1), 18000);
+      coverUploaded = photosReady(state, 1);
       if (!coverUploaded) throw new Pause('cover-readback');
+    }
+    if (gallery.length && (!input.imagePath || !photosReady(state, 1))) {
+      throw new Pause('gallery-cover-unverified', { count: state.image.count });
+    }
+    for (const path of gallery) {
+      const previous = state.image.count;
+      await unique(state.image.selector, 'input');
+      await native('upload_file', { selector: state.image.selector, paths: [path] });
+      await readUntil(current => photosReady(current, previous + 1), 18000);
+      if (!photosReady(state, previous + 1)) throw new Pause('gallery-upload-unverified', { count: state.image.readyCount });
+      galleryUploaded++;
     }
 
     checkpoint('sales');
@@ -583,15 +729,36 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       sizeChartReceipt = await replaySizeChart({
         chart: sizeChart, category, title: input.title, allowInference: input.completeMissingSizeChart === true, native, pause,
       });
-      await read();
     }
+    await read();
     if (state.missingRequired > 0) {
       await read(true);
       if (state.missingRequired > 0) await readUntil(current => !current.missingRequired, 2500);
     }
+    if (input.imagePath && (!state.image.coverReady || state.image.readyCount !== state.image.count ||
+        (coverUploaded && !photosReady(state, gallery.length + 1)))) {
+      throw new Pause('gallery-upload-unverified', { count: state.image.readyCount });
+    }
     completed.push(step);
-    const receipt = { completed, category, coverUploaded, skuRows, ...(sizeChartReceipt ? { sizeChart: sizeChartReceipt } : {}),
+    const receipt = { completed, category, coverUploaded, ...(galleryUploaded && { galleryUploaded }), skuRows,
+      ...(sizeChartReceipt ? { sizeChart: sizeChartReceipt } : {}),
       elapsedMs: Date.now() - began };
+    const attributeIssues = new Map(state.attributes.filter(field => field.required && !present(field.value))
+      .map(field => [field.label, { label: field.label, code: 'required-attribute-missing' }]));
+    for (const [label, choice] of attributeTargets) {
+      const matches = state.attributes.filter(field => field.label === label);
+      if (!attributeIssues.has(label) && (matches.length !== 1 || !equalValue(matches[0], choice))) {
+        attributeIssues.set(label, { label, code: attributeFailures.get(label)?.code ?? 'attribute-readback' });
+      }
+    }
+    if (attributeIssues.size || state.validation?.length) {
+      const issues = [...attributeIssues.values()];
+      const first = issues[0];
+      const pendingLabels = issues.slice(1).map(issue => issue.label).join('、');
+      const text = [pendingLabels && `还有 ${pendingLabels} 待核对。`, ...(state.validation ?? [])].filter(Boolean).join('\n');
+      return { ...receipt, status: 'needs-review', step: 'category-attributes', code: first?.code ?? 'page-validation',
+        details: { label: first?.label, issues, text, validation: state.validation, ...(adviceFailure && { adviceFailure }) } };
+    }
     if (state.missingRequired > 0) {
       return { ...receipt, status: 'needs-review', code: 'required-fields-remain',
         details: { text: `Shopee 提示仍有 ${state.missingRequired} 个必填字段为空。` } };

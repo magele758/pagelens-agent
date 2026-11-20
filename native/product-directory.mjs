@@ -109,6 +109,7 @@ function resolveAdditionalImages(dir, input) {
     }
   }
   resolveGallery(input, "sharedGalleryImages");
+  resolveGallery(input, "galleryImages");
   resolveGallery(input.temu, "sharedGalleryImages");
   for (const sku of Array.isArray(input.skus) ? input.skus : []) replacePath(sku, "imagePath");
   for (const key of ["mainImages", "detailImages"]) {

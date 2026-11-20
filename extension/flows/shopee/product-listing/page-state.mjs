@@ -18,6 +18,7 @@ export function readPage(category) {
 
   const out = {
     url: location.href, modal: null, validation: [], unscopedValidation: [], category: null, recommendation: null, recommendations: [],
+    categoryRecommendations: [], categoryPickerAvailable: false,
     categoryReady: false, fields: {}, attributes: [], options: [], optionSearch: null,
     image: { count: null, cover: false, selector: null },
     variant: { enable: null, options: [], rows: [] },
@@ -38,7 +39,7 @@ export function readPage(category) {
   }
 
   const basic = one(panels[0]), sales = one(panels[2]);
-  const labelText = node => clean(node.querySelector('.item-title-text,:scope > span')?.textContent ||
+  const labelText = node => clean((node.querySelector('.item-title-text') ?? node.querySelector(':scope > span:not(.mandatory)'))?.textContent ||
     clean(ownText(node)) || node.textContent).replace(/^[*＊]\s*|\s*\d+\/\d+$/gu, '');
   const labelNode = row => row?.querySelector(':scope > .edit-label');
   const rowsWithLabels = root => shown('.edit-row', root).filter(row => labelNode(row));
@@ -83,14 +84,22 @@ export function readPage(category) {
   const wanted = pathText(category);
   if (!out.category && categoryNode) {
     const row = categoryNode.closest('.edit-row');
+    out.categoryPickerAvailable = Boolean(one('.product-category-box-inner', row));
     const radios = shown('.recommend-category-container .category-select-radio', row)
       .filter(el => el.querySelector(':scope > .radio-indicator') && el.querySelector(':scope > .radio-text'));
-    const candidates = (radios.length ? radios : shown('label,button,[role=option],[role=radio],li,a,span,div,p', row))
+    const fallbackRadios = shown('label,[role=radio]', row)
+      .filter(node => node.matches('[role=radio]') || node.control?.matches('input[type=radio]') || node.querySelector('input[type=radio]'));
+    const candidates = (radios.length ? radios : fallbackRadios)
+      .filter(node => !node.closest('[disabled],[aria-disabled=true],[inert]') && !node.querySelector('input[type=radio]:disabled'))
       .map(el => ({ el, text: pathText(el.textContent) }))
-      .filter(({ text }) => text.length <= 220 && text.includes(' > '));
+      .filter(({ text }) => text.length <= 220 && text.includes(' > ') && text.split(' > ').every(Boolean));
     const items = candidates.filter(({ el, text }) => !candidates.some(other =>
       other.el !== el && el.contains(other.el) && (other.text === text || text.includes(other.text))));
     out.recommendations = [...new Set(items.map(({ text }) => text))].slice(0, 20);
+    out.categoryRecommendations = out.recommendations.flatMap(path => {
+      const exact = only(items.filter(({ text }) => text === path));
+      return exact ? [{ path, selector: selectorOf(exact.el) }] : [];
+    });
     const match = only(items.filter(({ text }) => text === wanted));
     out.recommendation = selectorOf(match?.el);
   }
@@ -100,25 +109,63 @@ export function readPage(category) {
   const validationMarker = '[aria-invalid=true],.eds-form-item__error,.eds-message--error,[role=alert]';
   const validationText = el => clean(el.textContent || el.getAttribute('aria-label') ||
     labelNode(el.closest('.edit-row'))?.textContent);
+  function labelStar(label) {
+    if (shown('.mandatory', label).length || /^\s*[＊*]/u.test(label.textContent)) return true;
+    if (typeof globalThis.CSS?.supports !== 'function') return false;
+    const isRedStar = (node, pseudo) => {
+      const { content, display, visibility, color } = getComputedStyle(node, pseudo);
+      if (display === 'none' || visibility !== 'visible' || !/^['"]?[＊*]['"]?$/u.test(content)) return false;
+      const [red = 0, green = red, blue = red] = color.match(/\d+/gu)?.map(Number) ?? [];
+      return red >= 150 && red > green + 65 && red > blue + 65;
+    };
+    const title = label.querySelector('.item-title-text');
+    return (title ? [label, title] : [label]).some(node =>
+      isRedStar(node, '::before') || isRedStar(node, '::after'));
+  }
+  const entryControls = '.eds-selector,select,input,textarea,[contenteditable=true]';
+  const inactive = '[disabled],[readonly],[aria-disabled=true],.eds-selector--disabled';
   for (const row of all('.edit-row', one(panels[1]))) {
     const label = labelNode(row);
-    if (!label) continue;
-    const controls = all('.eds-selector,select,input,textarea,[contenteditable=true]', row)
-      .filter(el => !el.closest('.eds-popper,.eds-modal'));
-    const control = only(controls.filter(el => visible(el) &&
-      !el.closest('[disabled],[readonly],[aria-disabled=true],.eds-selector--disabled')));
-    const required = Boolean(label.querySelector('.mandatory') || /^\s*[＊*]/u.test(label.textContent) ||
-      controls.some(el => el.matches('[required],[aria-required=true]')));
+    if (!label || !visible(row)) continue;
+    const controls = all(entryControls, row).filter(el => el.closest('.edit-row') === row &&
+      !el.closest('.eds-popper,.eds-modal') && !el.parentElement.closest('.eds-selector,select') &&
+      !el.matches('input[type=hidden]'));
+    const control = only(controls.filter(el => visible(el) && !el.closest(inactive)));
+    const required = labelStar(label) || row.getAttribute('aria-required') === 'true' ||
+      controls.some(el => el.matches('[required],[aria-required=true]'));
     if (!control && !required) continue;
     attributeRows.add(row);
+    const controlLabel = labelText(label);
     const selection = control?.querySelector('.eds-selector__inner,.scroll-selector-content') ?? control;
-    if (control && (control.getAttribute('aria-expanded') === 'true' || control.closest('.eds-select.is-show'))) {
-      opened.push(labelText(label));
+    const customSelect = control?.matches('.eds-selector');
+    const nativeSelect = control?.matches('select');
+    const multiple = control?.matches('select[multiple],[aria-multiselectable=true],.eds-selector--multiple') ||
+      Boolean(control?.closest('.eds-select--multiple,[aria-multiselectable=true]'));
+    const explicitTokens = selection ? shown('.eds-tag__text,.eds-tag__content,[data-selected-value]', selection) : [];
+    const tokens = [...new Set(explicitTokens.map(node => clean(node.getAttribute('data-selected-value') || node.textContent)).filter(Boolean))];
+    const type = customSelect || nativeSelect ? 'select'
+      : control?.matches('input[type=file]') ? 'upload'
+        : control?.matches('input[type=checkbox]') ? 'checkbox'
+          : control?.matches('input[type=number]') ? 'number'
+            : control?.matches('input[type=text],input:not([type]),textarea,[contenteditable=true]') ? 'text' : 'unsupported';
+    if (customSelect && (control.getAttribute('aria-expanded') === 'true' || control.closest('.eds-select.is-show'))) {
+      opened.push(controlLabel);
     }
-    const error = shown(validationMarker, row).map(validationText).filter(Boolean).join(' · ').slice(0, 220);
-    out.attributes.push({ label: labelText(label), required, selector: selectorOf(control), error,
-      type: control?.matches('.eds-selector') ? 'select' : control?.matches('input[type=file]') ? 'upload' : 'unsupported',
-      value: selection?.matches('.placeholder') ? '' : clean(value(selection)).replace(/^请选择$/u, '') });
+    const error = shown(validationMarker, row).map(validationText).filter(Boolean).join(' · ').slice(0, 220) ||
+      (control?.closest('.eds-form-item--error,.eds-input--error,.eds-selector--error') ? '当前商品属性显示校验错误' : '');
+    const scalar = selection?.matches('.placeholder') ? '' : clean(value(selection)).replace(/^请选择$/u, '');
+    const nativeOptions = nativeSelect ? [...control.options].filter(option => option.value && !option.disabled &&
+      !option.closest('optgroup[disabled]')).map(option => clean(option.label)).filter(Boolean) : undefined;
+    const selectedValues = nativeSelect ? [...control.selectedOptions].filter(option => option.value).map(option => clean(option.label)) : tokens;
+    const unknownMultipleSelection = customSelect && multiple && scalar && !tokens.length;
+    out.attributes.push({ key: controlLabel, label: controlLabel, required, selector: selectorOf(control), error,
+      type: unknownMultipleSelection ? 'unsupported' : type,
+      ...(multiple && { multiple: true }), ...(nativeOptions && { nativeOptions }),
+      ...(type === 'number' && control.min !== '' && { min: Number(control.min) }),
+      ...(type === 'number' && control.max !== '' && { max: Number(control.max) }),
+      ...(type === 'text' && control.maxLength > 0 && { maxLength: control.maxLength }),
+      value: type === 'checkbox' ? control.checked : unknownMultipleSelection ? scalar
+        : multiple ? selectedValues : nativeSelect ? selectedValues[0] || '' : scalar });
   }
   out.categoryReady = Boolean(out.category && (!wanted || out.category === wanted) &&
     (out.attributes.some(attribute => attribute.selector) || out.fields.price || out.fields.variantName));
@@ -137,9 +184,14 @@ export function readPage(category) {
     const upload = '.product-basic-info .shopee-image-manager__upload input[type=file][accept="image/*"]';
     const count = media.querySelector('.shopee-image-manager__upload__content__text')?.textContent
       .match(/\((\d+)\s*\/\s*\d+\)/u)?.[1];
+    const ready = shown('.shopee-image-manager__itembox .shopee-image-manager__image', media).filter(img =>
+      img.complete && img.naturalWidth > 0 && /^https?:\/\//iu.test(img.currentSrc || img.src) &&
+      !img.closest('.ignore-item,.eds-modal'));
     out.image = {
       count: count == null ? null : Number(count),
       cover: /封面/u.test(media.innerText ?? media.textContent),
+      readyCount: ready.length,
+      coverReady: ready.some(img => /封面/u.test(img.closest('.shopee-image-manager__itembox')?.textContent)),
       selector: selectorOf(only(all(upload).filter(el => !el.disabled))),
     };
   }
@@ -238,8 +290,103 @@ export function clickCategoryRecommendation(selector, category, expectedUrl) {
   return { ok: true };
 }
 
+// The category editor is separate from listing submission. Every write is matched
+// to the current dialog, category level, and observed selection before clicking.
+export function operateShopeeCategory({ action = 'read', query, level, label, expectedPath, category } = {}, expectedUrl) {
+  const clean = value => String(value ?? '').trim().replace(/\s+/gu, ' ');
+  const split = value => (Array.isArray(value) ? value : clean(value).split(/[＞>›»]/u)).map(clean);
+  const visible = node => node.getClientRects().length && getComputedStyle(node).visibility === 'visible' &&
+    !node.closest('[hidden],[aria-hidden=true],[inert]');
+  const enabled = node => node && visible(node) &&
+    !node.closest(':disabled,[aria-disabled=true],.is-disabled,.disabled,.eds-button--disabled');
+  const shown = (selector, root = document) => [...root.querySelectorAll(selector)].filter(visible);
+  const only = items => items.length === 1 ? items[0] : null;
+  const denied = (code, error) => ({ ok: false, code, error });
+  if (location.href !== expectedUrl || location.origin !== 'https://seller.shopee.cn' ||
+      location.pathname !== '/portal/mtsku/new') return denied('category-page-changed', 'Shopee 商品类目页面已改变。');
+
+  const trigger = only(shown('.product-basic-info .edit-row .product-category-box-inner').filter(node => {
+    const field = only(shown('.product-category-text', node)) ?? only(shown('.product-category-placeholder', node));
+    return /^(?:Please set category|请选择(?:商品)?类[别目])$/iu.test(clean(field?.textContent));
+  }));
+  const modal = only(shown('.eds-modal__content').filter(node =>
+    only(shown('.eds-modal__title', node).filter(title => /^(?:编辑类目|Edit Category)$/iu.test(clean(title.textContent))))));
+  const container = modal?.closest('.eds-modal') ?? modal;
+  const unrelated = shown('.eds-modal__mask,[role=dialog],[aria-modal=true],dialog[open],.eds-popper:has(.pulse-popover-button)')
+    .some(node => !container || !container.contains(node) && !node.contains(container));
+  if (unrelated) return denied('modal', '请先处理当前 Shopee 弹窗。');
+  if (!modal) {
+    if (action === 'read') return { ok: true, open: false, available: Boolean(enabled(trigger)), selectedPath: [], levels: [] };
+    if (action !== 'open' || !enabled(trigger)) return denied('category-picker-not-ready', '没有定位到当前商品的空白类目编辑框。');
+    trigger.click();
+    return { ok: true };
+  }
+
+  const picker = only(shown('.category-selector', modal));
+  if (!picker) return denied('category-picker-not-ready', '正在等待 Shopee 类目选项。');
+  const search = only(shown('.category-search input[placeholder="请输入至少 1 个字"]', picker));
+  const confirm = only(shown('.eds-modal__footer-buttons button', modal).filter(node =>
+    /^(?:Confirm|确认|确定)$/iu.test(clean(node.textContent))));
+  const levels = shown('.category-list .scroll-item', picker).slice(0, 8).map(column =>
+    shown('li.category-item', column).filter(node => node.parentElement === column).slice(0, 200)
+      .flatMap(node => {
+        const item = only(shown('p.text-overflow', node));
+        const label = clean(item?.textContent);
+        if (!label || label.length > 110) return [];
+        const selected = node.matches('.selected,[aria-selected=true]');
+        const leaf = !shown('.category-item-right', node).length;
+        return [{ label, selected, leaf, disabled: !enabled(node), node }];
+      }));
+  const selectedLevels = levels.map(items => items.filter(item => item.selected));
+  const selectedItems = selectedLevels.map(only);
+  const firstPending = selectedItems.findIndex(item => !item);
+  const selectedPath = selectedItems.slice(0, firstPending < 0 ? selectedItems.length : firstPending).map(item => item.label);
+  const terminal = selectedItems[selectedPath.length - 1];
+  const canConfirm = Boolean(enabled(confirm) && terminal?.selected && !terminal.disabled &&
+    levels.slice(selectedPath.length).every(items => !items.length));
+  if (action === 'read') {
+    return { ok: true, open: true, available: true, selectedPath, canConfirm,
+      query: search?.value ?? null, noResults: !levels.some(items => items.length) && /当前搜索暂无结果/u.test(picker.textContent),
+      levels: levels.map(items => items.map(({ label, selected, leaf, disabled }) => ({ label, selected, leaf, disabled }))) };
+  }
+  const samePath = parts => Array.isArray(parts) && parts.length === selectedPath.length &&
+    parts.every((name, index) => typeof name === 'string' && clean(name) === selectedPath[index]);
+  if (action === 'search') {
+    if (!samePath(expectedPath) || !enabled(search) || search.readOnly || typeof query !== 'string' ||
+        query.length > 80 || /[\u0000-\u001f]/u.test(query) || query !== query.trim()) {
+      return denied('category-picker-changed', '类目搜索框或当前类目已变化。');
+    }
+    if (search.value !== query) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (!setter) return denied('category-picker-not-ready', '未能定位类目搜索输入框。');
+      setter.call(search, query);
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      search.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return { ok: true };
+  }
+  if (action === 'select') {
+    if (!samePath(expectedPath) || !Number.isInteger(level) || level < 0 || level > selectedPath.length ||
+        typeof label !== 'string' || !label || label !== clean(label)) {
+      return denied('category-picker-changed', '当前选择的类目层级已变化。');
+    }
+    const target = only((levels[level] ?? []).filter(item => item.label === label));
+    if (!target || !enabled(target.node)) return denied('category-option-missing', '当前类目层级没有唯一可选的匹配项。');
+    if (!target.selected) target.node.click();
+    return { ok: true };
+  }
+  if (action === 'confirm') {
+    if ((typeof category !== 'string' && !Array.isArray(category)) || !selectedPath.length || !canConfirm || !samePath(split(category))) {
+      return denied('category-not-ready', 'Shopee 类目路径或最终选择尚未核对。');
+    }
+    confirm.click();
+    return { ok: true };
+  }
+  return denied('category-operation-not-allowed', '当前操作不属于 Shopee 类目选择。');
+}
+
 // These specific Shopee controls can be operated in either foreground or background tabs.
-export function clickListingControl({ action, selector, category, label, text }, expectedUrl) {
+export function clickListingControl({ action, selector, category, label, text, value }, expectedUrl) {
   const clean = value => String(value ?? '').trim().replace(/\s+/gu, ' ');
   const pathText = value => clean(value).replace(/\s*[＞>›»]\s*/gu, ' > ');
   const visible = node => node.getClientRects().length && getComputedStyle(node).visibility === 'visible' &&
@@ -270,13 +417,54 @@ export function clickListingControl({ action, selector, category, label, text },
     const node = row?.querySelector(':scope > .edit-label');
     if (!node) return '';
     const ownText = [...node.childNodes].filter(child => child.nodeType === 3).map(child => child.nodeValue).join(' ');
-    const title = node.querySelector('.item-title-text,:scope > span');
+    const title = node.querySelector('.item-title-text') ?? node.querySelector(':scope > span:not(.mandatory)');
     return clean(title?.textContent || clean(ownText) || node.textContent).replace(/^[*＊]\s*|\s*\d+\/\d+$/gu, '');
   };
   const trigger = '.product-specification-new .eds-selector';
   const option = '.eds-option,[role=option]';
   const menu = '.eds-select-popover-content:not(.slide-fast-leave-active)';
   switch (action) {
+    case 'attribute-set': {
+      const controls = shown('.product-specification-new .edit-row :is(.eds-selector,select,input,textarea,[contenteditable=true])')
+        .filter(control => attributeLabel(control) === label && !control.matches('input[type=hidden]') &&
+          !control.closest('.eds-popper,.eds-modal,[disabled],[readonly],[aria-disabled=true],.eds-selector--disabled') &&
+          !control.parentElement.closest('.eds-selector,select'));
+      if (only(controls) !== target) return denied();
+      if (target.matches('input[type=checkbox]')) {
+        if (typeof value !== 'boolean') return denied();
+        if (target.checked !== value) target.click();
+        return target.checked === value ? { ok: true } : denied();
+      }
+      if (target.matches('select')) {
+        const wanted = target.multiple ? value : [value];
+        if (!Array.isArray(wanted) || !wanted.length || wanted.length > 30 ||
+            wanted.some(item => typeof item !== 'string' || !item.trim()) || new Set(wanted.map(clean)).size !== wanted.length) return denied();
+        const available = [...target.options].filter(option => option.value && !option.disabled && !option.closest('optgroup[disabled]'));
+        const picks = wanted.map(item => only(available.filter(option => clean(option.label) === clean(item))));
+        if (!picks.every(Boolean)) return denied();
+        if (target.multiple) [...target.options].forEach(option => { option.selected = picks.includes(option); });
+        else target.selectedIndex = picks[0].index;
+      } else {
+        const numeric = target.matches('input[type=number]');
+        const content = target.matches('[contenteditable=true]');
+        if (!numeric && !content && !target.matches('input[type=text],input:not([type]),textarea')) return denied();
+        if (typeof value !== 'string' && typeof value !== 'number') return denied();
+        const rendered = String(value);
+        if (!rendered.trim() || rendered.length > 4000 || target.maxLength > 0 && rendered.length > target.maxLength) return denied();
+        if (numeric && (!/^-?\d+(?:\.\d+)?$/u.test(rendered) || !Number.isFinite(Number(rendered)) ||
+            target.min !== '' && Number(rendered) < Number(target.min) || target.max !== '' && Number(rendered) > Number(target.max))) return denied();
+        if (content) target.textContent = rendered;
+        else {
+          const prototype = target.matches('textarea') ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+          if (!setter) return denied();
+          setter.call(target, rendered);
+        }
+      }
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true };
+    }
     case 'attribute-trigger': {
       const matches = shown(trigger).filter(control => attributeLabel(control) === label);
       if (only(matches) !== target || clean(target.innerText ?? target.textContent).slice(0, 400) !== text) return denied();

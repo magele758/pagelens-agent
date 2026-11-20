@@ -6,7 +6,7 @@ import { shopeeExampleInput as example } from '../example-input.js';
 const input = { ...example, shopId: '123', imagePath: '/products/notebook.png', attributes: { 品牌: 'NoBrand' } };
 
 function mockPage({ modal = null, newRequired = false, failWrite = false, delayedWrite = false, noImagePreview = false,
-  coverPresent = false, retryCategory = false, categoryRecommendations = null, rejectVariantName = false, advice } = {}) {
+  coverPresent = false, retryCategory = false, categoryRecommendations = null, rejectVariantName = false, advice, gallery = [] } = {}) {
   const labels = {
     '#category': input.category, '#noBrand': 'NoBrand', '#enable': '开启商品规格'
   };
@@ -32,7 +32,7 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
     optionSearch: null,
     fields,
     attributes: attrs,
-    image: { count: Number(coverPresent), cover: coverPresent, selector: '#cover' },
+    image: { count: Number(coverPresent), cover: coverPresent, readyCount: Number(coverPresent), coverReady: coverPresent, selector: '#cover' },
     variant: { enable: '#enable', options: [], rows: [] },
   };
   const calls = [];
@@ -139,8 +139,9 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
         break;
       case 'upload_file': {
         if (args.selector === '#cover') {
-          assert.deepEqual(args.paths, [input.imagePath]);
-          Object.assign(state.image, { count: 1, cover: true });
+          assert.deepEqual(args.paths, [[input.imagePath, ...gallery][state.image.count]]);
+          const count = state.image.count + 1;
+          Object.assign(state.image, { count, cover: true, readyCount: count, coverReady: true });
         } else {
           const row = state.variant.rows.find(row => row.image.selector === args.selector);
           assert.ok(row);
@@ -382,13 +383,16 @@ test('reports a modal before making changes', async () => {
   assert.deepEqual(page.calls.map(({ tool }) => tool), ['flow_page_state']);
 });
 
-test('pauses on a new required attribute without redoing form discovery', async () => {
+test('fills supplied attributes, uploads, and SKUs before reporting a new unresolved required attribute', async () => {
   const page = mockPage({ newRequired: true });
   const receipt = await run(page);
+  assert.equal(receipt.status, 'needs-review');
   assert.equal(receipt.step, 'category-attributes');
   assert.equal(receipt.code, 'required-attribute-missing');
   assert.equal(receipt.details.label, '装订方式');
-  assert.equal(page.calls.some(({ tool }) => tool === 'upload_file'), false);
+  assert.equal(page.state.attributes.find(attr => attr.label === '品牌').value, 'NoBrand');
+  assert.equal(receipt.coverUploaded, true);
+  assert.deepEqual(receipt.skuRows, input.variant.options);
   assert.equal(page.calls.some(({ tool }) => tool === 'flow_attribute_advice'), false);
 });
 
@@ -411,7 +415,48 @@ test('leaves a required dropdown pending when the model invents an option', asyn
   const receipt = await run(page, { ...input, completeMissingAttributes: true });
   assert.equal(receipt.code, 'required-attribute-missing');
   assert.equal(receipt.details.label, '装订方式');
-  assert.ok(!page.calls.some(({ args }) => args.selector === '#spiral' || args.selector === '#cover'));
+  assert.deepEqual(receipt.details.validation, ['请选择装订方式']);
+  assert.equal(receipt.coverUploaded, true);
+  assert.deepEqual(receipt.skuRows, input.variant.options);
+  assert.ok(!page.calls.some(({ args }) => args.selector === '#spiral'));
+});
+
+test('defers a supplied obsolete attribute option without inventing its replacement', async () => {
+  const page = mockPage({ newRequired: true });
+  const receipt = await run(page, { ...input, attributes: { ...input.attributes, '装订方式': '以前的选项' } });
+  assert.equal(receipt.status, 'needs-review');
+  assert.equal(receipt.details.label, '装订方式');
+  assert.equal(receipt.coverUploaded, true);
+  assert.deepEqual(receipt.skuRows, input.variant.options);
+  assert.ok(!page.calls.some(({ args }) => args.text === '以前的选项'));
+});
+
+test('rechecks attributes revealed during a later form section', async () => {
+  const page = mockPage();
+  const call = page.call;
+  page.call = async (tool, args) => {
+    if (tool === 'fill' && args.selector === '#weight') {
+      page.state.attributes.push({ label: '纸张类型', required: true, value: '' });
+    }
+    return call(tool, args);
+  };
+  const receipt = await run(page);
+  assert.equal(receipt.status, 'needs-review');
+  assert.equal(receipt.details.label, '纸张类型');
+  assert.deepEqual(receipt.skuRows, input.variant.options);
+});
+
+test('still stops on a validation error outside the category attributes', async () => {
+  const page = mockPage();
+  const call = page.call;
+  page.call = async (tool, args) => {
+    if (tool === 'upload_file') page.state.unscopedValidation = ['请填入重量'];
+    return call(tool, args);
+  };
+  const receipt = await run(page);
+  assert.equal(receipt.code, 'page-validation');
+  assert.equal(receipt.step, 'image');
+  assert.ok(!page.calls.some(({ args }) => args.selector === '#enable'));
 });
 
 test('reconsiders an old supplied choice only against the current category dropdown', async () => {
@@ -465,6 +510,30 @@ test('uploads two distinct local images to the individual SKU cells and verifies
     ['#cover', input.imagePath], ['#image-1', options[0].imagePath], ['#image-2', options[1].imagePath],
   ]);
   assert.equal(page.state.variant.rows[0].sku, options[1].sku, 'row order is independent of request order');
+});
+
+test('waits for each gallery image to finish before sending the next one', async () => {
+  const gallery = ['/products/detail-1.png', '/products/detail-2.png'];
+  const page = mockPage({ gallery });
+  const call = page.call;
+  let pendingReads = 0;
+  page.call = async (tool, args) => {
+    if (tool === 'upload_file' && args.selector === '#cover') {
+      assert.equal(pendingReads, 0);
+      pendingReads = 2;
+    }
+    const result = await call(tool, args);
+    if (tool === 'flow_page_state' && pendingReads > 0) {
+      pendingReads--;
+      const current = JSON.parse(result);
+      current.image.readyCount--;
+      return current;
+    }
+    return result;
+  };
+  const receipt = await run(page, { ...input, galleryImages: gallery });
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.equal(receipt.galleryUploaded, 2);
 });
 
 test('preserves the original single-option schema', async () => {

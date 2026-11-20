@@ -33,6 +33,8 @@ const REASONS = new Map([
   ["cover-count-unknown", "无法读取当前主图数量。"],
   ["cover-already-present", "当前表单已有主图，请先核对。"],
   ["cover-readback", "主图上传后未通过回读。"],
+  ["gallery-cover-unverified", "主图仍在处理中，请检查商品图片。"],
+  ["gallery-upload-unverified", "有商品图片尚未上传完成，请检查缩略图。"],
   ["different-variant", "表单中已有其他商品规格。"],
   ["sku-row-not-unique", "未找到唯一匹配的 SKU 行。"],
   ["sku-readback", "实际 SKU 行未通过回读。"],

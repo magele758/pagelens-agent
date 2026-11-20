@@ -61,7 +61,8 @@ export function validateProductDirectory(loaded) {
       throw new Error("本机助手返回的商品数据格式无效。");
     }
     const variants = Array.isArray(input.variant?.options) ? input.variant.options : [input.variant];
-    const images = [input.imagePath, ...variants.map((row) => row?.imagePath), input.sizeChartImagePath];
+    const images = [input.imagePath, ...(Array.isArray(input.galleryImages) ? input.galleryImages : []),
+      ...variants.map((row) => row?.imagePath), input.sizeChartImagePath];
     if (images.some((image) => image != null && !withinFolder(image, root, folder))) {
       throw new Error(`「${folder}」的图片超出了此商品目录。`);
     }
@@ -115,9 +116,14 @@ export function directoryAttributeAdvice(product, {
       const blob = await (await fetch(image, { signal })).blob();
       referenceImages.push({ role: "main", file: blob });
     }
-    return createAdvisor({ settings, product: input, referenceImages, signal });
+    return createAdvisor({ settings, product: input, referenceImages, signal, categoryPlatform: "Shopee" });
   }
-  return async fields => (await (advisor ??= prepare())).fields(fields);
+  const getAdvisor = () => (advisor ??= prepare());
+  const fields = async list => (await getAdvisor()).fields(list);
+  fields.chooseCategory = async info => (await getAdvisor()).chooseCategory(info);
+  fields.chooseCachedCategory = async info => (await getAdvisor()).chooseCachedCategory(info);
+  fields.categoryKeywords = async info => (await getAdvisor()).categoryKeywords(info);
+  return fields;
 }
 
 export async function completeDirectorySizeChartInput(product, {

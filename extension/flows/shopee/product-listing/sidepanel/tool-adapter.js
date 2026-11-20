@@ -1,6 +1,6 @@
 import { operateShopeeSizeChart } from "../page-size-chart.mjs";
 import { completeSizeChartInput } from "./product-directory.js";
-import { clickCategoryRecommendation, clickListingControl, readPage, writeListingVariant } from "../page-state.mjs";
+import { clickCategoryRecommendation, clickListingControl, operateShopeeCategory, readPage, writeListingVariant } from "../page-state.mjs";
 import { createCdpTools, dialogNote, withDialogGuard } from "../../../../lib/agent/cdp-tools.js";
 import { queryDom } from "../../../../lib/agent/page-fns.js";
 import { matchIrreversible } from "../../../../lib/agent/trust/irreversible.js";
@@ -14,6 +14,8 @@ const INPUTS = new Set(["fill", "trusted_type"]);
 const CDP_TOOLS = new Set(["trusted_click", "trusted_type", "press_keys", "upload_file"]);
 const TOOL_SETTINGS = {};
 const unsafeClick = /^(?:创建|取消|保存|提交|create|cancel|save|submit)(?:$|并)/iu;
+const categoryPath = value => typeof value === "string" && value.length <= 220 && value.includes(" > ");
+let categoryCacheWrites = Promise.resolve();
 
 function fail(code, error) {
   return { ok: false, code, error };
@@ -92,6 +94,46 @@ export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChar
       case "flow_category_click":
         signal?.throwIfAborted();
         return exec(clickCategoryRecommendation, [args.selector, args.category, url], "MAIN");
+      case "flow_category_picker_action":
+        return exec(operateShopeeCategory, [args, url], "MAIN");
+      case "flow_category_advice": {
+        if (!adviseAttributes) return { index: null, keywords: [] };
+        const hints = Array.isArray(args.hints) ? args.hints.slice(0, 10) : [];
+        const shop = new URL(url).searchParams.get("cnsc_shop_id");
+        const key = `pagelens.shopee.categories.v1.${shop}`;
+        try {
+          if (args.mode === "cache") {
+            const stored = (await chrome.storage.local.get(key))?.[key];
+            const paths = (Array.isArray(stored) ? stored : []).filter(categoryPath).slice(0, 12);
+            if (paths.length) {
+              const decision = await adviseAttributes.chooseCachedCategory({ candidates: paths.map(path => path.split(" > ")), hints });
+              return { path: paths[decision.index], keywords: decision.keywords };
+            }
+            return { keywords: [] };
+          }
+          if (args.mode === "keywords") return { keywords: await adviseAttributes.categoryKeywords({ hints }) };
+          const candidates = Array.isArray(args.candidates) ? args.candidates.slice(0, 24) : [];
+          return { index: await adviseAttributes.chooseCategory({ candidates, hints }) };
+        } catch (error) {
+          signal?.throwIfAborted();
+          return { index: null, keywords: [] };
+        }
+      }
+      case "flow_category_remember": {
+        if (!categoryPath(args.category)) return { ok: true };
+        const current = await exec(readPage, [args.category]);
+        if (current?.category !== args.category || !current.categoryReady) return { ok: true };
+        const shop = new URL(url).searchParams.get("cnsc_shop_id");
+        const key = `pagelens.shopee.categories.v1.${shop}`;
+        const write = categoryCacheWrites.then(async () => {
+          const stored = (await chrome.storage.local.get(key))?.[key];
+          const paths = (Array.isArray(stored) ? stored : []).filter(path => categoryPath(path) && path !== args.category);
+          await chrome.storage.local.set({ [key]: [args.category, ...paths].slice(0, 40) });
+        });
+        categoryCacheWrites = write.catch(() => {});
+        await categoryCacheWrites;
+        return { ok: true };
+      }
       case "flow_control_click":
         signal?.throwIfAborted();
         return exec(clickListingControl, [args, url], "MAIN");
