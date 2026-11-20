@@ -68,6 +68,11 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
       fields.variantName = { selector: '#variantName', value: '' };
       fields.variantOption = { selector: '#variantOption', value: '' };
     },
+    '#reset': () => {
+      state.variant = { enable: '#enable', options: [], rows: [] };
+      delete fields.variantName;
+      delete fields.variantOption;
+    },
   };
   const call = async (tool, args) => {
     assert.equal(args.tabId, 10);
@@ -126,7 +131,12 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
       case 'flow_control_click':
         assert.equal(args.category, input.category);
         assert.equal({ '#brand': 'attribute-trigger', '#noBrand': 'attribute-option', '#enable': 'variant-enable',
-          '#binding': 'attribute-trigger', '#spiral': 'attribute-option' }[args.selector], args.action);
+          '#binding': 'attribute-trigger', '#spiral': 'attribute-option', '#reset': 'variant-reset' }[args.selector], args.action);
+        if (args.action === 'variant-reset') {
+          assert.equal(args.value, fields.title.value);
+          assert.equal(args.variantName, fields.variantName.value);
+          assert.deepEqual(args.variantOptions, state.variant.options);
+        }
         actions[args.selector]();
         break;
       case 'flow_attribute_advice':
@@ -167,6 +177,14 @@ function mockPage({ modal = null, newRequired = false, failWrite = false, delaye
 
 async function run(mock, parameters = input) {
   return replayShopeeListing({ call: mock.call, tabId: 10, input: parameters });
+}
+
+function advancePollingDeadline(t) {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => {
+    now += 1000;
+    return now;
+  });
 }
 
 const apparelChart = {
@@ -341,7 +359,8 @@ test('keeps prior SKU evidence and stops when Shopee rejects the size-chart save
   assert.equal(actions.filter(args => args.action === 'save').length, 1);
 });
 
-test('retains the verified uploads and SKU values when Shopee reports an unfilled required field', async () => {
+test('retains the verified uploads and SKU values when Shopee reports an unfilled required field', async t => {
+  advancePollingDeadline(t);
   const page = mockPage();
   page.state.missingRequired = 1;
   const receipt = await run(page);
@@ -369,7 +388,8 @@ test('replays the fixed steps and verifies values in the actual SKU row', async 
   assert.ok(page.calls.slice(offset).every(({ tool }) => tool === 'flow_page_state'));
 });
 
-test('stops before touching SKU options if the page did not accept the variation name', async () => {
+test('stops before touching SKU options if the page did not accept the variation name', async t => {
+  advancePollingDeadline(t);
   const page = mockPage({ rejectVariantName: true });
   const receipt = await run(page);
   assert.equal(receipt.code, 'variant-name-readback');
@@ -421,7 +441,8 @@ test('leaves a required dropdown pending when the model invents an option', asyn
   assert.ok(!page.calls.some(({ args }) => args.selector === '#spiral'));
 });
 
-test('defers a supplied obsolete attribute option without inventing its replacement', async () => {
+test('defers a supplied obsolete attribute option without inventing its replacement', async t => {
+  advancePollingDeadline(t);
   const page = mockPage({ newRequired: true });
   const receipt = await run(page, { ...input, attributes: { ...input.attributes, '装订方式': '以前的选项' } });
   assert.equal(receipt.status, 'needs-review');
@@ -459,7 +480,8 @@ test('still stops on a validation error outside the category attributes', async 
   assert.ok(!page.calls.some(({ args }) => args.selector === '#enable'));
 });
 
-test('reconsiders an old supplied choice only against the current category dropdown', async () => {
+test('reconsiders an old supplied choice only against the current category dropdown', async t => {
+  advancePollingDeadline(t);
   const page = mockPage({ newRequired: true, advice: async fields => {
     assert.deepEqual(fields[0].options, ['线圈装', '胶装']);
     return { '装订方式': '线圈装' };
@@ -471,7 +493,8 @@ test('reconsiders an old supplied choice only against the current category dropd
   assert.ok(!page.calls.some(({ args }) => args.text === '以前的选项'));
 });
 
-test('does not confuse populated bulk controls with the actual SKU row', async () => {
+test('does not confuse populated bulk controls with the actual SKU row', async t => {
+  advancePollingDeadline(t);
   const page = mockPage({ failWrite: true });
   page.state.fields.batchQuantity.value = '30';
   const receipt = await run(page);
@@ -498,6 +521,127 @@ test('waits for delayed values in each addressed SKU row', async () => {
   const receipt = await run(page);
   assert.equal(receipt.status, 'verified');
   assert.equal(receipt.skuRows[0].quantity, '30');
+});
+
+test('clears another product’s carried-over options only in a newly opened batch form', async () => {
+  const pages = [mockPage(), mockPage(), mockPage()];
+  for (const page of pages) {
+    page.state.fields.variantName = { selector: '#variantName', value: '颜色' };
+    page.state.variant = { enable: null, reset: '#reset', options: ['旧颜色'], rows: [] };
+  }
+  const [variant, single, existing] = pages;
+  existing.state.fields.title.value = '已有草稿';
+  const batchInput = { ...input, resetUnownedDraftVariants: true };
+  const complete = await run(variant, batchInput);
+  assert.equal(complete.status, 'verified', JSON.stringify(complete));
+  assert.deepEqual(variant.state.variant.options, input.variant.options.map(({ option }) => option));
+  const plain = await run(single, { ...batchInput, variant: null, price: '39.90', quantity: '30' });
+  assert.equal(plain.status, 'verified', JSON.stringify(plain));
+  assert.deepEqual(single.state.variant.options, []);
+  const refused = await run(existing, batchInput);
+  assert.equal(refused.code, 'different-variant');
+  assert.ok(!existing.calls.some(({ args }) => args.action === 'variant-reset'));
+  assert.deepEqual(existing.state.variant.options, ['旧颜色']);
+});
+
+test('clears carried options that only appear when the variant editor is opened', async () => {
+  const page = mockPage();
+  const call = page.call;
+  let opens = 0;
+  page.call = async (tool, args) => {
+    const response = await call(tool, args);
+    if (args.action === 'variant-enable' && ++opens === 1) {
+      page.state.fields.variantName.value = '规格';
+      Object.assign(page.state.variant, { reset: '#reset', options: ['旧颜色'] });
+    }
+    return response;
+  };
+  const receipt = await run(page, { ...input, resetUnownedDraftVariants: true });
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.deepEqual(page.calls.filter(({ args }) => args.action?.startsWith('variant-')).map(({ args }) => args.action),
+    ['variant-enable', 'variant-reset', 'variant-enable']);
+  assert.deepEqual(page.state.variant.options, input.variant.options.map(({ option }) => option));
+});
+
+test('replays the sales section once when unrelated options appear after adding intended options', async () => {
+  const page = mockPage();
+  const call = page.call;
+  let carried = false;
+  page.call = async (tool, args) => {
+    const response = await call(tool, args);
+    if (!carried && tool === 'flow_variant_write' && args.option === input.variant.options.at(-1).option) {
+      carried = true;
+      page.state.variant.reset = '#reset';
+      page.state.variant.options.push('旧规格一', '旧规格二');
+    }
+    return response;
+  };
+  const receipt = await run(page, { ...input, resetUnownedDraftVariants: true });
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.deepEqual(page.state.variant.options, input.variant.options.map(({ option }) => option));
+  assert.equal(page.calls.filter(({ args }) => args.action === 'variant-reset').length, 1);
+  assert.equal(page.calls.filter(({ tool, args }) => tool === 'upload_file' && args.selector === '#cover').length, 1);
+});
+
+test('repairs a single-SKU form after the final summary restores variants and resetting clears shipping', async () => {
+  const page = mockPage();
+  const call = page.call;
+  let carried = false;
+  page.state.missingRequired = 1;
+  page.call = async (tool, args) => {
+    if (args.verifySummary && !carried) {
+      carried = true;
+      page.state.fields.variantName = { selector: '#variantName', value: '规格' };
+      page.state.variant = { enable: null, reset: '#reset', options: ['旧颜色'], rows: [] };
+      delete page.state.fields.price;
+    }
+    const response = await call(tool, args);
+    if (args.action === 'variant-reset') {
+      page.state.fields.price = { selector: '#price', value: '' };
+      page.state.fields.shipDays.value = '';
+      page.state.missingRequired = 0;
+    }
+    return response;
+  };
+  const receipt = await run(page, { ...input, resetUnownedDraftVariants: true, variant: null,
+    price: '29.95', quantity: '12', shipDays: '1' });
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.deepEqual(page.state.variant.options, []);
+  assert.equal(page.state.fields.price.value, '29.95');
+  assert.equal(page.state.fields.shipDays.value, '1');
+  assert.deepEqual(page.calls.filter(({ tool, args }) => tool === 'fill' && args.selector === '#shipDays')
+    .map(({ args }) => args.value), ['1', '1']);
+  assert.equal(page.calls.filter(({ args }) => args.action === 'variant-reset').length, 1);
+  assert.equal(page.calls.filter(({ tool, args }) => tool === 'upload_file' && args.selector === '#cover').length, 1);
+});
+
+test('rebinds shifted SKU controls after a price change and retries the one unapplied value', async t => {
+  advancePollingDeadline(t);
+  const page = mockPage();
+  const call = page.call;
+  let reads = 0;
+  let failed = false;
+  page.call = async (tool, args) => {
+    if (tool === 'fill' && args.selector === '#shifted-quantity') {
+      assert.equal(args.commit, true);
+      reads++;
+      if (!failed) {
+        failed = true;
+        return { ok: false, code: 'control-changed' };
+      }
+    }
+    const result = await call(tool, args);
+    if (tool === 'fill' && args.selector === '#price-1') {
+      const row = page.state.variant.rows.find(item => item.selectors.price === args.selector);
+      row.selectors.quantity = '#shifted-quantity';
+    }
+    return result;
+  };
+  const receipt = await run(page, { ...input, resetUnownedDraftVariants: true });
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.equal(reads, 2);
+  assert.ok(!page.calls.some(({ args }) => args.selector === '#quantity-1'));
+  assert.equal(page.calls.filter(({ tool, args }) => tool === 'fill' && args.selector === '#price-1').length, 1);
 });
 
 test('uploads two distinct local images to the individual SKU cells and verifies each preview', async () => {
@@ -536,6 +680,52 @@ test('waits for each gallery image to finish before sending the next one', async
   assert.equal(receipt.galleryUploaded, 2);
 });
 
+test('resolves a moved basic field from a fresh page snapshot and waits for hydrated shipping fields', async () => {
+  const page = mockPage();
+  let ignoredReads = 0;
+  let movedDescription = false;
+  const call = async (tool, args) => {
+    if (tool === 'query_dom' && args.selector === '#description' && !movedDescription) {
+      movedDescription = true;
+      page.state.fields.description.selector = '#description-new';
+      return [];
+    }
+    if (tool === 'fill' && args.selector === '#description-new') {
+      return page.call(tool, { ...args, selector: '#description' });
+    }
+    const result = await page.call(tool, args);
+    if (tool !== 'flow_page_state' || !page.state.categoryReady || ignoredReads >= 9) return result;
+    ignoredReads++;
+    const state = JSON.parse(result);
+    delete state.fields.width;
+    return JSON.stringify(state);
+  };
+  const receipt = await replayShopeeListing({ call, tabId: 10, input });
+  assert.equal(movedDescription, true);
+  assert.equal(receipt.status, 'verified');
+  assert.equal(page.state.fields.width.value, String(input.width));
+});
+
+test('repairs a single-SKU price invalidated by a subsequent render before allowing create', async () => {
+  const page = mockPage();
+  let drifted = false;
+  const call = async (tool, args) => {
+    const result = await page.call(tool, args);
+    if (tool === 'fill' && args.selector === '#weight' && !drifted) {
+      page.state.fields.price.value = '';
+      drifted = true;
+    }
+    return result;
+  };
+  const { variant, ...single } = input;
+  const receipt = await replayShopeeListing({ call, tabId: 10, input: { ...single, price: '69.57', quantity: 1, resetUnownedDraftVariants: true } });
+  assert.equal(receipt.status, 'verified');
+  assert.equal(drifted, true);
+  const writes = page.calls.filter(({ tool, args }) => tool === 'fill' && args.selector === '#price');
+  assert.equal(writes.length, 2);
+  assert.ok(writes.every(({ args }) => args.commit && args.value === '69.57'));
+});
+
 test('preserves the original single-option schema', async () => {
   const page = mockPage();
   const [first] = input.variant.options;
@@ -544,7 +734,8 @@ test('preserves the original single-option schema', async () => {
   assert.deepEqual(receipt.skuRows, [first]);
 });
 
-test('retries only the same exact recommendation after a click that did not commit', async () => {
+test('retries only the same exact recommendation after a click that did not commit', async t => {
+  advancePollingDeadline(t);
   const page = mockPage({ retryCategory: true });
   const receipt = await run(page);
   assert.equal(receipt.status, 'verified');
@@ -552,7 +743,8 @@ test('retries only the same exact recommendation after a click that did not comm
   assert.deepEqual(attempts.map(({ tool }) => tool), ['query_dom', 'trusted_click', 'query_dom', 'flow_category_click']);
 });
 
-test('reports observed paths without selecting a different recommendation', async () => {
+test('reports observed paths without selecting a different recommendation', async t => {
+  advancePollingDeadline(t);
   const recommendations = ['文具 > 笔记本与纸质用品 > 备忘录与便利贴', '文具 > 笔记本与纸质用品 > 活页纸'];
   const page = mockPage({ categoryRecommendations: recommendations });
   const receipt = await run(page);

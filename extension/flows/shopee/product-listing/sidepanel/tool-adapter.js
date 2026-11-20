@@ -175,7 +175,8 @@ export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChar
 
     signal?.throwIfAborted();
     if (tool === "fill") {
-      const applied = await exec(plSetInputValue, [{ selector: args.selector, value: args.value }], "MAIN");
+      const applied = await exec(plSetInputValue, [{ selector: args.selector, value: args.value,
+        commit: args.commit === true }], "MAIN");
       if (!applied?.matches) return fail("readback-mismatch", applied?.error || "页面没有接受填写值");
       return applied;
     }

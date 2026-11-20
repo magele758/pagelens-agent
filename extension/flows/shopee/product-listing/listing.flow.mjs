@@ -314,14 +314,32 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     }
     return targets[0];
   };
-  const fill = async (field, value) => {
+  const fill = async (field, value, commit = false) => {
     if (!field) throw new Pause('field-missing');
     if (field.value === String(value)) return;
     const target = await unique(field.selector);
     if (!['input', 'textarea'].includes(target.tag) || target.type === 'file') {
       throw new Pause('field-kind-changed', { selector: field.selector });
     }
-    await native('fill', { selector: field.selector, value: String(value), submit: false });
+    await native('fill', { selector: field.selector, value: String(value), submit: false, ...(commit && { commit }) });
+  };
+  const movedControl = new Set(['control-changed', 'control-missing', 'field-missing', 'field-kind-changed']);
+  const fillNamedField = async (key, value, commit = false) => {
+    const ready = current => Boolean(current.fields[key]?.selector);
+    if (!ready(state)) await readUntil(ready, 3000);
+    if (!ready(state)) throw new Pause('field-missing', { key });
+    try {
+      await fill(state.fields[key], value, commit);
+    } catch (error) {
+      if (!movedControl.has(error.code)) throw error;
+      await readUntil(ready, 3000);
+      try {
+        await fill(state.fields[key], value, commit);
+      } catch (retry) {
+        if (!movedControl.has(retry.code)) throw retry;
+        throw new Pause(retry.code, { key });
+      }
+    }
   };
   const click = async (selector, label) => {
     const target = await unique(selector);
@@ -417,14 +435,39 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     return 'verified';
   };
   const expected = (key, value, normalize = (actual, desired) => String(actual) === String(desired)) => {
-    if (!state.fields[key] || !normalize(state.fields[key].value, value)) throw new Pause('readback-mismatch', { key });
+    const actual = state.fields[key]?.value;
+    if (actual == null || !normalize(actual, value)) throw new Pause('readback-mismatch', { key, expected: value, actual: actual || '空' });
   };
   const rowFor = (option, current = state) => {
     const candidates = current.variant.rows.filter(row => row.option === option);
     return candidates.length === 1 ? candidates[0] : null;
   };
-  const rowMatches = (row, wanted) => Boolean(row && matchedNumber(row.price, wanted.price) &&
-    matchedNumber(row.quantity, wanted.quantity) && row.sku === wanted.sku);
+  const salesKeys = ['price', 'quantity', 'sku'];
+  const saleMatches = (row, key, wanted) => Boolean(row &&
+    (key === 'sku' ? row.sku === wanted : matchedNumber(row[key], wanted)));
+  const rowMatches = (row, wanted) => salesKeys.every(key => saleMatches(row, key, wanted[key]));
+  async function fillSkuRow(wanted, commit) {
+    const row = () => rowFor(wanted.option);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      for (const key of salesKeys) {
+        if (!row()?.selectors?.[key]) await readUntil(current => Boolean(rowFor(wanted.option, current)?.selectors?.[key]), 2500);
+        const current = row();
+        if (!current?.selectors?.[key]) throw new Pause('sku-control-missing', { option: wanted.option, key });
+        if (saleMatches(current, key, wanted[key])) continue;
+        try {
+          await fill({ selector: current.selectors[key], value: current[key] }, wanted[key], commit);
+        } catch (error) {
+          if (!movedControl.has(error.code) && error.code !== 'readback-mismatch') throw error;
+        }
+        // Committing one cell can rebuild the SKU table and change every selector.
+        await read();
+      }
+      await readUntil(current => rowMatches(rowFor(wanted.option, current), wanted), 2100);
+      if (rowMatches(row(), wanted)) return;
+    }
+    const key = salesKeys.find(key => !saleMatches(row(), key, wanted[key]));
+    throw new Pause('sku-readback', { option: wanted.option, key, actual: row()?.[key] || '空', expected: String(wanted[key]) });
+  }
   async function pickCategory(path, searchWords = []) {
     const operate = (action, args = {}) => native('flow_category_picker_action', { action, ...args });
     async function readPicker(check, timeout = 2400) {
@@ -486,12 +529,12 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     throw new Pause('category-not-ready', { category: path, selected });
   }
   try {
-    await read();
+    await readUntil(current => Boolean(current.fields.title?.selector && current.fields.description?.selector), 5000);
     const freshForm = input.resetUnownedDraftVariants === true && state.fields.title?.value === '';
     checkpoint('basic');
     if (state.category && category && norm(state.category) !== category) throw new Pause('different-category', { actual: state.category });
-    await fill(state.fields.title, input.title);
-    await fill(state.fields.description, input.description);
+    await fillNamedField('title', input.title);
+    await fillNamedField('description', input.description);
     await read();
     expected('title', input.title);
     expected('description', input.description);
@@ -522,8 +565,14 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
           }
         }
         if (recommendation && category) {
-          await click(recommendation, category);
-          await readUntil(current => Boolean(current.category));
+          try {
+            await click(recommendation, category);
+            await readUntil(current => Boolean(current.category));
+          } catch (error) {
+            if (!movedControl.has(error.code) && error.code !== 'click-label-changed') throw error;
+            await read();
+            recommendation = state.recommendation ?? state.categoryRecommendations?.find(item => norm(item.path) === category)?.selector;
+          }
         }
         if (!state.category && recommendation && category) {
           const target = await unique(recommendation);
@@ -647,47 +696,95 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
 
     checkpoint('sales');
     const variant = input.variant;
-    if (freshForm && state.variant.reset && !variant && (state.fields.variantName || state.variant.rows.length)) {
-      await native('flow_control_click', {
-        action: 'variant-reset', selector: state.variant.reset, category, label: '清除新表单预带规格', value: input.title,
+    const allowedOptions = new Set(variants.map(item => item.option));
+    const hasVariant = current => Boolean(current.fields.variantName || current.variant.options.length || current.variant.rows.length);
+    const otherVariant = current => Boolean(variant && (
+      current.variant.options.some(option => !allowedOptions.has(option)) ||
+      variant.name !== '规格' && current.fields.variantName?.value && current.fields.variantName.value !== variant.name
+    ));
+    const resetNeeded = current => hasVariant(current) && (!variant || otherVariant(current));
+    function assertVariation() {
+      if (!resetNeeded(state)) return;
+      if (!variant) throw new Pause('variants-already-enabled');
+      throw new Pause('different-variant', {
+        actual: [state.fields.variantName?.value, ...state.variant.options].filter(Boolean),
+        expected: [variant.name, ...allowedOptions],
       });
-      await readUntil(current => !current.fields.variantName && !current.variant.rows.length);
     }
-    if (variant) {
-      const allowedOptions = new Set(variants.map(item => item.option));
-      if (state.variant.enable) {
+    async function clearCarriedVariant() {
+      for (let attempt = 0; attempt < 2 && freshForm && resetNeeded(state); attempt++) {
+        if (!state.variant.reset) await readUntil(current => !resetNeeded(current) || Boolean(current.variant.reset), 3500);
+        if (!resetNeeded(state) || !state.variant.reset) return;
+        try {
+          await native('flow_control_click', {
+            action: 'variant-reset', selector: state.variant.reset, category, label: '清除新表单预带规格',
+            value: input.title, variantName: state.fields.variantName?.value ?? '', variantOptions: state.variant.options,
+          });
+        } catch (error) {
+          if (!movedControl.has(error.code)) throw error;
+          await read();
+          continue;
+        }
+        uploadedOptions.clear();
+        await readUntil(current => !hasVariant(current) &&
+          Boolean(variant ? current.variant.enable : current.fields.price), 4500);
+      }
+    }
+    async function openVariationEditor() {
+      if (!state.fields.variantName && !state.variant.enable) {
+        await readUntil(current => Boolean(current.fields.variantName || current.variant.enable), 3500);
+      }
+      if (state.variant.enable && !hasVariant(state)) {
         await native('flow_control_click', {
           action: 'variant-enable', selector: state.variant.enable, category, label: '开启商品规格', text: '开启商品规格',
         });
-        await readUntil((current) => Boolean(current.fields.variantName));
+        await readUntil((current) => Boolean(current.fields.variantName), 3500);
+      }
+    }
+    async function fillSales() {
+      await read();
+      await clearCarriedVariant();
+      if (!variant) {
+        assertVariation();
+        await fillNamedField('price', input.price, freshForm);
+        await fillNamedField('quantity', input.quantity, freshForm);
+        return;
+      }
+      await openVariationEditor();
+      // Opening the editor can restore options after the initial sales section was read.
+      if (freshForm && otherVariant(state)) {
+        await clearCarriedVariant();
+        await openVariationEditor();
       }
       // A category can start with an empty, predefined variation axis. A generic
       // one-axis import can use that label without changing any of its option values.
       const name = variant.name === '规格' && state.variant.options.every(option => allowedOptions.has(option)) && state.fields.variantName?.value
         ? state.fields.variantName.value : variant.name;
-      if (state.fields.variantName?.value && state.fields.variantName.value !== name ||
-          state.variant.options.some(existing => !allowedOptions.has(existing))) {
-        throw new Pause('different-variant', {
-          actual: [state.fields.variantName?.value, ...state.variant.options].filter(Boolean),
-          expected: [variant.name, ...allowedOptions],
-        });
-      }
+      assertVariation();
       if (state.fields.variantName?.value !== name) {
         if (!state.fields.variantName?.selector) throw new Pause('variant-control-changed', { kind: 'name' });
         await native('flow_variant_write', {
           kind: 'name', selector: state.fields.variantName.selector, category, name, existingOptions: state.variant.options,
         });
-        await readUntil((current) => current.fields.variantName?.value === name);
+        await readUntil(current => resetNeeded(current) || current.fields.variantName?.value === name);
+        assertVariation();
         if (state.fields.variantName?.value !== name) throw new Pause('variant-name-readback', { name });
       }
       for (const { option } of variants) {
         if (state.variant.options.includes(option)) continue;
+        if (!state.fields.variantOption?.selector) {
+          await readUntil(current => resetNeeded(current) || current.variant.options.includes(option) ||
+            Boolean(current.fields.variantOption?.selector), 2600);
+          assertVariation();
+          if (state.variant.options.includes(option)) continue;
+        }
         if (!state.fields.variantOption?.selector) throw new Pause('variant-control-changed', { kind: 'option', option });
         await native('flow_variant_write', {
           kind: 'option', selector: state.fields.variantOption.selector, category, name, option,
           existingOptions: state.variant.options,
         });
-        await readUntil(current => Boolean(rowFor(option, current)));
+        await readUntil(current => resetNeeded(current) || Boolean(rowFor(option, current)), 3500);
+        assertVariation();
         if (!rowFor(option)) throw new Pause('sku-row-not-unique', { option });
       }
       if (state.variant.rows.length !== variants.length || variants.some(({ option }) => !rowFor(option))) {
@@ -695,61 +792,93 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       }
       for (const item of variants) {
         const { option } = item;
-        const row = rowFor(option);
-        for (const key of ['price', 'quantity', 'sku']) {
-          if (!row.selectors?.[key]) throw new Pause('sku-control-missing', { option, key });
-          await fill({ selector: row.selectors[key], value: row[key] }, item[key]);
-        }
-        await readUntil(current => rowMatches(rowFor(option, current), item));
-        if (!rowMatches(rowFor(option), item)) throw new Pause('sku-readback', { option });
+        await fillSkuRow(item, freshForm);
+        assertVariation();
         if (!item.imagePath) continue;
         const image = rowFor(option).image;
         if (image?.present) {
-          if (!item.retainExistingImage) throw new Pause('sku-image-already-present', { option });
+          if (!item.retainExistingImage && !uploadedOptions.has(option)) throw new Pause('sku-image-already-present', { option });
           continue;
         }
         if (!image?.selector) throw new Pause('sku-image-control-missing', { option });
         await unique(image.selector, 'input');
         await native('upload_file', { selector: image.selector, paths: [item.imagePath] });
-        await readUntil(current => Boolean(rowFor(option, current)?.image?.present), 18000);
+        await readUntil(current => resetNeeded(current) || Boolean(rowFor(option, current)?.image?.present), 18000);
+        assertVariation();
+        if (!rowFor(option)?.image?.present && rowFor(option)?.image?.pending) {
+          if (freshForm) await read(true);
+          await readUntil(current => resetNeeded(current) || Boolean(rowFor(option, current)?.image?.present), 12000);
+          assertVariation();
+        }
         if (!rowFor(option)?.image?.present) throw new Pause('sku-image-readback', { option });
         uploadedOptions.add(option);
       }
-    } else {
-      if (state.fields.variantName || state.variant.rows.length) throw new Pause('variants-already-enabled');
-      await fill(state.fields.price, input.price);
-      await fill(state.fields.quantity, input.quantity);
     }
 
-    checkpoint('shipping');
     const shipping = ['weight', 'width', 'length', 'height', 'shipDays'].filter((key) => input[key] != null);
-    for (const key of shipping) await fill(state.fields[key], input[key]);
-    if (input.sku != null) await fill(state.fields.sku, input.sku);
-    await read();
-    for (const key of shipping) expected(key, input[key], matchedNumber);
-    if (input.sku != null) expected('sku', input.sku);
-    if (!variant) {
-      expected('price', input.price, matchedNumber);
-      expected('quantity', input.quantity, matchedNumber);
-    }
-    skuRows = variants.map(item => {
-      const row = rowFor(item.option);
-      if (!rowMatches(row, item)) throw new Pause('sku-readback', { option: item.option });
-      const { option, price, quantity, sku } = row;
-      if (!item.imagePath) return { option, price, quantity, sku };
-      if (!row.image?.present) throw new Pause('sku-image-readback', { option });
-      return { option, price, quantity, sku, imageVerified: true, imageUploaded: uploadedOptions.has(option) };
-    });
-    if (sizeChart) {
-      checkpoint('size-chart');
-      sizeChartReceipt = await replaySizeChart({
-        chart: sizeChart, category, title: input.title, allowInference: input.completeMissingSizeChart === true, native, pause,
+    function verifySalesAndShipping() {
+      assertVariation();
+      for (const key of shipping) expected(key, input[key], matchedNumber);
+      if (input.sku != null) expected('sku', input.sku);
+      if (!variant) {
+        expected('price', input.price, matchedNumber);
+        expected('quantity', input.quantity, matchedNumber);
+      }
+      if (state.variant.rows.length !== variants.length) throw new Pause('sku-row-not-unique');
+      skuRows = variants.map(item => {
+        const row = rowFor(item.option);
+        if (!rowMatches(row, item)) throw new Pause('sku-readback', { option: item.option });
+        const { option, price, quantity, sku } = row;
+        if (!item.imagePath) return { option, price, quantity, sku };
+        if (!row.image?.present) throw new Pause('sku-image-readback', { option });
+        return { option, price, quantity, sku, imageVerified: true, imageUploaded: uploadedOptions.has(option) };
       });
     }
-    await read();
-    if (state.missingRequired > 0) {
-      await read(true);
-      if (state.missingRequired > 0) await readUntil(current => !current.missingRequired, 2500);
+    async function fillShipping() {
+      for (const key of shipping) await fillNamedField(key, input[key], freshForm);
+      if (input.sku != null) await fillNamedField('sku', input.sku);
+      await read();
+      assertVariation();
+      if (!variant && freshForm) {
+        for (const key of ['price', 'quantity']) {
+          if (matchedNumber(state.fields[key]?.value, input[key])) continue;
+          await fillNamedField(key, input[key], true);
+          await readUntil(current => resetNeeded(current) || matchedNumber(current.fields[key]?.value, input[key]));
+          assertVariation();
+        }
+      }
+    }
+    const retryableDrift = new Set(['different-variant', 'variants-already-enabled', 'variant-control-changed',
+      'sku-control-missing', 'sku-row-not-unique', 'sku-readback', 'field-missing', 'readback-mismatch']);
+    const completedBeforeSales = completed.length;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await fillSales();
+        checkpoint('shipping');
+        await fillShipping();
+        verifySalesAndShipping();
+        if (sizeChart) {
+          checkpoint('size-chart');
+          sizeChartReceipt = await replaySizeChart({
+            chart: sizeChart, category, title: input.title, allowInference: input.completeMissingSizeChart === true, native, pause,
+          });
+        }
+        await read();
+        assertVariation();
+        if (state.missingRequired > 0) {
+          await read(true);
+          if (state.missingRequired > 0) await readUntil(current => resetNeeded(current) || !current.missingRequired, 2500);
+        }
+        verifySalesAndShipping();
+        break;
+      } catch (error) {
+        // A different product's saved options can arrive after the field pass has started.
+        if (attempt || !freshForm || !resetNeeded(state) || !retryableDrift.has(error.code)) throw error;
+        expected('title', input.title);
+        completed.length = completedBeforeSales;
+        skuRows = undefined;
+        step = 'sales';
+      }
     }
     if (input.imagePath && (!state.image.coverReady || state.image.readyCount !== state.image.count ||
         (coverUploaded && !photosReady(state, gallery.length + 1)))) {

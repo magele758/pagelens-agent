@@ -222,16 +222,20 @@ export function readPage(category) {
       const images = one('.shopee-image-manager', firstCells[index]);
       const uploads = all('.shopee-image-manager__upload input[type=file][accept="image/*"]', images)
         .filter(el => !el.disabled);
-      const thumbnail = shown('.shopee-image-manager__itembox img', images).find(img =>
-        !img.closest('.shopee-image-manager__upload,.eds-modal,.image-cropper-modal') &&
-        img.complete && img.naturalWidth > 0 && !/^data:image\/gif[;,]/iu.test(img.currentSrc || img.src));
+      const previews = shown('.shopee-image-manager__itembox img', images).filter(img =>
+        !img.closest('.shopee-image-manager__upload,.eds-modal,.image-cropper-modal'));
+      const thumbnails = previews.filter(img => !/^data:image\/gif[;,]/iu.test(img.currentSrc || img.src));
+      const present = thumbnails.some(img => img.complete && img.naturalWidth > 0);
+      const pending = !present && (thumbnails.some(img => !img.complete || img.loading === 'lazy') ||
+        previews.some(img => img.getAttribute('src')?.startsWith('blob:')) ||
+        shown('.shopee-image-manager__itembox [aria-busy=true],.eds-loading', images).length > 0);
       return {
         option: choices[index],
         price: value(fields.price),
         quantity: value(fields.quantity),
         sku: value(fields.sku),
         selectors: Object.fromEntries(Object.entries(fields).map(([key, el]) => [key, selectorOf(el)])),
-        image: { selector: selectorOf(only(uploads)), present: Boolean(thumbnail) },
+        image: { selector: selectorOf(only(uploads)), present, pending },
       };
     });
   }
@@ -387,7 +391,7 @@ export function operateShopeeCategory({ action = 'read', query, level, label, ex
 }
 
 // These specific Shopee controls can be operated in either foreground or background tabs.
-export function clickListingControl({ action, selector, category, label, text, value }, expectedUrl) {
+export function clickListingControl({ action, selector, category, label, text, value, variantName, variantOptions }, expectedUrl) {
   const clean = value => String(value ?? '').trim().replace(/\s+/gu, ' ');
   const pathText = value => clean(value).replace(/\s*[＞>›»]\s*/gu, ' > ');
   const visible = node => node.getClientRects().length && getComputedStyle(node).visibility === 'visible' &&
@@ -490,6 +494,11 @@ export function clickListingControl({ action, selector, category, label, text, v
       const title = clean(only(rows)?.querySelector('input[type=text],input:not([type])')?.value);
       if (label !== '清除新表单预带规格' || !title || title !== clean(value) || !sales ||
           only([...sales.querySelectorAll('.variation-edit-item .variation-delete-btn')].filter(visible)) !== target) return denied();
+      const names = [...sales.querySelectorAll('.variation-name-panel input')].filter(visible);
+      const options = [...sales.querySelectorAll('.variation-option-panel .options-item input')]
+        .filter(visible).map(input => clean(input.value)).filter(Boolean);
+      if (names.length !== 1 || clean(names[0].value) !== clean(variantName) || !Array.isArray(variantOptions) ||
+          options.length !== variantOptions.length || options.some((option, index) => option !== variantOptions[index])) return denied();
       break;
     }
     default:
