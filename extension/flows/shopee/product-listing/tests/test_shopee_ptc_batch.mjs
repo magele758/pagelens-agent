@@ -117,14 +117,15 @@ test("a Shopee product list can anchor workers, but a different shop or site can
   }
 });
 
-test("a redirected product keeps its own error and releases its tab without blocking the other tab", async () => {
+test("a redirected product keeps its own error and tab while the successful tab closes", async () => {
   const { run, events, active, closed } = makeRun({ redirect: true });
   await run();
   assert.equal(active.length, 1);
   assert.equal(events.find(({ index, phase }) => index === 0 && phase === "created").tabId, null);
   const blocked = events.find(({ index, phase }) => index === 1 && phase === "needs-review");
-  assert.equal(blocked.tabId, null);
-  assert.deepEqual([...closed].sort(), [40, 41]);
+  assert.equal(blocked.tabId, 41);
+  assert.equal(blocked.receipt.tabCleanupFailed, undefined);
+  assert.deepEqual(closed, [40]);
   assert.match(blocked.receipt.details, /Shopee 登录/u);
 });
 
@@ -227,38 +228,53 @@ test("honors the configured ten-worker limit and sends publish only when request
   await assert.rejects(makeRun({ mode: "prefill" }).run(), TypeError);
 });
 
-test("skips submission after replay validation and preserves uncertainty if a submission call fails", async () => {
+test("keeps failed tabs without taking up the configured slot for the next product", async () => {
   const { run, events, submissions, closed } = makeRun({
-    data: jobs(3), concurrency: 1,
+    data: jobs(4), concurrency: 1,
     submit: ({ tabId }) => {
       if (tabId === 41) throw new Error("回执连接中断");
       return { status: "created", globalItemId: "50123" };
     },
   });
-  await run(({ tabId }) => tabId === 40 ? { status: "needs-review", details: "仍有必填项" } : { status: "verified" });
-  assert.deepEqual(submissions.map(({ tabId }) => tabId), [41, 42]);
-  assert.deepEqual(closed, [40, 41, 42]);
-  assert.equal(events.find(({ index, phase }) => index === 0 && phase === "needs-review").receipt.details, "仍有必填项");
-  assert.equal(events.find(({ index, phase }) => index === 1 && phase === "submission-unknown").receipt.details, "回执连接中断");
-  assert.equal(events.find(({ index, phase }) => index === 2 && phase === "created").receipt.globalItemId, "50123");
+  await run(({ tabId }) => {
+    if (tabId === 40) return { status: "needs-review", details: "仍有必填项" };
+    if (tabId === 42) return { status: "deferred", details: "页面有弹窗" };
+    return { status: "verified" };
+  });
+  assert.deepEqual(submissions.map(({ tabId }) => tabId), [41, 43]);
+  assert.deepEqual(closed, [43]);
+  for (const [index, phase, details] of [
+    [0, "needs-review", "仍有必填项"],
+    [1, "submission-unknown", "回执连接中断"],
+    [2, "deferred", "页面有弹窗"],
+  ]) {
+    const outcome = events.find(event => event.index === index && event.phase === phase);
+    assert.equal(outcome.tabId, 40 + index);
+    assert.equal(outcome.receipt.details, details);
+    assert.equal(outcome.receipt.tabCleanupFailed, undefined);
+  }
+  assert.equal(events.find(({ index, phase }) => index === 3 && phase === "created").receipt.globalItemId, "50123");
 });
 
-test("reconciles uncertain creation from a shared list tab after releasing the form tabs", async () => {
+test("closes a retained uncertain tab only when shared readback confirms creation", async () => {
   const data = products.map((product, index) => ({ ...product, input: { ...product.input, sku: `SKU-${index}` } }));
   const { run, events, submissions, closed, peak } = makeRun({
     data, concurrency: 1, submit: () => ({ status: "submission-unknown" }),
     reconcile: async ({ skus, tabId }) => {
       assert.deepEqual(skus, ["SKU-0", "SKU-1"]);
-      assert.deepEqual(closed, [40, 41]);
+      assert.deepEqual(closed, []);
       assert.equal(tabId, 42);
       return new Map([["SKU-0", "50001"]]);
     },
   });
   await run();
   assert.equal(submissions.length, 2);
-  assert.equal(peak(), 1);
-  assert.deepEqual(closed, [40, 41, 42]);
-  assert.equal(events.find(({ phase }) => phase === "created")?.receipt.globalItemId, "50001");
+  assert.equal(peak(), 3);
+  assert.deepEqual(closed, [40, 42]);
+  assert.equal(events.findLast(({ index }) => index === 0).tabId, null);
+  assert.equal(events.findLast(({ index }) => index === 0).receipt.globalItemId, "50001");
+  assert.equal(events.findLast(({ index }) => index === 1).tabId, 41);
+  assert.equal(events.findLast(({ index }) => index === 1).receipt.status, "submission-unknown");
 });
 
 test("the stop signal does not open queued tabs or report a started submission as a safe cancellation", async () => {
@@ -270,8 +286,8 @@ test("the stop signal does not open queued tabs or report a started submission a
   gate.reject(controller.signal.reason);
   await pending;
   assert.equal(created.length, 1);
-  assert.deepEqual(closed, [40]);
-  assert.ok(events.some(({ index, phase }) => index === 0 && phase === "submission-unknown"));
+  assert.deepEqual(closed, []);
+  assert.equal(events.find(({ index, phase }) => index === 0 && phase === "submission-unknown").tabId, 40);
   assert.deepEqual(events.filter(({ phase }) => phase === "cancelled").map(({ index }) => index), [1, 2]);
 });
 
