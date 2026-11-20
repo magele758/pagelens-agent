@@ -2,7 +2,7 @@ import { matchesFlowTarget } from "../../../../lib/flow/runtime.js";
 import { ensureOptionalAccess } from "../../../../lib/optional-permissions.js";
 import { $ } from "../../../../sidepanel/dom.js";
 import { shopeeShopId } from "../definition.js";
-import { imagePathsFor, runProductBatch } from "./batch-run.js";
+import { imagePathsFor, isReviewStatus, runProductBatch } from "./batch-run.js";
 import { chooseShopeeProductDirectory, completeDirectorySizeChartInput, directoryAttributeAdvice, loadProductDirectory, prepareSizeChartInput } from "./product-directory.js";
 
 const STATUS = new Map([
@@ -122,7 +122,7 @@ export function bindPtcBatch({
     const label = STATUS.get(job.phase) || "";
     job.progress.textContent = [label, !job.receipt && stepLabel(job.step)].filter(Boolean).join(" · ");
     const status = job.receipt?.status;
-    const hasIssue = status === "needs-review" || status === "deferred" || status === "submission-unknown";
+    const hasIssue = isReviewStatus(status);
     const id = job.receipt?.globalItemId;
     job.details.textContent = [
       id && `全球商品 ID ${id}`,
@@ -291,11 +291,14 @@ export function bindPtcBatch({
       });
       const successfulPhase = mode === "publish" ? "published" : "created";
       const done = jobs.filter((job) => job.phase === successfulPhase).length;
-      const blocked = jobs.filter((job) => ["needs-review", "deferred", "submission-unknown"].includes(job.phase)).length;
+      const blockedJobs = jobs.filter((job) => isReviewStatus(job.phase));
+      const blocked = blockedJobs.length;
+      const retained = blockedJobs.filter((job) => job.tabId).length;
       const stopped = jobs.filter((job) => job.phase === "cancelled").length;
       const skipped = jobs.filter((job) => job.phase === "skipped").length;
       const summary = [
         `${STATUS.get(successfulPhase)} ${done}/${jobs.length}`, blocked ? `待处理 ${blocked}` : "",
+        retained ? `保留 ${retained} 个标签` : "",
         stopped ? `已停止 ${stopped}` : "", skipped ? `已跳过 ${skipped}` : "",
       ].filter(Boolean).join(" · ");
       setStatus(blocked ? "needs-review" : stopped ? "cancelled" : "verified", summary);
