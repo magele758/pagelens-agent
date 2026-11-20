@@ -958,6 +958,16 @@ export async function resolveCategory(tab, url, source, copy, dir, persistListin
     const flex = await choose(source, scope.leaves, undefined, { flexibleScope: true });
     const leafTerm = flex.choice.label.split(/\s+[>/-]\s+/).at(-1);
     const flexChoice = { label: flex.choice.label, search: leafTerm };
+    try {
+      await runCode(tab, sellerCategorySearchCode(url));
+      const typed = await bridge("trusted_type", { tabId: tab, value: leafTerm });
+      if (typed?.ok) {
+        const res = await runCode(tab, sellerCategoryOptionsCode(url, flex.choice.label));
+        if (categoryPath(res.choice) === categoryPath(flex.choice.label)) {
+          return { choice: flexChoice, ptc: flex.ptc, selected: { selected: true, label: flex.choice.label, shown: res.choice } };
+        }
+      }
+    } catch {}
     const applied = await category(tab, flexChoice);
     if (!applied?.selected) return null;
     return { choice: flexChoice, ptc: flex.ptc, selected: applied };

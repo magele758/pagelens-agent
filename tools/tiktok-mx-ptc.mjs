@@ -49,7 +49,7 @@ function sourceOption(sku) {
 
 // Locally edited PTC cells share the same SKU label output contract.
 const variantOptionsContract =
-  "Also return a top-level variantOptions array of {sourceSkuId, label}: one distinct concise Mexican Spanish label per eligible source SKU preserving exact sourceSkuId, model codes, quantities, and units (e.g., localize piece counts as ‘1 pieza’ or ‘3 piezas’; use ‘Estándar’ for a single unlabeled SKU; do not invent variants, stock, or prices).";
+  "Also return a top-level variantOptions array of {sourceSkuId, label}: one distinct concise Mexican Spanish label (at most 20 characters) per eligible source SKU preserving exact sourceSkuId, model codes, quantities, and units (e.g., 'Rosa', '25 cm Plateado', '1 pza', '3 pzas'; use 'Estándar' for a single unlabeled SKU; do not invent variants, stock, or prices).";
 const japaneseOptionText = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 
 function localizedOptions(variants, output) {
@@ -228,7 +228,7 @@ async function generateText(prompt, signal) {
             },
             body: JSON.stringify({
               model: candidateModel,
-              max_tokens: 900,
+              max_tokens: 1800,
               output_config: { effort: "low" },
               system: directSystemPrompt,
               messages: [{ role: "user", content: prompt }],
@@ -513,7 +513,11 @@ export async function chooseCategory(source, candidates, generate = generateText
         title: source.title, categories: source.categories, specs: source.specs, description: source.description,
         candidates: candidates.map((c, idx) => idx + ": " + c),
       }), signal);
-      const { index } = JSON.parse(answer.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, ""));
+      let { index } = JSON.parse(answer.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, ""));
+      if (flexibleScope && (!Number.isInteger(index) || index < 0 || index >= candidates.length)) {
+        const fb = candidates.findIndex(c => /保鲜|收纳|厨房用具与小工具|烘焙|餐具/.test(c));
+        index = fb >= 0 ? fb : 0;
+      }
       if (!Number.isInteger(index) || index < 0 || index >= candidates.length)
         throw Error("No suitable seller category selected");
       return candidates[index];
@@ -536,8 +540,10 @@ export async function chooseAttributes(source, catalog, generate = generateText,
         })),
       }), signal);
       const { fields } = JSON.parse(answer.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, ""));
-      if (!Array.isArray(fields) || fields.length !== catalog.length) throw Error("Incomplete attribute decisions");
-      return Object.fromEntries(fields.map((field, i) => {
+      if (!Array.isArray(fields) || (fields.length !== catalog.length && generate !== generateText))
+        throw Error("Incomplete attribute decisions");
+      const alignedFields = catalog.map((_, idx) => fields[idx] ?? []);
+      return Object.fromEntries(alignedFields.map((field, i) => {
         const { name, options, multiple } = catalog[i];
         const normFact = s => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
         const normFacts = facts.map(normFact);

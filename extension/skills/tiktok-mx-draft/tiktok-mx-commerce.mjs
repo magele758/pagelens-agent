@@ -418,12 +418,14 @@ export async function sellerVariants(ui, plan) {
     if (!document.execCommand?.("insertText", false, sku.option) || input.value !== sku.option) {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, sku.option);
       input.dispatchEvent(new InputEvent("input", { bubbles: true, data: sku.option, inputType: "insertText" }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
     }
-    await sleep(350);
+    await sleep(150);
     if (matches()) continue;
-    if (!input.isConnected || input.value !== sku.option)
+    if (!input.isConnected || input.value !== sku.option) {
+      const committedEarly = await wait(matches, "early option " + sku.option, 8).catch(() => null);
+      if (committedEarly) continue;
       throw Error("Variant input changed before commit: " + sku.option);
+    }
     input.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Enter",

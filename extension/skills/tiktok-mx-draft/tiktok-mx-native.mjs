@@ -130,7 +130,21 @@ export async function runNativeDraft(job, bridge) {
   if (sellerAction && job.token != null) throw Error("TikTok MX seller action does not accept a token");
   const opening = sellerAction ? { type: "mx.seller", request: mxSellerRequest(job.request) } : draftOpening(job, action);
   let step = 0;
-  const call = (tool, args) => bridge.call({ id: job.id + "." + ++step, tool, args });
+  let failedMsg = "";
+  const ownedEver = new Set();
+  const ownedWindows = new Set();
+  const call = async (tool, args) => {
+    const reply = await bridge.call({ id: job.id + "." + ++step, tool, args });
+    if (reply?.ok && tool === "open_tab") {
+      for (const id of [reply.result?.tabId, ...(reply.result?.backgroundTabIds || [])]) {
+        if (Number.isInteger(id)) ownedEver.add(id);
+      }
+      if (args?.newWindow === true && Number.isInteger(reply.result?.windowId)) {
+        ownedWindows.add(reply.result.windowId);
+      }
+    }
+    return reply;
+  };
   const tabUrl = async id => { const t = await chrome.tabs.get(id); return t.url || t.pendingUrl; };
   const execute = sellerAction
     ? createMxSellerTransport(opening.request, call, tabUrl)
@@ -140,13 +154,14 @@ export async function runNativeDraft(job, bridge) {
   let timer;
   try {
     return await new Promise((resolve, reject) => {
-      timer = setTimeout(() => reject(Error(task + " timed out; reconcile its receipt before retrying")), 300000);
-      port.onDisconnect.addListener(() => reject(Error(chrome.runtime.lastError?.message ||
+      const fail = err => { failedMsg = String(err?.message || err || ""); reject(err); };
+      timer = setTimeout(() => fail(Error(task + " timed out; reconcile its receipt before retrying")), 300000);
+      port.onDisconnect.addListener(() => fail(Error(chrome.runtime.lastError?.message ||
         (sellerAction ? "TikTok MX seller action host disconnected" : "Draft host disconnected"))));
       port.onMessage.addListener(msg => {
         if (msg.type === "mx.done") {
           if (msg.ok) resolve(msg.result);
-          else reject(Error(msg.error));
+          else fail(Error(msg.error));
         } else if (msg.type === "mx.tool") {
           execute(msg.job).then(result => port.postMessage({ type: "mx.tool_result", seq: msg.seq, ok: true, result }),
             e => port.postMessage({ type: "mx.tool_result", seq: msg.seq, ok: false, error: e.message })).catch(() => {});
@@ -154,5 +169,21 @@ export async function runNativeDraft(job, bridge) {
       });
       port.postMessage(opening);
     });
-  } finally { clearTimeout(timer); port.disconnect(); }
+  } finally {
+    clearTimeout(timer);
+    port.disconnect();
+    if (!/verification|captcha|验证/i.test(failedMsg)) {
+      for (const winId of ownedWindows) {
+        try {
+          const win = await chrome.windows?.get?.(winId, { populate: true });
+          const tabs = win?.tabs || [];
+          const onlyAutomation = tabs.every(t => {
+            const u = String(t.url || t.pendingUrl || "");
+            return ownedEver.has(t.id) || !u || u === "about:blank" || u.startsWith("chrome://newtab");
+          });
+          if (win && onlyAutomation) await chrome.windows.remove(winId).catch(() => {});
+        } catch {}
+      }
+    }
+  }
 }

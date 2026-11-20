@@ -234,8 +234,10 @@ export function createBridgeTools(env) {
         if (!(anchor.groupId >= 0)) throw new BridgeError(ERROR_CODES.BAD_ARGS, "目标标签当前没有分组。");
       }
       let tab;
+      let createdWindowId = null;
       if (args.newWindow === true && !anchor && !ctx.session && typeof env.windows?.create === "function") {
-        const win = await env.windows.create({ url, focused: false });
+        const win = await env.windows.create({ url, focused: false, state: "normal" });
+        createdWindowId = win.id;
         tab = win.tabs?.[0] || (await env.tabs.query({ windowId: win.id }))[0];
       } else {
         tab = await env.tabs.create({ url, active: args.active === true, ...(anchor && { windowId: anchor.windowId }) });
@@ -250,13 +252,20 @@ export function createBridgeTools(env) {
           const groupId = await env.tabGroups.group(ids, anchor?.groupId, anchor ? undefined : tab.windowId);
           if (anchor && groupId !== anchor.groupId) throw Error("目标分组已关闭");
           if (!anchor) await env.tabGroups.update(groupId, { title: args.groupTitle.trim().slice(0, 64), color: "green" });
-          return { tabId: tab.id, groupId, url, ...(background.length && { backgroundTabIds: ids.slice(1) }) };
+          return {
+            tabId: tab.id,
+            groupId,
+            url,
+            ...(createdWindowId != null && { windowId: createdWindowId }),
+            ...(background.length && { backgroundTabIds: ids.slice(1) }),
+          };
         } catch (error) {
           await Promise.allSettled(ids.map(id => env.tabs.remove(id)));
+          if (createdWindowId != null) await env.windows?.remove?.(createdWindowId).catch(() => {});
           throw error;
         }
       }
-      return { tabId: tab.id, url: tab.pendingUrl || tab.url || url };
+      return { tabId: tab.id, url: tab.pendingUrl || tab.url || url, ...(createdWindowId != null && { windowId: createdWindowId }) };
     },
   });
 
