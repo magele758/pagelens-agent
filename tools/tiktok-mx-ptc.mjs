@@ -189,7 +189,24 @@ async function loadLocalAnthropicConfig() {
 const directSystemPrompt =
   "Direct JSON generator. Output compact valid JSON immediately on the first token with minimal thinking and no markdown fences.";
 
+const ptcTokenRecords = [];
+function summarizeTokenRecords(records) {
+  let inputTokens = 0, outputTokens = 0, cacheCreationInputTokens = 0, cacheReadInputTokens = 0, totalTokens = 0;
+  for (const r of records) {
+    inputTokens += r.inputTokens;
+    outputTokens += r.outputTokens;
+    cacheCreationInputTokens += r.cacheCreationInputTokens;
+    cacheReadInputTokens += r.cacheReadInputTokens;
+    totalTokens += r.totalTokens;
+  }
+  return { calls: records.length, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens, records };
+}
+export function getPtcTokenLedger() {
+  return summarizeTokenRecords([...ptcTokenRecords]);
+}
+
 async function generateText(prompt, signal) {
+  const callStart = Date.now();
   if (!process.env.PAGELENS_PTC_CLI_ONLY) {
     const cfg = await loadLocalAnthropicConfig();
     if (cfg.baseUrl && cfg.apiKey) {
@@ -224,7 +241,26 @@ async function generateText(prompt, signal) {
               .map(block => block.text)
               .join("")
               .trim();
-            if (text) return text;
+            if (text) {
+              const u = data.usage || {};
+              const inputTokens = Number(u.input_tokens ?? u.prompt_tokens ?? 0);
+              const outputTokens = Number(u.output_tokens ?? u.completion_tokens ?? 0);
+              const cacheCreationInputTokens = Number(u.cache_creation_input_tokens ?? 0);
+              const cacheReadInputTokens = Number(u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0);
+              const totalTokens = Number(u.total_tokens ?? (inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens));
+              ptcTokenRecords.push({
+                model: data.model || candidateModel,
+                inputTokens,
+                outputTokens,
+                cacheCreationInputTokens,
+                cacheReadInputTokens,
+                totalTokens,
+                promptChars: prompt.length,
+                outputChars: text.length,
+                ms: Date.now() - callStart,
+              });
+              return text;
+            }
           }
         } catch {
           if (signal?.aborted) throw Error("Text generation aborted");
@@ -411,13 +447,22 @@ async function planListing() {
 ${planner.code}
 }
 return await planListing();` : flow.code;
+  const ledgerStart = ptcTokenRecords.length;
   const result = await tool.execute(
     { session: { id: randomUUID(), metadata: { orchestrationEngine: "ptc" } } },
     { code, timeoutMs: 115000 },
   );
   if (!result.ok) throw Error("ptc_exec (" + flow.snapshot + "): " + result.content);
   requireFields();
-  const ptc = { tool: tool.name, workers: times, mode, file: flow.file, revision: flow.hash, snapshot: flow.snapshot };
+  const ptc = {
+    tool: tool.name,
+    workers: times,
+    mode,
+    file: flow.file,
+    revision: flow.hash,
+    snapshot: flow.snapshot,
+    tokenUsage: summarizeTokenRecords(ptcTokenRecords.slice(ledgerStart)),
+  };
   if (!planner) return { results, ptc };
   ptc.versions = (mode === "verified" && verifiedPlanVersions.get(input.previous)) || { workers: mode === "create" ? flow.hash : (await loadListingProgram("create")).hash, planner: planner.hash };
   ptc.planner = { file: planner.file, revision: planner.hash, snapshot: planner.snapshot };

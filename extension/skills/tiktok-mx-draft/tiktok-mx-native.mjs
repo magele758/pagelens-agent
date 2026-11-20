@@ -54,7 +54,8 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
       const cleanup = repairUrl && tool === "close_tab" && isMxSellerManageReturn(currentUrl);
       if (!reopening && !cleanup && !allowedDestination(currentUrl)) throw Error("Task tab navigated outside draft workflow");
     }
-    const reply = await call(tool, args);
+    const effectiveArgs = tool === "open_tab" && args?.groupTitle != null ? { ...args, newWindow: true } : args;
+    const reply = await call(tool, effectiveArgs);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") for (const id of [reply.result.tabId, ...(reply.result.backgroundTabIds || [])]) owned.add(id);
     if (tool === "list_tabs") return { ...reply, result: reply.result.filter(t => owned.has(t.id) &&
@@ -102,7 +103,8 @@ export function createMxSellerTransport(parameters, call, tabUrl) {
         throw Error("Expected the marked product dropdown on the active MX seller list");
       if (tool === "navigate_tab" && !allowed(args.url, true)) throw Error("Unexpected TikTok MX seller destination");
     }
-    const reply = await call(tool, args);
+    const effectiveArgs = tool === "open_tab" && args?.groupTitle != null ? { ...args, newWindow: true } : args;
+    const reply = await call(tool, effectiveArgs);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") owned.add(reply.result.tabId);
     if (tool === "close_tab") owned.delete(args.tabId);

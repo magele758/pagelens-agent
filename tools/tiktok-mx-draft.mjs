@@ -755,6 +755,7 @@ async function listDrafts(list, title, draftId = null, waitForMatch = false) {
 }
 async function refreshDraftList(list, title, waitForMatch = false) {
   if (!bridgeOverride) {
+    await bridge("activate_tab", { tabId: list });
     try {
       return await inbox("refresh_mx_draft_list", { action: "refresh_mx_draft_list",
         tabId: list, url: drafts, title, waitForMatch });
@@ -1186,6 +1187,7 @@ export async function save(
           );
         tab = previous.startedTab;
       } else if (tab == null) tab = await openCreateForm();
+      else if (!bridgeOverride) await bridge("activate_tab", { tabId: tab });
       group.pendingForm = tab;
       const pending = {
         groupOwned: true,
@@ -1544,11 +1546,14 @@ export async function save(
     mark("verified");
     const started =
       (knownId && !resave) || previous.startedTab || readOnly ? invocationStarted : data.start;
+    const { getPtcTokenLedger } = await import("./tiktok-mx-ptc.mjs");
+    const tokenUsage = getPtcTokenLedger();
     const receipt = {
       id,
       link,
       title: copy.title,
       verified: true,
+      tokenUsage,
       formRuns,
       skuWrites,
       firstPersisted,
