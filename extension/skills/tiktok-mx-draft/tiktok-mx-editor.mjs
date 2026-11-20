@@ -950,8 +950,8 @@ export function mxEditor(bridge, runCode, skuWrites) {
         }
         if (state.captcha || (state.gallery === gallery.length && state.detailImages >= details.length)) break;
       }
-      if (!state.captcha && state.detailImages >= details.length && copy.enDescription &&
-          (!sameText(state.description, copy.description) || state.title !== copy.title))
+      if (!state.captcha && copy.enDescription &&
+          (state.detailImages < details.length || !sameText(state.description, copy.description) || state.title !== copy.title))
         state = await setCopy(tab, { title: copy.title, description: copy.description, preserveImages: true });
       check(state, copy);
       phases.mediaRead = Date.now();
