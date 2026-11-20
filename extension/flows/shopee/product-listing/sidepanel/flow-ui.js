@@ -59,6 +59,11 @@ const REASONS = new Map([
 ]);
 const LABELS = { label: "属性", choice: "选项", category: "类目", recommendations: "页面推荐类目", option: "规格选项", key: "字段",
   expected: "预期", actual: "当前", text: "提示", error: "工具错误", message: "提示" };
+const FIELD_LABELS = {
+  title: "商品名称", description: "商品描述", price: "全球商品价格", quantity: "商品数量",
+  weight: "重量", width: "包裹宽度", length: "包裹长度", height: "包裹高度",
+  shipDays: "发货时间", sku: "全球商品货号",
+};
 
 function detailsText(value, depth = 0) {
   if (value == null || value === "" || depth > 2) return "";
@@ -66,7 +71,7 @@ function detailsText(value, depth = 0) {
   if (Array.isArray(value)) return value.slice(0, 5).map((item) => detailsText(item, depth + 1)).filter(Boolean).join("\n");
   if (typeof value !== "object") return "";
   return Object.entries(value).filter(([key]) => Object.hasOwn(LABELS, key)).map(([key, raw]) => {
-    const text = detailsText(raw, depth + 1);
+    const text = key === "key" && Object.hasOwn(FIELD_LABELS, raw) ? FIELD_LABELS[raw] : detailsText(raw, depth + 1);
     return text ? `${LABELS[key]} ${text}` : "";
   }).filter(Boolean).join("\n");
 }
@@ -77,7 +82,8 @@ async function activeTab() {
 }
 
 function errorText(receipt) {
-  return [REASONS.get(receipt.code) || "请检查商家后台的商品资料。", detailsText(receipt.details)].filter(Boolean).join("\n");
+  const location = ["control-changed", "field-missing"].includes(receipt.code) && STEP_LABELS.get(receipt.step);
+  return [REASONS.get(receipt.code) || "请检查商家后台的商品资料。", location, detailsText(receipt.details)].filter(Boolean).join("\n");
 }
 
 export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = activeTab, chooseDirectory, startBatch } = {}) {
