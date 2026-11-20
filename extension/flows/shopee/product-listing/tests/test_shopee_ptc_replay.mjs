@@ -615,6 +615,41 @@ test('repairs a single-SKU form after the final summary restores variants and re
   assert.equal(page.calls.filter(({ tool, args }) => tool === 'upload_file' && args.selector === '#cover').length, 1);
 });
 
+test('restores exact SKU prices and package weight after their controls re-render without changing options', async () => {
+  const page = mockPage();
+  const call = page.call;
+  const options = input.variant.options.map((option, index) => ({ ...option, imagePath: `/products/row-${index}.png` }));
+  let rerendered = false;
+  page.call = async (tool, args) => {
+    const response = args.selector === '#recreated-weight' && tool === 'fill'
+      ? await call(tool, { ...args, selector: '#weight' }) : await call(tool, args);
+    if (!rerendered && tool === 'fill' && args.selector === '#sku') {
+      rerendered = true;
+      page.state.variant.rows = page.state.variant.rows.map(row => ({
+        ...row, price: '', selectors: { ...row.selectors, price: row.selectors.price + '-recreated' },
+      }));
+      page.state.fields.weight = { selector: '#recreated-weight', value: '' };
+      page.state.validation = ['全球商品价格不可空白', '重量不可空白'];
+      page.state.unscopedValidation = page.state.validation;
+      page.state.validationOutsideSalesAndShipping = [];
+    }
+    if (tool === 'fill' && args.selector === '#recreated-weight' &&
+        page.state.variant.rows.every(row => row.price)) {
+      page.state.validation = [];
+      page.state.unscopedValidation = [];
+    }
+    return response;
+  };
+  const receipt = await run(page, { ...input, variant: { ...input.variant, options }, resetUnownedDraftVariants: true });
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.deepEqual(receipt.skuRows.map(({ option, price }) => [option, price]), options.map(({ option, price }) => [option, price]));
+  assert.deepEqual(page.calls.filter(({ tool, args }) => tool === 'fill' && args.selector.startsWith('#quantity-')).length, options.length);
+  assert.equal(page.state.fields.weight.value, input.weight);
+  assert.ok(page.calls.some(({ tool, args }) => tool === 'query_dom' && args.selector === '#recreated-weight'));
+  assert.equal(page.calls.filter(({ tool }) => tool === 'upload_file').length, 1 + options.length);
+  assert.ok(!page.calls.some(({ args }) => args.action === 'variant-reset'));
+});
+
 test('rebinds shifted SKU controls after a price change and retries the one unapplied value', async t => {
   advancePollingDeadline(t);
   const page = mockPage();
@@ -642,6 +677,33 @@ test('rebinds shifted SKU controls after a price change and retries the one unap
   assert.equal(reads, 2);
   assert.ok(!page.calls.some(({ args }) => args.selector === '#quantity-1'));
   assert.equal(page.calls.filter(({ tool, args }) => tool === 'fill' && args.selector === '#price-1').length, 1);
+});
+
+test('waits for a slow verified cover thumbnail without uploading it twice', async t => {
+  const page = mockPage();
+  const call = page.call;
+  let now = Date.now();
+  let uploadAt;
+  t.mock.method(Date, 'now', () => {
+    now += 4000;
+    return now;
+  });
+  page.call = async (tool, args) => {
+    assert.notEqual(tool, 'wait_for', 'the cover text alone is not upload confirmation');
+    if (tool === 'flow_page_state' && uploadAt && now - uploadAt >= 32000) {
+      Object.assign(page.state.image, { count: 1, cover: true, readyCount: 1, coverReady: true });
+    }
+    const response = await call(tool, args);
+    if (tool === 'upload_file' && args.selector === '#cover') {
+      uploadAt = now;
+      Object.assign(page.state.image, { count: 1, cover: false, readyCount: 0, coverReady: false });
+    }
+    return response;
+  };
+  const receipt = await run(page);
+  assert.equal(receipt.status, 'verified', JSON.stringify(receipt));
+  assert.equal(receipt.coverUploaded, true);
+  assert.equal(page.calls.filter(({ tool, args }) => tool === 'upload_file' && args.selector === '#cover').length, 1);
 });
 
 test('uploads two distinct local images to the individual SKU cells and verifies each preview', async () => {

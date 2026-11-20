@@ -151,6 +151,28 @@ test('counts a visible red CSS star without making hidden or non-red decoration 
     [['红色', true], ['隐藏', false], ['装饰', false]]);
 });
 
+test('separates validation in the exact SKU and shipping controls from unrelated errors', t => {
+  const { read } = fixture(t, `<section class="product-basic-info">
+    <div class="product-category-text">${category}</div><p class="eds-form-item__error">请填写商品描述</p>
+  </section><section class="product-sales-info">
+    <div class="variation-name-panel"><input value="颜色"></div>
+    <div class="variation-option-panel"><div class="options-item"><input value="蓝"></div></div>
+    <div class="variation-model-table-fixed-left"><div class="variation-model-table-body">
+      <div class="first-variation-cell">蓝</div>
+    </div></div>
+    <div class="variation-model-table-middle-scroll"><div class="variation-model-table-body"><div class="data-group">
+      <div class="table-cell"><div class="model-edit-input"><div class="price-input"><input aria-invalid="true"></div></div>
+        <div class="eds-input__error">全球商品价格不可空白</div></div>
+    </div></div></div>
+  </section><section class="mtsku-product-shipping">
+    <div class="edit-row"><div class="edit-label">重量</div><input><p role="alert">重量不可空白</p></div>
+  </section>`);
+  const state = read(category);
+  assert.equal(state.variant.rows[0].price, '');
+  assert.deepEqual(state.unscopedValidation, ['请填写商品描述', '全球商品价格不可空白', '重量不可空白']);
+  assert.deepEqual(state.validationOutsideSalesAndShipping, ['请填写商品描述']);
+});
+
 test('resets only the sole variation control of the bound, unsaved product form', t => {
   const app = fixture(t, `<section class="product-basic-info">
     <div class="product-category-text">${category}</div>
