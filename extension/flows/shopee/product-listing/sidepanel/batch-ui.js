@@ -2,7 +2,7 @@ import { matchesFlowTarget } from "../../../../lib/flow/runtime.js";
 import { ensureOptionalAccess } from "../../../../lib/optional-permissions.js";
 import { $ } from "../../../../sidepanel/dom.js";
 import { imagePathsFor, runProductBatch } from "./batch-run.js";
-import { chooseShopeeProductDirectory, completeDirectorySizeChartInput, directoryAttributeAdvice, prepareSizeChartInput } from "./product-directory.js";
+import { chooseShopeeProductDirectory, completeDirectorySizeChartInput, directoryAttributeAdvice, loadProductDirectory, prepareSizeChartInput } from "./product-directory.js";
 
 const STATUS = new Map([
   ["pending", "待执行"],
@@ -28,6 +28,8 @@ export function bindPtcBatch({
 }) {
   const form = $("ptc-batch-form");
   const scan = $("ptc-load-directory");
+  const manualDirectory = $("ptc-manual-directory");
+  const manualLoad = $("ptc-load-manual-directory");
   const start = $("ptc-batch-start");
   const stop = $("ptc-batch-stop");
   const consent = $("ptc-batch-upload-consent");
@@ -54,7 +56,7 @@ export function bindPtcBatch({
     const hasChart = products.some(({ input }) => input.sizeChart != null || input.sizeChartImagePath);
     const hasChartWithCover = products.some(({ input }) => (input.sizeChart != null || input.sizeChartImagePath) && input.imagePath);
     return [
-      products.some(({ input }) => imagePathsFor(input).length) && "将下方商品的主图和 SKU 图上传到当前 Shopee 店铺",
+      products.some(({ input }) => imagePathsFor(input).length) && "将下方商品的主图、详情图和 SKU 图上传到当前 Shopee 店铺",
       products.some(({ input }) => input.sizeChartImagePath && input.sizeChart == null) && "用已配置的识图模型解析尺码图",
       hasChart && (hasChartWithCover
         ? "在需估算缺少的测量值时，将该商品主图发给已配置的识图模型"
@@ -68,6 +70,8 @@ export function bindPtcBatch({
     const { tab, shopId } = getTarget();
     const actions = consentActions();
     scan.disabled = busy || isBlocked();
+    manualLoad.disabled = scan.disabled || !manualDirectory.value.trim();
+    manualDirectory.disabled = busy;
     start.disabled = busy || isBlocked() || !selectedRoot || !products.length || !tab?.id ||
       Boolean(tab.url && !shopId) ||
       actions.length > 0 && !consent.checked;
@@ -142,13 +146,13 @@ export function bindPtcBatch({
     return job;
   }
 
-  scan.addEventListener("click", async () => {
-    if (scan.disabled) return;
+  async function importDirectory(load, message) {
+    if (reading || run || isBlocked()) return;
     reading = true;
-    setStatus("running", "正在选择商品目录…");
+    setStatus("running", message);
     onChange();
     try {
-      const loaded = await chooseDirectory();
+      const loaded = await load();
       if (!loaded) {
         setStatus("idle", "");
         return;
@@ -176,6 +180,16 @@ export function bindPtcBatch({
       reading = false;
       onChange();
     }
+  }
+  scan.addEventListener("click", () => void importDirectory(chooseDirectory, "正在选择商品目录…"));
+  manualDirectory.addEventListener("input", updateControls);
+  manualDirectory.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    manualLoad.click();
+  });
+  manualLoad.addEventListener("click", () => {
+    if (!manualLoad.disabled) void importDirectory(() => loadProductDirectory(manualDirectory.value), "正在读取商品目录…");
   });
 
   consent.addEventListener("change", updateControls);

@@ -32,7 +32,8 @@ function productEvidence(product) {
 }
 
 /** Sends only product evidence and scoped options, using the configured text or image model. */
-export function createListingAdvisor({ settings = {}, product, referenceImages = [], signal, request = completeChat } = {}) {
+export function createListingAdvisor({ settings = {}, product, referenceImages = [], signal, request = completeChat,
+  categoryPlatform = "SHEIN" } = {}) {
   const vision = resolveSizeChartModel(settings);
   const defaultModel = resolveModel(settings, "text");
   let encoded;
@@ -59,7 +60,9 @@ export function createListingAdvisor({ settings = {}, product, referenceImages =
     const output = cached
       ? '只返回 {"index":数字或null,"keywords":["…"]}。索引为 null 时，给出 3 到 5 个适合下一步搜索的中文商品名词，从最贴切到常见上位词。'
       : '只返回 {"index":数字或null}。';
-    const result = await invoke(`${categoryPrompt}${output}`, {
+    const prompt = categoryPlatform === "Shopee"
+      ? categoryPrompt.replace("SHEIN 末级类目", "Shopee 类目或最贴切的上级分支") : categoryPrompt;
+    const result = await invoke(`${prompt}${output}`, {
       sourceCategories: strings(sourceCategories, 10, 260), hints: strings(hints, 8, 28), candidates: paths,
     }, 400);
     const index = Number.isInteger(result?.index) && paths.some(row => row.index === result.index)

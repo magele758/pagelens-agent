@@ -8,7 +8,8 @@ const MAX_CONCURRENT = 2;
 
 export function imagePathsFor(input) {
   const variants = Array.isArray(input?.variant?.options) ? input.variant.options : [input?.variant];
-  return [...new Set([input?.imagePath, ...variants.map((item) => item?.imagePath)]
+  return [...new Set([input?.imagePath, ...(Array.isArray(input?.galleryImages) ? input.galleryImages : []),
+    ...variants.map((item) => item?.imagePath)]
     .filter((path) => typeof path === "string" && path.trim()))];
 }
 

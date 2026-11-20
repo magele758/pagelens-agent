@@ -16,6 +16,11 @@ const markup = `
       <form id="ptc-batch-form">
         <button type="button" id="ptc-load-directory" class="secondary">选择商品目录</button>
         <p class="ptc-directory-hint">支持单个商品目录或包含多个商品的目录。</p>
+        <details class="ptc-directory-hint">
+          <summary>目录选择器不可用时</summary>
+          <input id="ptc-manual-directory" aria-label="本地商品目录" placeholder="粘贴本地商品目录路径" type="text" autocomplete="off" />
+          <button type="button" id="ptc-load-manual-directory" class="secondary mini">读取目录</button>
+        </details>
         <label class="ptc-consent" id="ptc-batch-consent-row" hidden>
           <input id="ptc-batch-upload-consent" type="checkbox" />
           <span id="ptc-batch-consent-text">同意将下方商品的主图和 SKU 图上传到当前 Shopee 店铺</span>
