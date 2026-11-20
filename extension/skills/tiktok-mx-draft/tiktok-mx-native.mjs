@@ -57,7 +57,9 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
       if (!reopening && !cleanup && !transientError && !allowedDestination(currentUrl))
         throw Error("Task tab navigated outside draft workflow");
     }
-    const effectiveArgs = tool === "open_tab" && args?.groupTitle != null ? { ...args, newWindow: true } : args;
+    const effectiveArgs = tool === "open_tab" && (args?.groupTitle != null || args?.groupWithTab != null)
+      ? { ...args, newWindow: true }
+      : args;
     const reply = await call(tool, effectiveArgs);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") for (const id of [reply.result.tabId, ...(reply.result.backgroundTabIds || [])]) owned.add(id);
@@ -106,7 +108,9 @@ export function createMxSellerTransport(parameters, call, tabUrl) {
         throw Error("Expected the marked product dropdown on the active MX seller list");
       if (tool === "navigate_tab" && !allowed(args.url, true)) throw Error("Unexpected TikTok MX seller destination");
     }
-    const effectiveArgs = tool === "open_tab" && args?.groupTitle != null ? { ...args, newWindow: true } : args;
+    const effectiveArgs = tool === "open_tab" && (args?.groupTitle != null || args?.groupWithTab != null)
+      ? { ...args, newWindow: true }
+      : args;
     const reply = await call(tool, effectiveArgs);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") owned.add(reply.result.tabId);
@@ -142,7 +146,7 @@ export async function runNativeDraft(job, bridge) {
       for (const id of [reply.result?.tabId, ...(reply.result?.backgroundTabIds || [])]) {
         if (Number.isInteger(id)) ownedEver.add(id);
       }
-      if (args?.newWindow === true && Number.isInteger(reply.result?.windowId)) {
+      if (args?.newWindow === true && args?.groupWithTab == null && Number.isInteger(reply.result?.windowId)) {
         ownedWindows.add(reply.result.windowId);
       }
     }
@@ -184,7 +188,13 @@ export async function runNativeDraft(job, bridge) {
             const u = String(t.url || t.pendingUrl || "");
             return ownedEver.has(t.id) || !u || u === "about:blank" || u.startsWith("chrome://newtab");
           });
-          if (win && onlyAutomation) await chrome.windows.remove(winId).catch(() => {});
+          if (win && onlyAutomation) {
+            const groupedIds = tabs.filter(t => t.groupId != null && t.groupId >= 0).map(t => t.id);
+            if (groupedIds.length && typeof chrome.tabs?.ungroup === "function") {
+              await chrome.tabs.ungroup(groupedIds).catch(() => {});
+            }
+            await chrome.windows.remove(winId).catch(() => {});
+          }
         } catch {}
       }
     }
