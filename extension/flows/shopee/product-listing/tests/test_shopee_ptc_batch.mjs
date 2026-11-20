@@ -288,6 +288,40 @@ test("honors the configured ten-worker limit and sends publish only when request
   await assert.rejects(makeRun({ mode: "prefill" }).run(), TypeError);
 });
 
+test("binds every repair callback to its own tab across 30 products with ten workers", async () => {
+  const data = jobs(30);
+  const gates = data.map(() => Promise.withResolvers());
+  const repaired = [];
+  const { run, closed, created, peak } = makeRun({
+    concurrency: 10, data,
+    submit: async ({ input, tabId, recoverForm }) => {
+      assert.equal(await recoverForm({ tabId, issues: [{ key: 'shipDays' }] }), true);
+      return { status: 'created', globalItemId: input.title };
+    },
+  });
+  const pending = run(async ({ input, registerRecovery, tabId }) => {
+    registerRecovery(async ({ tabId: requested, issues }) => {
+      assert.equal(requested, tabId);
+      assert.deepEqual(issues, [{ key: 'shipDays' }]);
+      assert.equal(input.title, data[tabId - 40].input.title);
+      repaired.push(input.title);
+      return true;
+    });
+    await gates[tabId - 40].promise;
+    return { status: 'verified' };
+  });
+  await nextTick();
+  assert.equal(created.length, 10);
+  gates[9].resolve();
+  await nextTick();
+  assert.equal(created.length, 11);
+  for (const gate of gates) gate.resolve();
+  await pending;
+  assert.equal(peak(), 10);
+  assert.deepEqual(repaired.sort(), data.map(({ input }) => input.title).sort());
+  assert.equal(closed.length, 30);
+});
+
 test("keeps failed tabs without taking up the configured slot for the next product", async () => {
   const { run, events, submissions, closed } = makeRun({
     data: jobs(4), concurrency: 1,

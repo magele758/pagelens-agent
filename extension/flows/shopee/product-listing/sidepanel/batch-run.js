@@ -126,7 +126,9 @@ export async function runProductBatch({
         resetUnownedDraftVariants: true,
       };
       let call;
+      let recoverForm;
       for (let attempt = 0; attempt < 2; attempt++) {
+        recoverForm = undefined;
         onJob(index, { phase: attempt ? "reopening" : "opening", step: "", tool: "", tabId: null });
         const created = await tabs.create({ windowId: source.windowId, url: url.href, active: false });
         if (!Number.isInteger(created?.id)) throw new Error("Chrome 没有返回已创建标签的编号。");
@@ -155,6 +157,7 @@ export async function runProductBatch({
             receipt = await replay({
               flowId: flow.id, tabId, input: productInput, signal, call,
               onStep: ({ step, tool }) => onJob(index, { phase: "running", step, tool }),
+              registerRecovery: recover => { recoverForm = recover; },
             });
           } else {
             const timedOut = ready?.error === "等待超时";
@@ -179,7 +182,7 @@ export async function runProductBatch({
         onJob(index, { phase: "submitting" });
         submissionStarted = true;
         receipt = await submit({
-          tabId, shopId, input: productInput, mode, replayReceipt: receipt, signal, call,
+          tabId, shopId, input: productInput, mode, replayReceipt: receipt, signal, call, recoverForm,
           onStep: ({ step, tool }) => onJob(index, { phase: "submitting", step, tool }),
         });
       }

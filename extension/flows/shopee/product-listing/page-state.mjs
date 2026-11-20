@@ -4,7 +4,12 @@ export function readPage(category) {
   const pathText = value => clean(value).replace(/\s*[＞>›»]\s*/gu, ' > ');
   const ownText = node => [...node.childNodes].filter(child => child.nodeType === 3)
     .map(child => child.nodeValue).join(' ');
-  const visible = node => node.getClientRects().length && getComputedStyle(node).visibility === 'visible' &&
+  const styles = new Map();
+  const styleOf = node => {
+    if (!styles.has(node)) styles.set(node, getComputedStyle(node));
+    return styles.get(node);
+  };
+  const visible = node => node.getClientRects().length && styleOf(node).visibility === 'visible' &&
     !node.closest('[aria-hidden=true],[inert]');
   const all = (q, root = document) => [...(root?.querySelectorAll(q) ?? [])];
   const shown = (q, root) => all(q, root).filter(visible);
@@ -19,7 +24,7 @@ export function readPage(category) {
   const out = {
     url: location.href, modal: null, validation: [], unscopedValidation: [], category: null, recommendation: null, recommendations: [],
     categoryRecommendations: [], categoryPickerAvailable: false,
-    categoryReady: false, fields: {}, attributes: [], options: [], optionSearch: null,
+    categoryReady: false, fields: {}, attributes: [], options: [], optionSearch: null, requiredIssues: [],
     image: { count: null, cover: false, selector: null },
     variant: { enable: null, options: [], rows: [] },
   };
@@ -39,7 +44,8 @@ export function readPage(category) {
   }
 
   const basic = one(panels[0]), sales = one(panels[2]);
-  const labelText = node => clean((node.querySelector('.item-title-text') ?? node.querySelector(':scope > span:not(.mandatory)'))?.textContent ||
+  const labelText = node => clean(node.querySelector('.item-title-text')?.textContent ||
+    all(':scope > span', node).find(span => !/^[*＊]$/u.test(clean(span.textContent)))?.textContent ||
     clean(ownText(node)) || node.textContent).replace(/^[*＊]\s*|\s*\d+\/\d+$/gu, '');
   const labelNode = row => row?.querySelector(':scope > .edit-label');
   const rowsWithLabels = root => shown('.edit-row', root).filter(row => labelNode(row));
@@ -112,33 +118,102 @@ export function readPage(category) {
 
   const opened = [];
   const attributeRows = new Set();
+  const inspectedRows = new Set();
   const validationMarker = '[aria-invalid=true],.eds-form-item__error,.eds-input__error,.eds-message--error,[role=alert]';
+  const errorClass = '[aria-invalid=true],.eds-form-item--error,.eds-input--error,.eds-selector--error';
+  const requiredMarker = '[required],[aria-required=true]';
+  const entryControls = '.eds-selector,select,input,textarea,[contenteditable=true]';
+  const inactive = '[disabled],[readonly],[aria-disabled=true],.eds-selector--disabled';
+  const numericLabels = {
+    price: '全球商品价格', quantity: '商品数量', weight: '重量', shipDays: '发货时间',
+    width: '包裹宽度', length: '包裹长度', height: '包裹高度',
+  };
   const validationText = el => clean(el.textContent || el.getAttribute('aria-label') ||
     labelNode(el.closest('.edit-row'))?.textContent);
+  const red = color => {
+    const [r = 0, g = r, b = r, opacity = 1] = color?.match(/\d+(?:\.\d+)?/gu)?.map(Number) ?? [];
+    return opacity > 0 && r >= 150 && r > g + 65 && r > b + 65;
+  };
   function labelStar(label) {
-    if (shown('.mandatory', label).length || /^\s*[＊*]/u.test(label.textContent)) return true;
+    if (!label || !visible(label)) return false;
+    if (shown('.mandatory,.required-star,.eds-form-item__required', label).length || /^\s*[＊*]/u.test(ownText(label))) return true;
+    if (shown('span,i,sup', label).some(node => /^[＊*]$/u.test(clean(node.textContent)) &&
+        red(styleOf(node).color))) return true;
     if (typeof globalThis.CSS?.supports !== 'function') return false;
     const isRedStar = (node, pseudo) => {
       const { content, display, visibility, color } = getComputedStyle(node, pseudo);
-      if (display === 'none' || visibility !== 'visible' || !/^['"]?[＊*]['"]?$/u.test(content)) return false;
-      const [red = 0, green = red, blue = red] = color.match(/\d+/gu)?.map(Number) ?? [];
-      return red >= 150 && red > green + 65 && red > blue + 65;
+      return display !== 'none' && visibility === 'visible' && /^['"]?[＊*]['"]?$/u.test(content) && red(color);
     };
-    const title = label.querySelector('.item-title-text');
+    const title = one('.item-title-text', label);
     return (title ? [label, title] : [label]).some(node =>
       isRedStar(node, '::before') || isRedStar(node, '::after'));
   }
-  const entryControls = '.eds-selector,select,input,textarea,[contenteditable=true]';
-  const inactive = '[disabled],[readonly],[aria-disabled=true],.eds-selector--disabled';
+  const controlsIn = row => all(entryControls, row).filter(el => el.closest('.edit-row') === row &&
+    !el.closest('.eds-popper,.eds-modal') && !el.parentElement.closest('.eds-selector,select') &&
+    !el.matches('input[type=hidden]'));
+  const activeControl = el => visible(el) && !el.closest(inactive);
+  const markedRequired = (scope, control, label = labelNode(scope)) =>
+    Boolean(labelStar(label) || scope?.matches(requiredMarker) || control?.matches(requiredMarker));
+  const filled = raw => Array.isArray(raw) ? raw.some(filled) : raw === true ||
+    Boolean(raw !== false && clean(raw).replace(/^(?:请选择|Please (?:select|choose))$/iu, ''));
+  const errorWording = /(?:请(?:输入|填写|选择|上传).+|必填|不可空白|不能为?空|不得为空|超出范围|out of range|required field|is required|please (?:enter|select|upload).+|invalid)/iu;
+  function validationFor(scope, control) {
+    if (!scope) return {};
+    const scopeSelector = '.edit-row,.table-cell,.first-variation-cell';
+    const ownScope = scope.closest(scopeSelector);
+    const inScope = el => !el.closest('.eds-popper,.eds-modal') && el.closest(scopeSelector) === ownScope;
+    const markers = shown(validationMarker, scope).filter(inScope);
+    const linked = clean(control?.getAttribute('aria-errormessage')).split(/\s+/u)
+      .map(id => document.getElementById(id)).filter(el => el && visible(el) && !el.closest('.eds-popper,.eds-modal'));
+    const messages = [...new Set([...markers.filter(el => !el.matches('[aria-invalid=true]') &&
+      (!el.matches('[role=alert]') || errorWording.test(el.textContent) || red(styleOf(el).color))), ...linked]
+      .map(el => clean(el.textContent || el.getAttribute('aria-label'))).filter(Boolean))];
+    // Some Seller Centre errors have neither ARIA nor error classes.
+    if (!messages.length) {
+      const redMessage = shown('p,small,span,div', scope).find(el => {
+        const localText = clean(ownText(el));
+        return el !== control && !labelNode(scope)?.contains(el) && inScope(el) &&
+          errorWording.test(localText) &&
+          red(styleOf(el).color);
+      });
+      if (redMessage) messages.push(clean(ownText(redMessage)));
+    }
+    for (let node = control; node && scope.contains(node); node = node.parentElement) {
+      if (node.matches(errorClass)) return { invalid: true, message: messages.join(' · ').slice(0, 220) };
+      // An ordinary focused input can use Shopee's orange border. Read color on
+      // an unfocused control or its immediate wrappers, never the whole panel.
+      if (node !== scope && !node.contains(document.activeElement)) {
+        const style = styleOf(node);
+        if (['Top', 'Right', 'Bottom', 'Left'].some(side => red(style['border' + side + 'Color']) &&
+            !['none', 'hidden'].includes(style['border' + side + 'Style']) &&
+            Number.parseFloat(style['border' + side + 'Width']) > 0)) {
+          return { invalid: true, message: messages.join(' · ').slice(0, 220) };
+        }
+      }
+    }
+    return { invalid: Boolean(messages.length) || markers.some(el => el.matches(errorClass)),
+      message: messages.join(' · ').slice(0, 220) };
+  }
+  function inspect({ section, key, label, option, scope, control, raw, required, validation = validationFor(scope, control) }) {
+    if (!label || control?.closest(inactive)) return;
+    const missing = !filled(raw);
+    const nativeInvalid = !missing && control?.willValidate && !control.validity.valid;
+    const days = key === 'shipDays' && scope?.textContent.match(/可以填写\s*(\d+)\s*[,，、]\s*(\d+)\s*(?:到|至|[-–])\s*(\d+)/u);
+    const amount = typeof raw === 'string' && /^-?\d+(?:\.\d+)?$/u.test(clean(raw)) ? Number(raw) : NaN;
+    const invalidAmount = !missing && (days && (amount !== Number(days[1]) &&
+      (!Number.isInteger(amount) || amount < Number(days[2]) || amount > Number(days[3]))) ||
+      ['price', 'weight', 'shipDays'].includes(key) && amount <= 0);
+    if (!(required && missing || validation.invalid || nativeInvalid || invalidAmount)) return;
+    const message = validation.message || (nativeInvalid ? clean(control.validationMessage) : '');
+    out.requiredIssues.push({ section, key, label, ...(option != null && { option }),
+      kind: missing ? 'missing' : 'invalid', ...(message && { message }), value: raw });
+  }
   for (const row of all('.edit-row', one(panels[1]))) {
     const label = labelNode(row);
     if (!label || !visible(row)) continue;
-    const controls = all(entryControls, row).filter(el => el.closest('.edit-row') === row &&
-      !el.closest('.eds-popper,.eds-modal') && !el.parentElement.closest('.eds-selector,select') &&
-      !el.matches('input[type=hidden]'));
-    const control = only(controls.filter(el => visible(el) && !el.closest(inactive)));
-    const required = labelStar(label) || row.getAttribute('aria-required') === 'true' ||
-      controls.some(el => el.matches('[required],[aria-required=true]'));
+    const controls = controlsIn(row);
+    const control = only(controls.filter(activeControl));
+    const required = markedRequired(row, control, label) || controls.some(el => el.matches(requiredMarker));
     if (!control && !required) continue;
     attributeRows.add(row);
     const controlLabel = labelText(label);
@@ -157,21 +232,40 @@ export function readPage(category) {
     if (customSelect && (control.getAttribute('aria-expanded') === 'true' || control.closest('.eds-select.is-show'))) {
       opened.push(controlLabel);
     }
-    const error = shown(validationMarker, row).map(validationText).filter(Boolean).join(' · ').slice(0, 220) ||
-      (control?.closest('.eds-form-item--error,.eds-input--error,.eds-selector--error') ? '当前商品属性显示校验错误' : '');
+    const validation = validationFor(row, control);
+    const error = validation.message || (validation.invalid ? '当前商品属性显示校验错误' : '');
     const scalar = selection?.matches('.placeholder') ? '' : clean(value(selection)).replace(/^请选择$/u, '');
     const nativeOptions = nativeSelect ? [...control.options].filter(option => option.value && !option.disabled &&
       !option.closest('optgroup[disabled]')).map(option => clean(option.label)).filter(Boolean) : undefined;
     const selectedValues = nativeSelect ? [...control.selectedOptions].filter(option => option.value).map(option => clean(option.label)) : tokens;
     const unknownMultipleSelection = customSelect && multiple && scalar && !tokens.length;
+    const raw = type === 'checkbox' ? control.checked : unknownMultipleSelection ? scalar
+      : multiple ? selectedValues : nativeSelect ? selectedValues[0] || '' : scalar;
     out.attributes.push({ key: controlLabel, label: controlLabel, required, selector: selectorOf(control), error,
       type: unknownMultipleSelection ? 'unsupported' : type,
       ...(multiple && { multiple: true }), ...(nativeOptions && { nativeOptions }),
       ...(type === 'number' && control.min !== '' && { min: Number(control.min) }),
       ...(type === 'number' && control.max !== '' && { max: Number(control.max) }),
       ...(type === 'text' && control.maxLength > 0 && { maxLength: control.maxLength }),
-      value: type === 'checkbox' ? control.checked : unknownMultipleSelection ? scalar
-        : multiple ? selectedValues : nativeSelect ? selectedValues[0] || '' : scalar });
+      value: raw });
+    if (control) inspect({ section: 'category-attributes', key: controlLabel, label: controlLabel, scope: row,
+      control, raw, required, validation });
+  }
+  for (const [key, control] of fields) {
+    const row = control?.closest('.edit-row');
+    if (!row || key === 'variantOption' || key === 'variantName') continue;
+    const section = control.closest(panels[3]) ? 'shipping' : control.closest(panels[2]) ? 'sales' : 'basic';
+    const label = numericLabels[key] ?? labelText(labelNode(row));
+    const scope = ['width', 'length', 'height'].includes(key) ? control.closest('.eds-input') ?? control : row;
+    inspectedRows.add(row);
+    inspect({ section, key, label, scope, control, raw: value(control), required: markedRequired(row, control) });
+  }
+  if (categoryNode) {
+    const row = categoryNode.closest('.edit-row');
+    const control = categoryNode.closest('.product-category-box-inner') ?? categoryNode;
+    if (row) inspectedRows.add(row);
+    inspect({ section: 'basic', key: 'category', label: '商品类目', scope: row, control,
+      raw: out.category, required: markedRequired(row, control) });
   }
   out.categoryReady = Boolean(out.category && (!wanted || out.category === wanted) &&
     (out.attributes.some(attribute => attribute.selector) || out.fields.price || out.fields.variantName));
@@ -193,13 +287,30 @@ export function readPage(category) {
     const ready = shown('.shopee-image-manager__itembox .shopee-image-manager__image', media).filter(img =>
       img.complete && img.naturalWidth > 0 && /^https?:\/\//iu.test(img.currentSrc || img.src) &&
       !img.closest('.ignore-item,.eds-modal'));
+    const control = only(all(upload).filter(el => !el.disabled));
     out.image = {
       count: count == null ? null : Number(count),
       cover: /封面/u.test(media.innerText ?? media.textContent),
       readyCount: ready.length,
       coverReady: ready.some(img => /封面/u.test(img.closest('.shopee-image-manager__itembox')?.textContent)),
-      selector: selectorOf(only(all(upload).filter(el => !el.disabled))),
+      selector: selectorOf(control),
     };
+    const row = media.closest('.edit-row');
+    if (row) inspectedRows.add(row);
+    inspect({ section: 'image', key: 'image', label: '商品图片', scope: row ?? media, control: media,
+      raw: out.image.coverReady, required: markedRequired(row ?? media, control) });
+  }
+  const remainingSections = [[basic, 'basic'], [sales, 'sales'], [one(panels[3]), 'shipping']];
+  for (const [panel, section] of remainingSections) {
+    for (const row of rowsWithLabels(panel).filter(node => !inspectedRows.has(node))) {
+      const control = only(controlsIn(row).filter(activeControl));
+      if (!control) continue;
+      const label = labelText(labelNode(row));
+      const selected = control.matches('.eds-selector')
+        ? control.querySelector('.eds-selector__inner,.scroll-selector-content') ?? control : control;
+      inspect({ section, key: Object.hasOwn(labels, label) ? labels[label] : label, label, scope: row, control,
+        raw: value(selected), required: markedRequired(row, control) });
+    }
   }
 
   function button(q, label) {
@@ -215,6 +326,9 @@ export function readPage(category) {
   const price = '.table-cell .model-edit-input .price-input input';
   const groups = shown('.data-group', middleBody).filter(group => group.querySelector(price));
   const choices = firstCells.map(el => clean(ownText(el)));
+  const skuLabels = { price: numericLabels.price, quantity: numericLabels.quantity, sku: '规格货号', image: '规格图片' };
+  const skuHeaders = shown('th,[role=columnheader],.variation-model-table-header .table-cell,.variation-model-table-head .table-cell', sales);
+  const skuLabel = key => only(skuHeaders.filter(head => labelText(head) === skuLabels[key]));
   // Shopee renders variation labels/images in a fixed table and the editable
   // columns in a separate scrollable table. Confirm they describe the same rows.
   if (nameFields.length === 1 && groups.length === choices.length && choices.length === options.length &&
@@ -225,9 +339,12 @@ export function readPage(category) {
         quantity: one('.table-cell.stock-column input', group),
         sku: one('.table-cell .sku-textarea textarea', group),
       };
-      for (const control of Object.values(fields)) {
+      for (const [key, control] of Object.entries(fields)) {
         const cell = control?.closest('.table-cell');
-        if (cell) salesAndShippingControls.add(cell);
+        if (!cell) continue;
+        salesAndShippingControls.add(cell);
+        inspect({ section: 'sales', key, label: skuLabels[key], option: choices[index], scope: cell, control,
+          raw: value(control), required: markedRequired(cell, control, skuLabel(key)) });
       }
       const images = one('.shopee-image-manager', firstCells[index]);
       const uploads = all('.shopee-image-manager__upload input[type=file][accept="image/*"]', images)
@@ -239,6 +356,9 @@ export function readPage(category) {
       const pending = !present && (thumbnails.some(img => !img.complete || img.loading === 'lazy') ||
         previews.some(img => img.getAttribute('src')?.startsWith('blob:')) ||
         shown('.shopee-image-manager__itembox [aria-busy=true],.eds-loading', images).length > 0);
+      if (images) inspect({ section: 'sales', key: 'image', label: skuLabels.image, option: choices[index],
+        scope: firstCells[index], control: images, raw: present,
+        required: markedRequired(images, only(uploads), skuLabel('image')) });
       return {
         option: choices[index],
         price: value(fields.price),

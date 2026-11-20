@@ -85,7 +85,12 @@ async function activeTab() {
 
 function errorText(receipt) {
   const location = ["control-changed", "field-missing"].includes(receipt.code) && STEP_LABELS.get(receipt.step);
-  return [REASONS.get(receipt.code) || "请检查商家后台的商品资料。", location, detailsText(receipt.details)].filter(Boolean).join("\n");
+  const issues = receipt.requiredIssues ?? receipt.details?.issues;
+  const fields = Array.isArray(issues) ? [...new Set(issues.filter(issue => issue?.label && issue.kind)
+    .map(issue => [issue.label, issue.option, issue.message || (issue.kind === "missing" ? "缺少必填值" : "校验未通过")]
+      .filter(Boolean).join(" · ")))].slice(0, 8) : [];
+  return [REASONS.get(receipt.code) || "请检查商家后台的商品资料。", location,
+    detailsText(receipt.details), ...fields].filter(Boolean).join("\n");
 }
 
 export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = activeTab, chooseDirectory, startBatch } = {}) {
