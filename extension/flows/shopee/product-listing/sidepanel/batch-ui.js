@@ -1,6 +1,7 @@
 import { matchesFlowTarget } from "../../../../lib/flow/runtime.js";
 import { ensureOptionalAccess } from "../../../../lib/optional-permissions.js";
 import { $ } from "../../../../sidepanel/dom.js";
+import { shopeeShopId } from "../definition.js";
 import { imagePathsFor, runProductBatch } from "./batch-run.js";
 import { chooseShopeeProductDirectory, completeDirectorySizeChartInput, directoryAttributeAdvice, loadProductDirectory, prepareSizeChartInput } from "./product-directory.js";
 
@@ -83,6 +84,16 @@ export function bindPtcBatch({
     create.disabled = publish.disabled = busy || isBlocked() || !selectedRoot || !products.length || !tab?.id ||
       Boolean(tab.url && !shopId) ||
       actions.length > 0 && !consent.checked || !concurrencyInput.validity.valid;
+    for (const [button, mode, label, running] of [
+      [create, "create", "创建商品", "创建中…"],
+      [publish, "publish", "创建并上架", "上架中…"],
+    ]) {
+      const submitting = run?.mode === mode;
+      if (submitting) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
+      button.textContent = !submitting ? label : run.phase === "starting" ? "启动中…" :
+        run.phase === "stopping" ? "正在停止…" : running;
+    }
     concurrencyInput.disabled = busy;
     consent.disabled = busy;
     consentRow.hidden = !selectedRoot || !actions.length;
@@ -90,7 +101,7 @@ export function bindPtcBatch({
     ai.disabled = busy;
     aiRow.hidden = !selectedRoot;
     stop.hidden = !run;
-    stop.disabled = Boolean(run?.signal.aborted);
+    stop.disabled = run?.phase === "stopping";
   }
 
   function clearPreview() {
@@ -217,14 +228,15 @@ export function bindPtcBatch({
   concurrencyInput.addEventListener("input", updateControls);
   stop.addEventListener("click", () => {
     if (!run) return;
-    run.abort();
+    run.phase = "stopping";
+    run.controller.abort();
     setStatus("running", "正在停止批量任务。");
     updateControls();
   });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (![create, publish].includes(event.submitter) || event.submitter.disabled) return;
+    if (run || reading || isBlocked() || ![create, publish].includes(event.submitter) || event.submitter.disabled) return;
     const mode = event.submitter === publish ? "publish" : "create";
     const concurrency = concurrencyInput.valueAsNumber;
     if (!concurrencyInput.validity.valid || !Number.isInteger(concurrency)) return;
@@ -234,7 +246,7 @@ export function bindPtcBatch({
     const root = selectedRoot;
     if (!sourceTab || consentActions().length && !uploadApproved) return;
     const controller = new AbortController();
-    run = controller;
+    run = { controller, mode, phase: "starting", shopId: originalShop };
     lastShop = "";
     for (const job of jobs) {
       Object.assign(job, { phase: "pending", tabId: null, receipt: null, step: "", tool: "" });
@@ -242,29 +254,34 @@ export function bindPtcBatch({
     }
     const runLabel = mode === "publish" ? "创建并上架" : "创建商品";
     let settled = 0;
-    setStatus("running", `${runLabel} · 0/${products.length} 已处理 · ${concurrency} 并发`);
+    setStatus("running", `正在启动${runLabel}，检查 Shopee 站点权限…`);
     onChange();
     try {
       const access = await ensureOptionalAccess({ url: flow.origin, tabId: sourceTab.id, userGesture: true, force: true });
       controller.signal.throwIfAborted();
       if (!access.granted && !access.required) throw new Error(access.message || "Chrome 未授予此站点访问权限。");
       const [current] = await chrome.tabs.query({ active: true, windowId: sourceTab.windowId });
-      if (current?.id !== sourceTab.id || !matchesFlowTarget(flow.id, current?.url, originalShop || undefined)) {
-        throw new Error("当前标签或店铺已变化，请返回 Shopee 新增商品页后重试。");
+      controller.signal.throwIfAborted();
+      const shopId = shopeeShopId(current?.url);
+      if (current?.id !== sourceTab.id || !shopId || originalShop && shopId !== originalShop) {
+        throw new Error("当前标签或店铺已变化，请回到要操作的 Shopee 店铺后重试。");
       }
-      const shopId = new URL(current.url).searchParams.get("cnsc_shop_id");
       lastShop = shopId;
+      run.shopId = shopId;
+      run.phase = "running";
+      setStatus("running", `${runLabel} · 0/${products.length} 已处理 · ${concurrency} 并发`);
+      onChange();
       await startBatch({
-        flow, shopId, sourceTab, products, uploadApproved, mode, concurrency, signal: controller.signal,
+        flow, shopId, sourceTab: current, products, uploadApproved, mode, concurrency, signal: controller.signal,
         prepareInput: (product, signal) => prepareSizeChartInput(product, { root, signal }),
         completeChart: (product, requirements) => completeDirectorySizeChartInput(product, { ...requirements, root }),
         createAttributeAdvisor: modelApproved ? (product, signal) => directoryAttributeAdvice(product, { root, signal }) : undefined,
         onJob(index, event) {
           const job = jobs[index];
+          if (event.receipt && !job.receipt) settled++;
           Object.assign(job, event);
           if (event.receipt) {
             job.tool = "";
-            settled++;
             if (!controller.signal.aborted) {
               setStatus("running", `${runLabel} · ${settled}/${jobs.length} 已处理 · ${concurrency} 并发`);
             }
@@ -296,6 +313,7 @@ export function bindPtcBatch({
 
   return {
     get busy() { return Boolean(run || reading); },
+    get runningShop() { return run?.shopId; },
     resetConsent: () => { consent.checked = ai.checked = false; },
     updateControls,
   };

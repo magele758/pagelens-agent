@@ -1,4 +1,5 @@
 import { matchesFlowTarget, runFlow } from "../../../../lib/flow/runtime.js";
+import { shopeeShopId } from "../definition.js";
 import { checkShopeeSubmission, reconcileShopeeCreated, submitShopeeListing } from "../submit-listing.mjs";
 import { createPtcToolCaller } from "./tool-adapter.js";
 
@@ -53,8 +54,9 @@ export async function runProductBatch({
     throw new RangeError(`并发标签数须在 1 到 ${MAX_CONCURRENCY} 之间。`);
   }
   const source = await tabs.get(sourceTab.id);
+  const sourceShop = shopeeShopId(source?.url);
   if (source?.id !== sourceTab.id || source.windowId !== sourceTab.windowId ||
-      !matchesFlowTarget(flow.id, source.url, shopId)) {
+      !sourceShop || sourceShop !== shopId) {
     throw new Error("源标签或店铺已变化。");
   }
   const url = new URL(flow.path, flow.origin);

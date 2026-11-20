@@ -19,9 +19,9 @@ const products = ["alpha", "beta"].map((key) => ({
   },
 }));
 
-function makeRun({ data = products, redirect = false, uploadApproved = true, prepareInput,
+function makeRun({ anchor = sourceTab, data = products, redirect = false, uploadApproved = true, prepareInput,
   concurrency, mode, remove, submit, reconcile } = {}) {
-  const records = new Map([[sourceTab.id, sourceTab]]);
+  const records = new Map([[anchor.id, anchor]]);
   const created = [];
   const events = [];
   const active = [];
@@ -40,7 +40,7 @@ function makeRun({ data = products, redirect = false, uploadApproved = true, pre
       return { id };
     },
     remove: async (id) => {
-      assert.notEqual(id, sourceTab.id);
+      assert.notEqual(id, anchor.id);
       assert.ok(records.has(id));
       await remove?.(id);
       records.delete(id);
@@ -49,7 +49,7 @@ function makeRun({ data = products, redirect = false, uploadApproved = true, pre
   };
   const controller = new AbortController();
   const run = (replay) => runProductBatch({
-    flow, shopId, sourceTab, products: data, uploadApproved, signal: controller.signal, tabs, prepareInput, concurrency, mode, reconcile,
+    flow, shopId, sourceTab: anchor, products: data, uploadApproved, signal: controller.signal, tabs, prepareInput, concurrency, mode, reconcile,
     onJob: (index, event) => events.push({ index, ...event }),
     createCall: ({ tabId, confirmUpload }) => {
       const product = data[tabId - 40];
@@ -100,6 +100,21 @@ test("obtains two independent tabs before either product completes", async () =>
   await pending;
   assert.equal(events.filter(({ phase }) => phase === "created").length, 2);
   assert.deepEqual(closed, [40, 41]);
+});
+
+test("a Shopee product list can anchor workers, but a different shop or site cannot", async () => {
+  const shopList = `${flow.origin}/portal/product/mtsku/list?cnsc_shop_id=${shopId}`;
+  const { run, created, closed } = makeRun({ anchor: { ...sourceTab, url: shopList } });
+  await run();
+  assert.equal(created.length, products.length);
+  assert.ok(created.every(tab => tab.url === `${flow.origin}${flow.path}?cnsc_shop_id=${shopId}`));
+  assert.equal(closed.length, products.length);
+
+  for (const url of [shopList.replace(shopId, "42"), shopList.replace("seller.shopee.cn", "example.com")]) {
+    const rejected = makeRun({ anchor: { ...sourceTab, url } });
+    await assert.rejects(rejected.run());
+    assert.deepEqual(rejected.created, []);
+  }
 });
 
 test("a redirected product keeps its own error and releases its tab without blocking the other tab", async () => {

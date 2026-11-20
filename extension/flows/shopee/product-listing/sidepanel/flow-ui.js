@@ -1,5 +1,6 @@
 import { listFlows } from "../../../../lib/flow/runtime.js";
 import { $ } from "../../../../sidepanel/dom.js";
+import { shopeeShopId } from "../definition.js";
 import { bindPtcBatch } from "./batch-ui.js";
 import { mountProductListingDialog } from "./dialog.js";
 
@@ -70,16 +71,6 @@ function detailsText(value, depth = 0) {
   }).filter(Boolean).join("\n");
 }
 
-function shopFor(url, flow, { requireListing = true } = {}) {
-  try {
-    const page = new URL(url);
-    const values = page.searchParams.getAll("cnsc_shop_id");
-    return page.origin === flow.origin && (!requireListing || page.pathname === flow.path) &&
-      !page.username && !page.password && values.length === 1 &&
-      /^\d+$/.test(values[0]) ? values[0] : "";
-  } catch { return ""; }
-}
-
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab || null;
@@ -111,7 +102,7 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
   const stepLabel = step => STEP_LABELS.get(step);
   const batch = bindPtcBatch({
     flow, chooseDirectory, startBatch,
-    getTarget: () => ({ tab: selectedTab, shopId: shopFor(selectedTab?.url, flow) }),
+    getTarget: () => ({ tab: selectedTab, shopId: shopeeShopId(selectedTab?.url) }),
     isBlocked: () => remote?.status === "running" || isAgentBusy?.(),
     onChange: displayControls,
     onReview: onReview ? problem => { dialog.close(); onReview(problem); } : null,
@@ -121,6 +112,13 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
   function displayControls() {
     close.disabled = back.disabled = batch.busy;
     review.hidden = !issue || typeof onReview !== "function";
+    const shop = batch.runningShop || shopeeShopId(selectedTab?.url);
+    target.textContent = shop ? `卖家中心 · 当前店铺 ${shop}` : selectedTab?.id && !selectedTab.url
+      ? "开始时由 Chrome 确认此站点的访问权限。"
+      : "请在 Shopee 卖家中心打开要操作的店铺。";
+    listingLink.href = flow.origin;
+    listingLink.textContent = "打开 Shopee 卖家中心";
+    listingLink.hidden = Boolean(shop || (selectedTab?.id && !selectedTab.url));
     batch.updateControls();
   }
 
@@ -128,18 +126,8 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
     const revision = ++tabRevision;
     const tab = await getTargetTab().catch(() => null);
     if (revision !== tabRevision) return;
-    if (selectedTab?.id !== tab?.id || selectedTab?.url !== tab?.url) batch.resetConsent();
+    if (!batch.busy && (selectedTab?.id !== tab?.id || selectedTab?.url !== tab?.url)) batch.resetConsent();
     selectedTab = tab;
-    const shop = shopFor(tab?.url, flow);
-    target.textContent = shop ? `卖家中心 · 当前店铺 ${shop}` : tab?.id && !tab.url
-      ? "开始时由 Chrome 确认此站点的访问权限。"
-      : "请打开 Shopee 卖家中心的「新增商品」页面。";
-    const currentShop = shopFor(tab?.url, flow, { requireListing: false });
-    const destination = new URL(currentShop ? flow.path : "/", flow.origin);
-    if (currentShop) destination.searchParams.set("cnsc_shop_id", currentShop);
-    listingLink.href = destination.href;
-    listingLink.textContent = currentShop ? "打开当前店铺的新增商品页" : "打开 Shopee 卖家中心";
-    listingLink.hidden = Boolean(shop || (tab?.id && !tab.url));
     displayControls();
   }
 
@@ -158,7 +146,7 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
   dialog.addEventListener("cancel", event => { if (batch.busy) event.preventDefault(); });
   review.addEventListener("click", async () => {
     const tab = await getTargetTab().catch(() => null);
-    if (!issue || issue.tabId !== tab?.id || !shopFor(tab.url, flow)) {
+    if (!issue || issue.tabId !== tab?.id || !shopeeShopId(tab.url, { listingOnly: true })) {
       status.textContent = "请返回发生异常的 Shopee 表单。";
       return;
     }
@@ -178,7 +166,7 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
       if (remote?.runId !== message.runId) {
         if (message.status !== "running") return;
         const tab = await getTargetTab();
-        if (!tab || tab.id !== message.tabId || !shopFor(tab.url, flow) || batch.busy) return;
+        if (!tab || tab.id !== message.tabId || !shopeeShopId(tab.url, { listingOnly: true }) || batch.busy) return;
         selectedTab = tab;
         remote = { runId: message.runId, status: message.status };
         issue = null;
