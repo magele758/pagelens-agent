@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { createPtcExecTool } from "@mage-ai-lab/agent-loop/ptc";
-import { mxDraftUrl, mxManageUrl, mxSellerRequest } from "../extension/skills/tiktok-mx-draft/tiktok-mx-seller-request.mjs";
+import { SELLER_LOGIN_ERROR, isSellerLoginUrl, mxDraftUrl, mxManageUrl, mxSellerRequest } from "../extension/skills/tiktok-mx-draft/tiktok-mx-seller-request.mjs";
 import { attributeCode, readFreshDocument, snapshotCode, titleSelector } from "../tools/tiktok-mx-editor.mjs";
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
 import { inspectWithPtc } from "./mx-ptc-inspect.mjs";
@@ -38,7 +38,9 @@ async function withSellerTab(send, url, run, active = false) {
     const deadline = Date.now() + 15000;
     do {
       const tabs = await send("list_tabs", {});
-      if (tabs.some(tab => tab.id === tabId && tab.url === url))
+      const tab = tabs.find(t => t.id === tabId);
+      if (isSellerLoginUrl(tab?.url)) throw Error(SELLER_LOGIN_ERROR);
+      if (tab?.url === url)
         return await run(call, () => { keep = true; return tabId; }, tabId);
       await new Promise(resolve => setTimeout(resolve, 150));
     } while (Date.now() < deadline);

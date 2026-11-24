@@ -24,6 +24,8 @@ const MAX_WAVE = 3;
 const DEFAULT_WAIT_MS = 1800000; // 30 minutes per job
 
 const CAPTCHA_RE = /"captcha"\s*:\s*true|拖动完成上方拼图|请完成下列验证|Verify to continue|seller verification|TikTok verification is open/i;
+const LOGIN_REQUIRED_RE = /SELLER_LOGIN_REQUIRED|seller login required|not logged in|account\/login|请先登录|店铺未登录|需要重新登录/i;
+const NAV_FAIL_RE = /Task tab did not finish navigating|The expected Seller Center page did not open|Draft list not ready or seller login required/i;
 const UNCERTAIN_PUBLISH_RE = /Timeout waiting for outbox|submission_unconfirmed|reconcile|indeterminate/i;
 const JP_PDP_URL_RE = /https?:\/\/shop\.tiktok\.com\/jp\/pdp\/(?:[^/\s"'<>?#]+\/)?(\d{12,22})\/?(?:\?[^\s"'<>#]*)?/g;
 const NUMERIC_ID_RE = /^\d{12,22}$/;
@@ -32,6 +34,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function isCaptchaError(msg) {
   return CAPTCHA_RE.test(String(msg || ""));
+}
+
+function isLoginRequiredError(msg) {
+  return LOGIN_REQUIRED_RE.test(String(msg || ""));
 }
 
 function roundCents(n) {
@@ -156,6 +162,7 @@ Exit codes:
   0  Success
   1  Error or one or more items failed
   2  CAPTCHA / seller verification detected (STOP and ask user to verify in Chrome)
+  3  TikTok Seller Center not logged in (STOP immediately and ask user to sign in)
 `);
 }
 
@@ -561,6 +568,7 @@ async function cmdAction(opts) {
   }
 
   console.log(JSON.stringify(result, null, 2));
+  if (!result.ok && isLoginRequiredError(reply?.error)) process.exit(3);
   if (!result.ok && isCaptchaError(reply?.error)) process.exit(2);
   process.exit(result.ok ? 0 : 1);
 }
@@ -696,9 +704,11 @@ async function cmdRun(opts) {
 
   const batchT0 = Date.now();
   let captchaHit = false;
+  let loginRequired = false;
+  let waveAborted = false;
 
   for (let offset = 0; offset < slice.length; offset += waveSize) {
-    if (captchaHit) break;
+    if (captchaHit || loginRequired || waveAborted) break;
     const wave = slice.slice(offset, offset + waveSize);
     console.log(`\n=== WAVE [${wave.map(w => `#${w.index}`).join(", ")}] ===`);
 
@@ -745,6 +755,9 @@ async function cmdRun(opts) {
           const err = reply?.error || JSON.stringify(reply);
           item.status = "create_failed";
           item.error = err;
+          if (isLoginRequiredError(err)) {
+            loginRequired = true;
+          }
           if (isCaptchaError(err)) {
             captchaHit = true;
           } else {
@@ -758,12 +771,23 @@ async function cmdRun(opts) {
         }
         await saveProgress();
       }));
+
+      if (!loginRequired && !captchaHit && needCreate.length >= 2 &&
+          needCreate.every(w => progress.items[w.index].status === "create_failed" && NAV_FAIL_RE.test(String(progress.items[w.index].error || "")))) {
+        waveAborted = true;
+        console.error("[STOP] Entire wave failed to load Seller Center pages (check if the MX shop is logged in). Stopping automation without launching further waves.");
+      }
     }
 
+    if (loginRequired) {
+      console.error("[STOP] TikTok Seller Center is not logged in! Stopping automation immediately. Sign in to the MX Seller Center in Chrome, then resume with the same --progress file.");
+      break;
+    }
     if (captchaHit) {
       console.error("[STOP] CAPTCHA / seller verification detected during create. Complete verification in Chrome, then re-run with the same --progress file.");
       break;
     }
+    if (waveAborted) break;
 
     // STAGE 2: reprice_draft (optional)
     if (doReprice) {
@@ -802,6 +826,7 @@ async function cmdRun(opts) {
           } catch (e) {
             item.status = "reprice_failed";
             item.error = String(e.message || e);
+            if (isLoginRequiredError(item.error)) loginRequired = true;
             console.error(`  ✗ [reprice prep #${w.index}] ${item.error}`);
           }
         }
@@ -823,6 +848,7 @@ async function cmdRun(opts) {
             const err = reply?.error || JSON.stringify(reply);
             item.status = "reprice_failed";
             item.error = err;
+            if (isLoginRequiredError(err)) loginRequired = true;
             if (isCaptchaError(err)) captchaHit = true;
             console.error(`  ✗ [reprice #${w.index}] ${w.name} FAILED: ${String(err).slice(0, 220)}`);
           }
@@ -831,6 +857,10 @@ async function cmdRun(opts) {
       }
     }
 
+    if (loginRequired) {
+      console.error("[STOP] TikTok Seller Center is not logged in during reprice! Stopping automation immediately.");
+      break;
+    }
     if (captchaHit) {
       console.error("[STOP] CAPTCHA / seller verification detected during reprice. Complete verification in Chrome, then re-run with the same --progress file.");
       break;
@@ -891,6 +921,7 @@ async function cmdRun(opts) {
           } catch (e) {
             item.status = "publish_failed";
             item.error = String(e.message || e);
+            if (isLoginRequiredError(item.error)) loginRequired = true;
             console.error(`  ✗ [publish prep #${w.index}] ${item.error}`);
           }
         }
@@ -911,6 +942,7 @@ async function cmdRun(opts) {
             const err = reply?.error || JSON.stringify(reply);
             item.status = UNCERTAIN_PUBLISH_RE.test(err) ? "publish_unconfirmed" : "publish_failed";
             item.error = err;
+            if (isLoginRequiredError(err)) loginRequired = true;
             if (isCaptchaError(err)) captchaHit = true;
             console.error(`  ✗ [publish #${w.index}] ${w.name} ${item.status.toUpperCase()}: ${String(err).slice(0, 220)}`);
           }
@@ -919,6 +951,10 @@ async function cmdRun(opts) {
       }
     }
 
+    if (loginRequired) {
+      console.error("[STOP] TikTok Seller Center is not logged in during publish! Stopping automation immediately.");
+      break;
+    }
     if (captchaHit) {
       console.error("[STOP] CAPTCHA / seller verification detected during publish. Complete verification in Chrome, then check listing_status / resume.");
       break;
@@ -932,6 +968,7 @@ async function cmdRun(opts) {
   console.log("\n" + formatReportMarkdown(reportData));
   console.log(`\n[progress] ${progressFile}`);
 
+  if (loginRequired) process.exit(3);
   if (captchaHit) process.exit(2);
   const unfinished = slice.filter(p => !isTargetDone(progress.items[p.index]));
   process.exit(unfinished.length ? 1 : 0);

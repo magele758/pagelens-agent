@@ -126,6 +126,39 @@ try {
   assert.equal(reportJson.timing.createAvgSec, 60);
   assert.equal(reportJson.timing.repriceAvgSec, 20);
   assert.equal(reportJson.timing.publishAvgSec, 15);
+
+  // 3e. Stop immediately (exit code 3) on SELLER_LOGIN_REQUIRED without launching Wave 2
+  const { spawn } = await import("node:child_process");
+  const inboxDir = path.join(fakeHome, "agent-inbox", FAKE_EXT_ID);
+  const outboxDir = path.join(fakeHome, "agent-outbox");
+  await fs.mkdir(outboxDir, { recursive: true });
+  const loginProg = path.join(tmpDir, "login-stop.json");
+  const child = spawn(process.execPath, [
+    CLI, "run", "--input", csvPath, "--wave", "1", "--stage", "publish", "--progress", loginProg,
+  ], { cwd: tmpDir, env: { ...process.env, ...testEnv }, stdio: ["ignore", "pipe", "pipe"] });
+  let stderrBuf = "";
+  child.stderr.on("data", d => { stderrBuf += d.toString(); });
+  const enqueuedIds = new Set();
+  const responder = setInterval(async () => {
+    const files = (await fs.readdir(inboxDir).catch(() => [])).filter(f => f.endsWith(".json"));
+    for (const f of files) {
+      const id = f.replace(/\.json$/, "");
+      if (enqueuedIds.has(id)) continue;
+      enqueuedIds.add(id);
+      await fs.writeFile(path.join(outboxDir, `${id}.json`), JSON.stringify({
+        id,
+        ok: false,
+        error: "SELLER_LOGIN_REQUIRED: TikTok Seller Center is not logged in",
+      }));
+    }
+  }, 50);
+  const exitCode = await new Promise(resolve => child.on("close", resolve));
+  clearInterval(responder);
+  assert.equal(exitCode, 3, `expected exit code 3 on login required, got ${exitCode} (stderr=${stderrBuf})`);
+  assert.equal(enqueuedIds.size, 1, "must stop after Wave 1 without enqueueing Wave 2");
+  const savedLoginProg = JSON.parse(await fs.readFile(loginProg, "utf8"));
+  assert.equal(savedLoginProg.items["1"].status, "create_failed");
+  assert.equal(savedLoginProg.items["2"].status, "pending", "Wave 2 item must remain untouched pending");
 } finally {
   await fs.rm(tmpDir, { recursive: true, force: true });
 }

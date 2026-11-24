@@ -1,6 +1,6 @@
 import { NATIVE_HOST_NAME } from "../../lib/native-host.js";
 import { isMxSellerManageReturn, runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
-import { mxManageUrl, mxSellerRequest, mxSellerUrlAllowed } from "./tiktok-mx-seller-request.mjs";
+import { SELLER_LOGIN_ERROR, isSellerLoginUrl, mxManageUrl, mxSellerRequest, mxSellerUrlAllowed } from "./tiktok-mx-seller-request.mjs";
 
 const tools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab", "activate_tab",
   "wait_for", "upload_file", "trusted_type", "press_keys", "navigate_tab"]);
@@ -39,6 +39,13 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
   const repairUrl = draftId && `${seller}/product/edit-draft/${draftId}?shop_region=MX`;
   const allowedDestination = value => repairUrl ? value === repairUrl : allowedDraftUrl(value, sourceId);
   const owned = new Set();
+  async function assertNotSellerLogin() {
+    for (const id of owned) {
+      let u;
+      try { u = await tabUrl(id); } catch { continue; }
+      if (isSellerLoginUrl(u)) throw Error(SELLER_LOGIN_ERROR);
+    }
+  }
   async function dispatch(tool, args) {
     if (!tools.has(tool) || (repairUrl && tool === "upload_file")) throw Error("Unexpected draft tool " + tool);
     if (tool === "navigate_tab" && !allowedDestination(args.url)) throw Error("Unexpected draft destination");
@@ -49,9 +56,10 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
     } else if (tool !== "list_tabs" && !owned.has(args.tabId)) throw Error("Tab outside draft task");
     else if (tool !== "list_tabs" && (repairUrl || tool !== "close_tab")) {
       const currentUrl = await tabUrl(args.tabId);
+      if (tool !== "close_tab" && isSellerLoginUrl(currentUrl)) throw Error(SELLER_LOGIN_ERROR);
       const reopening = isMxSellerManageReturn(currentUrl) &&
         (tool === "activate_tab" || (tool === "navigate_tab" && /^\/product\/edit-draft\/\d+$/.test(new URL(args.url).pathname)));
-      const cleanup = repairUrl && tool === "close_tab" && isMxSellerManageReturn(currentUrl);
+      const cleanup = repairUrl && tool === "close_tab" && (isMxSellerManageReturn(currentUrl) || isSellerLoginUrl(currentUrl));
       const transientError = !repairUrl && ["activate_tab", "reload_tab", "navigate_tab"].includes(tool) &&
         (currentUrl === "about:blank" || String(currentUrl || "").startsWith("chrome-error://"));
       if (!reopening && !cleanup && !transientError && !allowedDestination(currentUrl))
@@ -63,8 +71,11 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
     const reply = await call(tool, effectiveArgs);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") for (const id of [reply.result.tabId, ...(reply.result.backgroundTabIds || [])]) owned.add(id);
-    if (tool === "list_tabs") return { ...reply, result: reply.result.filter(t => owned.has(t.id) &&
-      (!repairUrl || t.url === repairUrl || isMxSellerManageReturn(t.url))) };
+    if (tool === "list_tabs") {
+      await assertNotSellerLogin();
+      return { ...reply, result: reply.result.filter(t => owned.has(t.id) &&
+        (!repairUrl || t.url === repairUrl || isMxSellerManageReturn(t.url))) };
+    }
     if (tool === "close_tab") owned.delete(args.tabId);
     return reply;
   }
@@ -101,7 +112,9 @@ export function createMxSellerTransport(parameters, call, tabUrl) {
         }
         throw error;
       }
-      if (!allowed(currentUrl)) throw Error("Task tab navigated outside the TikTok MX seller scope");
+      if (tool !== "close_tab" && isSellerLoginUrl(currentUrl)) throw Error(SELLER_LOGIN_ERROR);
+      if (!(tool === "close_tab" && isSellerLoginUrl(currentUrl)) && !allowed(currentUrl))
+        throw Error("Task tab navigated outside the TikTok MX seller scope");
       if (delistHover && (currentUrl !== mxManageUrl + "&tab=active" ||
           !/^button\[data-pagelens-mx-delist="[a-f0-9-]{36}"\]$/i.test(args.selector) ||
           Object.keys(args).some(key => !["tabId", "selector"].includes(key))))
@@ -115,7 +128,14 @@ export function createMxSellerTransport(parameters, call, tabUrl) {
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") owned.add(reply.result.tabId);
     if (tool === "close_tab") owned.delete(args.tabId);
-    if (tool === "list_tabs") return reply.result.filter(tab => owned.has(tab.id) && allowed(tab.url));
+    if (tool === "list_tabs") {
+      for (const id of owned) {
+        let u;
+        try { u = await tabUrl(id); } catch { continue; }
+        if (isSellerLoginUrl(u)) throw Error(SELLER_LOGIN_ERROR);
+      }
+      return reply.result.filter(tab => owned.has(tab.id) && allowed(tab.url));
+    }
     return reply.result;
   };
 }

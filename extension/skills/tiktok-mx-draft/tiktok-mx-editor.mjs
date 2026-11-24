@@ -2,6 +2,7 @@ import { sellerAttributes, checkAttributes, matchAttributeValue } from "./tiktok
 export { checkAttributes, matchAttributeValue };
 export { checkDraftAttributes } from "./tiktok-mx-attributes.mjs";
 import { draftListCode, sellerVerification } from "./tiktok-mx-list.mjs";
+import { SELLER_LOGIN_ERROR, isSellerLoginUrl } from "./tiktok-mx-seller-request.mjs";
 export * from "./tiktok-mx-list.mjs";
 import {
   commercialDifferences, commerceScript, locateSkuInput, sellerBrand, sellerNumbers, sellerRead, sellerVariantAxis, sellerVariants,
@@ -72,7 +73,9 @@ export async function runMxDraftRead({ action, tabId, url, title, waitForMatch =
       !validPage || page.searchParams.get("shop_region") !== "MX")
     throw Error("Expected a saved MX draft");
   async function call(tool, args) {
-    if (await tabUrl(tabId) !== url) throw Error("Draft URL changed during readback");
+    const liveUrl = await tabUrl(tabId);
+    if (isSellerLoginUrl(liveUrl)) throw Error(SELLER_LOGIN_ERROR);
+    if (liveUrl !== url) throw Error("Draft URL changed during readback");
     const reply = await dispatch(tool, { tabId, ...args });
     if (!reply.ok || reply.result?.ok === false) throw Error(JSON.stringify(reply.error || reply.result?.error));
     return reply.result;
