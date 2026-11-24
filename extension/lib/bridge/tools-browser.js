@@ -254,7 +254,11 @@ export function createBrowserTools(env, { obj, TAB_ID, refs, trusted, wrapCdpToo
     scope: "tabs:manage",
     async execute(args, ctx) {
       const win = await authorizeWindow(args.windowId, ctx, { all: true });
+      const groupedIds = (win.tabs || []).filter((t) => t.groupId != null && t.groupId >= 0).map((t) => t.id);
       for (const t of win.tabs || []) refs.drop(t.id);
+      if (groupedIds.length && typeof env.tabs.ungroup === "function") {
+        await env.tabs.ungroup(groupedIds).catch(() => {});
+      }
       await env.windows.remove(args.windowId);
       return { windowId: args.windowId, closed: true };
     },
