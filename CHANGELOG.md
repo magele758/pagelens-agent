@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 回答渲染不再放行模型输出里的 `style` 属性（可伪装或遮挡确认按钮）；只保留 KaTeX 公式自身的排版样式。
 
 ### Changed
+- 主循环依赖 `@mage-ai-lab/agent-loop` 从 0.1.3 升到 0.2.0。Chrome 侧栏仍只打包 `/mini`（`createMiniAssembledLoop`）；Node PTC 脚本仍引用 `/ptc`。
 - **TikTok MX 多窗口并发隔离、自动关窗与 Token 计量**：并发任务组在独立非聚焦窗口中运行并绑定 `windowId`，完结后若窗口仅含本次自动化标签则自动关闭整窗；在 `receipt.json` 记录 PTC 逐次调用的精确 Token 消耗；支持源站错误页指数退避重连、非聚焦窗口规格大小写归一化、模型 JSON 容错重试及 `/product/listing` 返回路径。
 - **TikTok MX PTC 全链路提速与店铺经营范围自适应**：冷启动建草稿并行提前上传首批主图、复用来源标签进入新建页、优先采纳后台 `✨ 建议` 类目（自动展开折叠建议）并按店铺允许经营范围过滤；遇超出经营范围或无直配类目时自动回退至店铺可经营类目树中就近匹配；`ptc_mx_seller_action` 动态读取后台实时价格上限、补齐 `delist_listing` 与 `optimize_listing` 异步传播核对，并通过 ProseMirror 视图保留双语详情图节点。
 - 宽泛权限改为按需申请。书签、历史、下载、cookie、通知、剪贴板、标签网址、标签组、用户脚本、Native Messaging、`tabCapture`、`webNavigation`、`favicon`，以及全部主机权限（含 `<all_urls>`）改为 optional。第一次使用对应功能时说明原因并单独申请。`debugger` 与 `tts` 仍在安装时申请，因为 Chrome 不允许把它们做成可选权限。已安装用户已经授予的权限会保留。

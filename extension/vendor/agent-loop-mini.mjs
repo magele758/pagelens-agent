@@ -120,6 +120,9 @@ function unmatchedToolCallIds(messages) {
   }
   return [...open];
 }
+function isToolWaveOpen(messages) {
+  return unmatchedToolCallIds(messages).length > 0;
+}
 function assertReplaceRangeClosed(nodes, startSeq, endSeq) {
   const folded = foldSurface(nodes);
   const inRange = folded.filter((m) => m.seq !== void 0 && m.seq >= startSeq && m.seq <= endSeq);
@@ -151,7 +154,16 @@ function assertReplaceRangeClosed(nodes, startSeq, endSeq) {
 }
 function shadowedSeqs(nodes) {
   const hidden = /* @__PURE__ */ new Set();
+  let latestSummarySeq = -1;
   for (const node of nodes) {
+    if (node.surfaceOp === "replace" && node.key === "compact-summary") {
+      latestSummarySeq = Math.max(latestSummarySeq, node.seq);
+    }
+  }
+  for (const node of nodes) {
+    if (node.surfaceOp === "replace" && node.key === "compact-summary" && node.seq !== latestSummarySeq) {
+      hidden.add(node.seq);
+    }
     if (node.surfaceOp === "replace" || node.surfaceOp === "hide") {
       if (typeof node.replacesStart === "number" && typeof node.replacesEnd === "number" && Number.isInteger(node.replacesStart) && Number.isInteger(node.replacesEnd)) {
         for (let s = node.replacesStart; s <= node.replacesEnd; s++) {
@@ -186,7 +198,8 @@ function surfaceNodeToMessage(node) {
     parts: node.parts,
     createdAt: node.createdAt,
     seq: node.seq,
-    ...node.key ? { key: node.key } : {}
+    ...node.key ? { key: node.key } : {},
+    ...node.replyTo ? { replyTo: node.replyTo } : {}
   };
 }
 
@@ -222,8 +235,11 @@ var WriterClaimError = class extends AppError {
 };
 function assertWriterClaim(input) {
   const active = input.activeWriterRunId || void 0;
-  if (!active)
+  if (!active) {
+    if (input.expectedWriterRunId !== void 0)
+      throw new WriterClaimError(input.sessionId, input.expectedWriterRunId, void 0);
     return;
+  }
   const expected = input.expectedWriterRunId ?? input.boundWriterRunId;
   if (expected !== active) {
     throw new WriterClaimError(input.sessionId, expected, active);
@@ -239,7 +255,8 @@ function nodeToMessage(node) {
     parts: node.parts,
     createdAt: node.createdAt,
     seq: node.seq,
-    ...node.key ? { key: node.key } : {}
+    ...node.key ? { key: node.key } : {},
+    ...node.replyTo ? { replyTo: node.replyTo } : {}
   };
 }
 var MemorySurfaceStore = class {
@@ -285,6 +302,9 @@ var MemorySurfaceStore = class {
     const existing = this.sessions.get(sessionId);
     if (!existing)
       throw new Error(`Session ${sessionId} not found`);
+    if (existing.activeWriterRunId && existing.activeWriterRunId !== runId) {
+      throw new WriterClaimError(sessionId, runId, existing.activeWriterRunId);
+    }
     existing.activeWriterRunId = runId;
     existing.updatedAt = nowIso();
     this.writerBindings.set(sessionId, runId);
@@ -306,7 +326,8 @@ var MemorySurfaceStore = class {
       parts,
       surfaceOp: "append",
       key: opts?.key,
-      expectedWriterRunId: opts?.expectedWriterRunId
+      expectedWriterRunId: opts?.expectedWriterRunId,
+      replyTo: opts?.replyTo
     }));
   }
   /** Alias matching the plan's `append` name. */
@@ -380,6 +401,8 @@ var MemorySurfaceStore = class {
       target: opts.target ?? "next-step",
       role: opts.role ?? "user",
       text,
+      contextParts: opts.contextParts,
+      replyTo: opts.replyTo,
       key: opts.key,
       createdAt: nowIso()
     };
@@ -438,9 +461,12 @@ var MemorySurfaceStore = class {
   }
   copyWalPrefix(fromId, toId, endSeq) {
     const src = this.nodes.get(fromId) ?? [];
-    const prefix = src.filter((n) => n.seq <= endSeq).map((n) => ({
+    const nodes = src.filter((n) => n.seq <= endSeq);
+    const copiedIds = new Map(nodes.map((node) => [node.id, createId("msg")]));
+    const prefix = nodes.map((n) => ({
       ...n,
-      id: createId("msg"),
+      id: copiedIds.get(n.id),
+      ...n.replyTo ? { replyTo: { ...n.replyTo, messageId: copiedIds.get(n.replyTo.messageId) ?? n.replyTo.messageId } } : {},
       sessionId: toId,
       parts: [...n.parts]
     }));
@@ -467,7 +493,8 @@ var MemorySurfaceStore = class {
       replacesEnd: input.replacesEnd,
       role: input.role,
       parts: input.parts,
-      createdAt: nowIso()
+      createdAt: nowIso(),
+      ...input.replyTo ? { replyTo: input.replyTo } : {}
     };
     list.push(node);
     this.nodes.set(input.sessionId, list);
@@ -827,6 +854,10 @@ function estimateMessageTokens(messages) {
       if (part.type === "image") {
         total += IMAGE_PART_TOKEN_ESTIMATE;
       }
+      if (part.type === "audio")
+        total += 3e3;
+      if (part.type === "video")
+        total += 1e4;
       if (part.type === "tool_call") {
         const input = part.input;
         const s = input !== void 0 ? JSON.stringify(input) : "";
@@ -999,6 +1030,7 @@ var DEFAULT_LOOP_CONFIG = {
   overflowReprepare: true,
   refusalPreservation: true,
   stopAtToolNames: [],
+  unchangedLookupTools: [],
   forceAnswerOnLastTurn: true,
   overflowSkipAppendix: true,
   lastTurnNudge: LAST_TURN_NUDGE,
@@ -1031,6 +1063,7 @@ function resolveLoopConfig(...sources) {
     overflowReprepare: merged.overflowReprepare ?? DEFAULT_LOOP_CONFIG.overflowReprepare,
     modelName: merged.modelName,
     refusalPreservation: merged.refusalPreservation ?? DEFAULT_LOOP_CONFIG.refusalPreservation,
+    unchangedLookupTools: [...merged.unchangedLookupTools ?? []],
     stopAtToolNames: merged.stopAtToolNames ? [...merged.stopAtToolNames] : [],
     forceAnswerOnLastTurn: merged.forceAnswerOnLastTurn ?? DEFAULT_LOOP_CONFIG.forceAnswerOnLastTurn,
     overflowSkipAppendix: merged.overflowSkipAppendix ?? DEFAULT_LOOP_CONFIG.overflowSkipAppendix,
@@ -1044,10 +1077,13 @@ function resolveLoopConfig(...sources) {
 // node_modules/@mage-ai-lab/agent-loop/dist/streaming/repetition-watchdog.js
 var RepetitionLoopAbortError = class extends Error {
   reason;
-  constructor(reason) {
+  /** Accumulated stream text that tripped the watchdog, so a trace can show the loop. */
+  sample;
+  constructor(reason, sample = "") {
     super(`repetition loop aborted: ${reason}`);
     this.name = "RepetitionLoopAbortError";
     this.reason = reason;
+    this.sample = sample;
   }
 };
 
@@ -1145,6 +1181,26 @@ function fingerprintToolRound(toolCalls) {
   const chunks = toolCalls.map((tc) => `${tc.name}:${stableJsonForFingerprint(tc.input ?? {})}`);
   return fingerprintHash(chunks.join("\n"));
 }
+var OBSERVATION_NOISE = /^(timestamp|observedAt|fetchedAt|checkedAt|requestId|traceId|durationMs|elapsedMs)$/i;
+function normalizeEvidence(value) {
+  if (Array.isArray(value))
+    return value.map(normalizeEvidence);
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !OBSERVATION_NOISE.test(key)).map(([key, item]) => [key, normalizeEvidence(item)]));
+  return value;
+}
+function evidenceFingerprint(results) {
+  if (results.some((r) => typeof r.content !== "string" || !r.content.trim()))
+    return void 0;
+  return fingerprintHash(stableJsonForFingerprint(results.map((r) => {
+    let content = r.content;
+    try {
+      content = JSON.parse(r.content);
+    } catch {
+    }
+    return { name: r.name, content: normalizeEvidence(content) };
+  })));
+}
 function summarizeToolRound(toolCalls) {
   const names = [...new Set(toolCalls.map((tc) => tc.name).filter(Boolean))];
   return names.length > 0 ? names.join(", ") : "empty";
@@ -1156,15 +1212,18 @@ function repeatRatioFromEnv(env) {
   return Math.min(1, Math.max(0.5, raw));
 }
 var SessionLoopGuard = class {
+  unchangedLookupTools;
   toolFailStreak = /* @__PURE__ */ new Map();
-  lastToolRoundFingerprint = "";
   sameCallStreak = 0;
+  rounds = /* @__PURE__ */ new Map();
   contentHashes = [];
   failStreakMax;
   sameToolStreakMax;
   repeatWindow;
   repeatRatio;
-  constructor(env) {
+  lastLookup;
+  constructor(env, unchangedLookupTools = []) {
+    this.unchangedLookupTools = unchangedLookupTools;
     this.failStreakMax = envInt(env, "RAW_AGENT_RECOVERY_TOOL_FAIL_STREAK", 3);
     this.sameToolStreakMax = envInt(env, "RAW_AGENT_RECOVERY_SAME_TOOL_STREAK", 5);
     this.repeatWindow = envInt(env, "RAW_AGENT_RECOVERY_REPEAT_WINDOW", 8);
@@ -1172,6 +1231,8 @@ var SessionLoopGuard = class {
   }
   /** After model returns; updates repetition window. */
   checkAssistantRepetition(assistantParts) {
+    if (assistantParts.some((p) => p.type === "tool_call"))
+      return { abort: false };
     const fp = fingerprintAssistant(assistantParts);
     this.contentHashes.push(fp);
     if (this.contentHashes.length > this.repeatWindow) {
@@ -1195,35 +1256,72 @@ var SessionLoopGuard = class {
     }
     return { abort: false };
   }
+  repeatedLookup(calls, results) {
+    const [call] = calls;
+    const [result] = results;
+    if (calls.length !== 1 || results.length !== 1 || !call || !result?.ok || !this.unchangedLookupTools.includes(call.name) || result.name !== call.name || result.toolCallId !== call.toolCallId || typeof result.content !== "string") {
+      this.lastLookup = void 0;
+      return;
+    }
+    const args = stableJsonForFingerprint([call.name, call.input]);
+    const previous = this.lastLookup;
+    const count = previous?.args === args && previous.content === result.content ? previous.count + 1 : 1;
+    this.lastLookup = { args, content: result.content, count };
+    if (count >= 3)
+      return `unchanged lookup: ${call.name} returned the same result ${count} consecutive times; use the previous result and proceed to the next action`;
+  }
   /** After tool results are known; updates failure and same-call-content streaks. */
   afterToolRound(toolCalls, results) {
-    for (const r of results) {
-      if (!r.ok) {
-        this.toolFailStreak.set(r.name, (this.toolFailStreak.get(r.name) ?? 0) + 1);
-      } else {
-        this.toolFailStreak.set(r.name, 0);
-      }
-    }
-    for (const [name, streak] of this.toolFailStreak) {
-      if (streak >= this.failStreakMax) {
-        return { abort: true, reason: `tool "${name}" failed ${streak} times in a row` };
-      }
+    const repeated = this.repeatedLookup(toolCalls, results);
+    if (repeated)
+      return { abort: true, reason: repeated };
+    const remaining = [...results];
+    const paired = toolCalls.map((call) => {
+      const index = remaining.findIndex((r) => call.toolCallId ? r.toolCallId === call.toolCallId : r.name === call.name);
+      return index < 0 ? void 0 : remaining.splice(index, 1)[0];
+    });
+    for (let i = 0; i < toolCalls.length; i++) {
+      const call = toolCalls[i];
+      const result = paired[i];
+      const key = fingerprintToolRound([call]);
+      const prev = this.toolFailStreak.get(key);
+      this.toolFailStreak.set(key, {
+        name: call.name,
+        streak: !result || !result.ok ? (prev?.streak ?? 0) + 1 : 0
+      });
     }
     if (toolCalls.length === 0) {
       return { abort: false };
     }
     const fp = fingerprintToolRound(toolCalls);
-    if (fp === this.lastToolRoundFingerprint) {
-      this.sameCallStreak += 1;
-    } else {
-      this.lastToolRoundFingerprint = fp;
-      this.sameCallStreak = 1;
+    const state = this.rounds.get(fp) ?? { seen: /* @__PURE__ */ new Set(), streak: 0 };
+    state.streak++;
+    this.rounds.delete(fp);
+    this.rounds.set(fp, state);
+    if (this.rounds.size > 128)
+      this.rounds.delete(this.rounds.keys().next().value);
+    const complete = results.length === toolCalls.length && paired.every((r, i) => r?.ok && r.name === toolCalls[i]?.name);
+    const evidence = complete ? evidenceFingerprint(paired) : void 0;
+    if (evidence && !state.seen.has(evidence)) {
+      for (const round of this.rounds.values())
+        round.streak = 0;
+      state.streak = 1;
+      this.contentHashes.length = 0;
+      state.seen.add(evidence);
+      if (state.seen.size > 256)
+        state.seen.delete(state.seen.values().next().value);
+    }
+    this.sameCallStreak = state.streak;
+    for (const { name, streak } of this.toolFailStreak.values()) {
+      if (streak >= this.failStreakMax) {
+        return { abort: true, reason: `tool "${name}" failed ${streak} times in a row` };
+      }
     }
     if (this.sameCallStreak >= this.sameToolStreakMax) {
       const label = summarizeToolRound(toolCalls);
       return {
         abort: true,
-        reason: `same tool-call content in ${this.sameToolStreakMax} consecutive tool rounds (${label})`
+        reason: `repeat detection: same tool-call content in ${this.sameToolStreakMax} repeated tool rounds without new successful evidence (${label})`
       };
     }
     return { abort: false };
@@ -1235,6 +1333,114 @@ var SessionLoopGuard = class {
     return this.sameToolStreakMax;
   }
 };
+
+// node_modules/@mage-ai-lab/agent-loop/dist/recovery/repeat-guard.js
+var LOOP_SETTINGS_KEY = "loop_settings";
+var DEFAULT_REPEAT_GUARD_MODE = "weak";
+var SIZE_TOKEN = /(?:^|[^a-z0-9])(?:mini|small|haiku|flash|nano|lite)(?:[^a-z0-9]|$)/;
+function norm(value) {
+  return (value ?? "").trim().toLowerCase();
+}
+function isHeuristicMarker(value) {
+  return value === "heuristic" || value === "__heuristic__";
+}
+function parseRepeatGuardMode(raw) {
+  switch (raw) {
+    case "weak":
+    case "all":
+    case "off":
+      return raw;
+    default:
+      return void 0;
+  }
+}
+function resolveRepeatGuardMode(store) {
+  const saved = store?.getDaemonControl?.(LOOP_SETTINGS_KEY);
+  if (!saved || typeof saved !== "object")
+    return DEFAULT_REPEAT_GUARD_MODE;
+  return parseRepeatGuardMode(saved.repeatGuard) ?? DEFAULT_REPEAT_GUARD_MODE;
+}
+function classifyModelTier(input) {
+  const model = norm(input.modelName);
+  const adapter = norm(input.adapterName);
+  const provider = norm(input.providerId);
+  const kind = norm(input.providerKind);
+  if (isHeuristicMarker(adapter) || isHeuristicMarker(kind) || isHeuristicMarker(model)) {
+    return "weak";
+  }
+  if (isHeuristicMarker(provider) && model === "")
+    return "weak";
+  const named = model || adapter;
+  if (named && SIZE_TOKEN.test(named))
+    return "weak";
+  return "strong";
+}
+function readRef(raw) {
+  if (typeof raw === "string") {
+    const modelId2 = raw.trim();
+    return modelId2 ? { modelId: modelId2 } : {};
+  }
+  if (!raw || typeof raw !== "object")
+    return {};
+  const record = raw;
+  const providerId = typeof record.providerId === "string" ? record.providerId.trim() : "";
+  const modelId = typeof record.modelId === "string" ? record.modelId.trim() : "";
+  return {
+    ...providerId ? { providerId } : {},
+    ...modelId ? { modelId } : {}
+  };
+}
+function modelIdentity(input) {
+  const meta = input.metadata ?? void 0;
+  const override = readRef(meta?.modelOverride);
+  const ref = readRef(meta?.modelRef);
+  const provider = meta?.provider;
+  let providerKind;
+  if (provider && typeof provider === "object") {
+    const kind = provider.kind;
+    if (typeof kind === "string")
+      providerKind = kind;
+  }
+  const explicit = (input.modelName ?? "").trim();
+  return {
+    modelName: explicit || override.modelId || ref.modelId,
+    adapterName: input.adapterName,
+    providerId: override.providerId || ref.providerId,
+    providerKind
+  };
+}
+function repeatLimitsActive(mode, tier) {
+  switch (mode) {
+    case "off":
+      return false;
+    case "all":
+      return true;
+    case "weak":
+      return tier === "weak";
+    default: {
+      const unreachable = mode;
+      return unreachable;
+    }
+  }
+}
+function isContentRepeatAbort(reason) {
+  return typeof reason === "string" && reason.startsWith("repeat detection:");
+}
+function loopGuardStopReason(reason) {
+  return isContentRepeatAbort(reason) || reason?.startsWith("unchanged lookup:") ? "repeat_detection" : "tool_loop";
+}
+function applyRepeatGuard(input) {
+  if (!input.decision.abort)
+    return input.decision;
+  const assistantRepeat = typeof input.decision.reason === "string" && input.decision.reason.startsWith("repeated model output");
+  if (!isContentRepeatAbort(input.decision.reason) && !assistantRepeat) {
+    return input.decision;
+  }
+  const active = repeatLimitsActive(resolveRepeatGuardMode(input.store), classifyModelTier(input.identity));
+  if (active)
+    return input.decision;
+  return { abort: false };
+}
 
 // node_modules/@mage-ai-lab/agent-loop/dist/recovery/advisory-grace.js
 function advisoryGraceEnabled(env) {
@@ -1278,7 +1484,7 @@ var AdvisoryGrace = class {
   }
 };
 function formatRecoveryAdvisory(reason) {
-  return `[recovery-advisory] Loop risk detected (${reason}). You have one more chance: change strategy (different tool, smaller step, or ask the user). Repeating the same failing pattern will stop the run.`;
+  return `[recovery-advisory] Loop risk detected (${reason}). You have one more chance: change strategy first (different tool, different input, or a smaller step). Ask the user only when the blocker is something only they can resolve. Repeating the same failing pattern will stop the run.`;
 }
 
 // node_modules/@mage-ai-lab/agent-loop/dist/recovery/advisory-queue.js
@@ -1430,7 +1636,7 @@ function formatRiskAdvisory(signals) {
   return `[risk-advisory]
 Risk signals detected:
 ${lines.join("\n")}
-Change strategy: try a different tool, smaller steps, or ask the user. Avoid repeating the failing pattern.`.slice(0, 600);
+Change strategy first: try a different tool, different input, or smaller steps. Ask the user only when the blocker is something only they can resolve. Avoid repeating the failing pattern.`.slice(0, 600);
 }
 
 // node_modules/@mage-ai-lab/agent-loop/dist/recovery/auto-fork.js
@@ -1694,10 +1900,6 @@ function createTurnRecoveryState() {
 function toolCallParts(parts) {
   return parts.filter((p) => p.type === "tool_call");
 }
-function hasIncompleteToolCalls(parts) {
-  const calls = toolCallParts(parts);
-  return calls.some((c) => !c.toolCallId || !c.name);
-}
 function hasAssistantText(parts) {
   return parts.some((p) => (p.type === "text" || p.type === "reasoning") && p.text.trim().length > 0);
 }
@@ -1767,7 +1969,7 @@ function decideTurnRecovery(input) {
     });
   }
   if (truncated) {
-    if (hasIncompleteToolCalls(parts)) {
+    if (calls.length > 0) {
       if (input.state.protocolRetries < MAX_PROTOCOL_RETRIES) {
         input.state.protocolRetries += 1;
         return { action: "retry-same-input" };
@@ -1796,7 +1998,22 @@ function noteCriticalHit(state) {
   return { action: "continue" };
 }
 
+// node_modules/@mage-ai-lab/agent-loop/dist/turn/turn-start-trace.js
+function turnStartTraceData(input) {
+  const data = {
+    turn: input.turn,
+    adapter: input.adapterName,
+    tools: [...input.toolNames]
+  };
+  if (input.modelName)
+    data.model = input.modelName;
+  if (input.promptCacheKey)
+    data.promptCacheKey = input.promptCacheKey;
+  return data;
+}
+
 // node_modules/@mage-ai-lab/agent-loop/dist/session/run-outcome.js
+var TURN_LIMIT_REASON = "max_turns";
 var RUN_OUTCOME_METADATA_KEY = "outcome";
 function buildRunOutcome(input) {
   const outcome = { kind: input.kind, reason: input.reason };
@@ -1804,79 +2021,60 @@ function buildRunOutcome(input) {
     outcome.failureStage = input.failureStage;
   if (input.rewind)
     outcome.rewind = input.rewind;
+  if (input.answered === true && input.reason === TURN_LIMIT_REASON)
+    outcome.answered = true;
   return outcome;
 }
-function runOutcomeFromEnd(input) {
-  const reason = input.reason;
-  const rewind = input.rewind;
-  if (reason === "abort" || reason === "closed" || reason === "user_abort") {
-    return buildRunOutcome({
-      kind: "aborted",
-      reason,
-      failureStage: input.failureStage ?? "host",
-      rewind
-    });
+var ABORT_REASONS = /* @__PURE__ */ new Set(["abort", "closed", "user_abort"]);
+var RECOVERY_REASONS = /* @__PURE__ */ new Set([
+  "empty_assistant",
+  "empty_tool_calls",
+  "leaked_tool_call",
+  "truncated_tool_call",
+  "content_filter",
+  "repetition",
+  "reasoning_spin",
+  "loop_guard_critical"
+]);
+var TOOL_REASONS = /* @__PURE__ */ new Set(["tool_loop", "repeat_detection", "missing_assistant"]);
+var FAILED_REASON_STAGE = /* @__PURE__ */ new Map([["before_turn_blocked", "host"], ["rewound", "rewind"]]);
+function outcomeFromReason(input) {
+  const { reason, rewind } = input;
+  if (ABORT_REASONS.has(reason)) {
+    return buildRunOutcome({ kind: "aborted", reason, failureStage: input.failureStage ?? "host", rewind });
   }
   if (reason === "waiting_approval") {
-    return buildRunOutcome({
-      kind: "waiting_approval",
-      reason,
-      failureStage: input.failureStage ?? "approval",
-      rewind
-    });
+    return buildRunOutcome({ kind: "waiting_approval", reason, failureStage: input.failureStage ?? "approval", rewind });
   }
-  if (reason === "empty_assistant" || reason === "empty_tool_calls" || reason === "leaked_tool_call" || reason === "truncated_tool_call" || reason === "content_filter" || reason === "repetition" || reason === "reasoning_spin" || reason === "loop_guard_critical") {
-    return buildRunOutcome({
-      kind: input.sessionStatus === "failed" ? "failed" : "idle",
-      reason,
-      failureStage: input.failureStage ?? "recovery",
-      rewind
-    });
+  const stopped = input.sessionStatus === "failed" ? "failed" : "idle";
+  if (RECOVERY_REASONS.has(reason)) {
+    return buildRunOutcome({ kind: stopped, reason, failureStage: input.failureStage ?? "recovery", rewind });
   }
-  if (reason === "tool_loop" || reason === "missing_assistant") {
-    return buildRunOutcome({
-      kind: input.sessionStatus === "failed" ? "failed" : "idle",
-      reason,
-      failureStage: input.failureStage ?? (reason === "tool_loop" ? "tool" : "model"),
-      rewind
-    });
+  if (TOOL_REASONS.has(reason)) {
+    const stage = reason === "missing_assistant" ? "model" : "tool";
+    return buildRunOutcome({ kind: stopped, reason, failureStage: input.failureStage ?? stage, rewind });
   }
-  if (reason === "before_turn_blocked") {
-    return buildRunOutcome({
-      kind: "failed",
-      reason,
-      failureStage: input.failureStage ?? "host",
-      rewind
-    });
+  const failedStage = FAILED_REASON_STAGE.get(reason);
+  if (failedStage) {
+    return buildRunOutcome({ kind: "failed", reason, failureStage: input.failureStage ?? failedStage, rewind });
   }
-  if (reason === "rewound") {
-    return buildRunOutcome({
-      kind: "failed",
-      reason,
-      failureStage: input.failureStage ?? "rewind",
-      rewind
-    });
-  }
+  return void 0;
+}
+function runOutcomeFromEnd(input) {
+  const decided = outcomeFromReason(input);
+  if (decided)
+    return decided;
+  const { reason, rewind, answered } = input;
   if (input.sessionStatus === "failed") {
-    return buildRunOutcome({
-      kind: "failed",
-      reason,
-      failureStage: input.failureStage ?? "model",
-      rewind
-    });
+    return buildRunOutcome({ kind: "failed", reason, failureStage: input.failureStage ?? "model", rewind });
   }
   if (input.sessionStatus === "completed") {
-    return buildRunOutcome({ kind: "completed", reason, rewind });
+    return buildRunOutcome({ kind: "completed", reason, rewind, answered });
   }
   if (input.sessionStatus === "waiting_approval") {
-    return buildRunOutcome({
-      kind: "waiting_approval",
-      reason,
-      failureStage: input.failureStage ?? "approval",
-      rewind
-    });
+    return buildRunOutcome({ kind: "waiting_approval", reason, failureStage: input.failureStage ?? "approval", rewind });
   }
-  return buildRunOutcome({ kind: "idle", reason, rewind });
+  return buildRunOutcome({ kind: "idle", reason, rewind, answered });
 }
 function mergeOutcomeMetadata(metadata, outcome) {
   return { ...metadata, [RUN_OUTCOME_METADATA_KEY]: outcome };
@@ -1940,18 +2138,29 @@ function decideInterruptResume(input) {
   }
   return { action: "none" };
 }
+function selectExecutableToolCalls(calls, closure, foldUnmatched) {
+  if (!closure?.reported) {
+    const open = new Set(foldUnmatched().map((call) => call.toolCallId));
+    return calls.filter((call) => open.has(call.toolCallId));
+  }
+  if (closure.ids.length === 0)
+    return [...calls];
+  const closed = new Set(closure.ids);
+  return calls.filter((call) => !closed.has(call.toolCallId));
+}
 function unmatchedToolCallsFromFold(folded, allowIds) {
   const open = new Set(unmatchedToolCallIds(folded));
   const allow = allowIds ? new Set(allowIds) : open;
-  const out = [];
+  const latest = /* @__PURE__ */ new Map();
   for (const message of folded) {
     for (const part of message.parts) {
       if (part.type === "tool_call" && open.has(part.toolCallId) && allow.has(part.toolCallId)) {
-        out.push(part);
+        latest.delete(part.toolCallId);
+        latest.set(part.toolCallId, part);
       }
     }
   }
-  return out;
+  return [...latest.values()];
 }
 function asStringArray(raw) {
   if (!Array.isArray(raw))
@@ -1965,10 +2174,12 @@ function textPart(text) {
 }
 function applyClaimedInbox(store, sessionId, items, opts) {
   for (const item of items) {
+    if (item.key && store.foldMessages?.(sessionId).some((message) => message.key === item.key && message.role === item.role && JSON.stringify(message.parts) === JSON.stringify([textPart(item.text), ...item.contextParts ?? []]) && JSON.stringify(message.replyTo) === JSON.stringify(item.replyTo)))
+      continue;
     if (item.key) {
       store.hideByKey?.(sessionId, item.key, opts);
     }
-    store.appendMessage(sessionId, item.role, [textPart(item.text)], item.key ? { key: item.key, expectedWriterRunId: opts?.expectedWriterRunId } : { expectedWriterRunId: opts?.expectedWriterRunId });
+    store.appendMessage(sessionId, item.role, [textPart(item.text), ...item.contextParts ?? []], item.key ? { key: item.key, expectedWriterRunId: opts?.expectedWriterRunId, ...item.replyTo ? { replyTo: item.replyTo } : {} } : { expectedWriterRunId: opts?.expectedWriterRunId, ...item.replyTo ? { replyTo: item.replyTo } : {} });
   }
 }
 function claimAndApplyInbox(store, sessionId, target, opts) {
@@ -2009,6 +2220,11 @@ function latestCheckpoint(metadata) {
   const list = parseCheckpoints(metadata);
   return list[list.length - 1];
 }
+function isClosedBoundary(folded) {
+  if (folded.length === 0)
+    return false;
+  return !isToolWaveOpen(folded);
+}
 function decideRewindTail(input) {
   const toSeq = input.checkpointSeq;
   if (toSeq == null || input.currentSeq <= toSeq) {
@@ -2019,6 +2235,848 @@ function decideRewindTail(input) {
     fromSeq: toSeq + 1,
     toSeq: input.currentSeq
   };
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/types.js
+var DEFAULT_SESSION_CAP = 6;
+var DEFAULT_TURN_CAP = 3;
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/config.js
+function classifyEnablement(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    return "parser_default";
+  const obj = raw;
+  const tagged = obj.enablementSource;
+  if (tagged === "explicit_off")
+    return "explicit_off";
+  if (tagged === "auto_policy")
+    return "auto_policy";
+  if (tagged === "parser_default")
+    return "parser_default";
+  if (tagged === "explicit_on")
+    return obj.enabled === false ? "explicit_off" : "explicit_on";
+  if (obj.enabled === false)
+    return "explicit_off";
+  if (obj.enabled === true)
+    return "explicit_on";
+  return "parser_default";
+}
+function parseCapabilityTiers(raw) {
+  if (raw === void 0 || raw === null) {
+    return {
+      ok: true,
+      resolved: {
+        enabled: false,
+        enablementSource: "parser_default",
+        plannerModel: null,
+        executorModel: null,
+        perSessionCap: DEFAULT_SESSION_CAP,
+        perTurnCap: DEFAULT_TURN_CAP,
+        inheritModelOverride: false
+      }
+    };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return {
+      ok: false,
+      warning: "[CapabilityTiers] Whole-block type error: expected object, ignoring tiers."
+    };
+  }
+  const cfg = raw;
+  let plannerModel = null;
+  let executorModel = null;
+  if (cfg.roles && typeof cfg.roles === "object") {
+    const { plannerModel: pm, executorModel: em } = cfg.roles;
+    if (pm !== void 0 && pm !== null && typeof pm === "string" && pm.length > 0) {
+      plannerModel = pm;
+    }
+    if (em !== void 0 && em !== null && typeof em === "string" && em.length > 0) {
+      executorModel = em;
+    }
+  }
+  let perSessionCap = DEFAULT_SESSION_CAP;
+  let perTurnCap = DEFAULT_TURN_CAP;
+  if (cfg.caps && typeof cfg.caps === "object") {
+    const { perSession, perTurn } = cfg.caps;
+    if (typeof perSession === "number" && perSession > 0) {
+      perSessionCap = Math.floor(perSession);
+    }
+    if (typeof perTurn === "number" && perTurn > 0) {
+      perTurnCap = Math.floor(perTurn);
+    }
+  }
+  if (perTurnCap > perSessionCap) {
+    perTurnCap = perSessionCap;
+  }
+  const inheritModelOverride = Boolean(cfg.inheritModelOverride);
+  const enablementSource = classifyEnablement(cfg);
+  const enabled = enablementSource === "explicit_on";
+  return {
+    ok: true,
+    resolved: {
+      enabled,
+      enablementSource,
+      plannerModel,
+      executorModel,
+      perSessionCap,
+      perTurnCap,
+      inheritModelOverride
+    }
+  };
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/adapter.js
+var TrajectoryHandoffAdapterImpl = class {
+  context;
+  inFlightWrites = /* @__PURE__ */ new Set();
+  constructor(context) {
+    this.context = context;
+  }
+  /**
+   * Handoff mechanism enabled?
+   * Explicit off has highest priority; do not read tiers in that case.
+   * Missing capabilityTiers (config.enabled absent/false) → off.
+   */
+  isEnabled() {
+    const enabled = this.context.config.enabled;
+    return enabled === true;
+  }
+  /**
+   * Get current effective role.
+   */
+  currentRole() {
+    return this.context.currentRole;
+  }
+  /**
+   * Can execute tool in current kernel state?
+   * Single entry for all dynamic tools: batch, MCP, Shell, browser, HTTP, subtasks.
+   */
+  canExecuteTool() {
+    if (!this.isEnabled())
+      return false;
+    const state = this.context.kernelState;
+    return state === "executor_write" || state === "planner_readonly" || state === "planner_repair";
+  }
+  /**
+   * Validate tool call for the single entry point.
+   * Effective permissions = original auth ∩ host phase ∩ current role.
+   * Reject writes in planner_readonly role.
+   *
+   * This is the Q&A-to-work re-check; no "no plan needed" write bypass.
+   * Generic command tools without reliable readonly isolation are disabled in planner.
+   */
+  validateToolCall(toolName, isWrite) {
+    if (!this.canExecuteTool()) {
+      return {
+        allowed: false,
+        reason: `Tool execution not allowed in state: ${this.context.kernelState}`
+      };
+    }
+    const effective = this.computeEffectivePermissions();
+    if (!effective.effective.has(toolName)) {
+      return {
+        allowed: false,
+        reason: `Tool not authorized: ${toolName}. Original: ${effective.originalAuth.has(toolName)}, Host: ${effective.hostPhaseAuth.has(toolName)}, Role: ${effective.roleAuth.has(toolName)}`
+      };
+    }
+    if (isWrite && this.context.currentRole === "planner") {
+      return {
+        allowed: false,
+        reason: `Write operation not allowed in planner role`
+      };
+    }
+    return { allowed: true };
+  }
+  /**
+   * Validate plan edit through PlanStore API.
+   * Plans must be edited via expectedOldVersion + newVersion,
+   * not generic file write.  Conflicts must not silently overwrite.
+   *
+   * This is NOT a generic file write bypass; it's the reserved interface.
+   */
+  validatePlanEdit(oldVersion, newVersion) {
+    if (!this.isEnabled()) {
+      return { allowed: false, reason: "Handoff mechanism is disabled" };
+    }
+    if (!this.context.currentPlan) {
+      return { allowed: false, reason: "No current plan to edit" };
+    }
+    if (oldVersion !== this.context.currentPlan.version) {
+      return {
+        allowed: false,
+        reason: `Plan version conflict: expected ${oldVersion}, current ${this.context.currentPlan.version}`
+      };
+    }
+    if (newVersion <= oldVersion) {
+      return {
+        allowed: false,
+        reason: `Plan version must increment: ${oldVersion} -> ${newVersion}`
+      };
+    }
+    return { allowed: true };
+  }
+  /**
+   * Drain in-flight writes before entering planner role.
+   * Fail-closed if cannot stop safely.
+   *
+   * This must complete before state transition to planner_readonly or planner_repair.
+   */
+  async drainWrites() {
+    if (this.inFlightWrites.size === 0)
+      return;
+    throw new Error(`Failed to drain in-flight writes before planner entry. ${this.inFlightWrites.size} writes still pending. Failing closed to prevent data corruption.`);
+  }
+  /**
+   * Track in-flight write for drain logic.
+   * Called by runtime when tool execution starts.
+   */
+  trackWrite(callId) {
+    this.inFlightWrites.add(callId);
+  }
+  /**
+   * Mark write as complete.
+   * Called by runtime when tool execution completes.
+   */
+  completeWrite(callId) {
+    this.inFlightWrites.delete(callId);
+  }
+  /**
+   * Compute effective permissions: original auth ∩ host phase ∩ current role.
+   */
+  computeEffectivePermissions() {
+    const original = this.context.originalAuth;
+    const hostPhase = this.context.hostPhaseAuth;
+    const role = this.context.roleAuth;
+    const effective = /* @__PURE__ */ new Set();
+    for (const tool of original) {
+      if (hostPhase.has(tool) && role.has(tool)) {
+        effective.add(tool);
+      }
+    }
+    return {
+      originalAuth: original,
+      hostPhaseAuth: hostPhase,
+      roleAuth: role,
+      effective
+    };
+  }
+};
+function createTrajectoryHandoffAdapter(context) {
+  return new TrajectoryHandoffAdapterImpl(context);
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/host-integration.js
+function asRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return void 0;
+  return value;
+}
+function policySource(metadata) {
+  const source = asRecord(metadata?.handoffEnablement)?.source;
+  return typeof source === "string" ? source : void 0;
+}
+function distinguishEnablementSource(metadata) {
+  const tiers = asRecord(metadata?.capabilityTiers);
+  const tierSource = tiers ? classifyEnablement(tiers) : void 0;
+  if (tierSource === "explicit_off")
+    return "explicit_off";
+  const policy = policySource(metadata);
+  const mode = metadata?.taskRunMode ?? metadata?.task_run_mode;
+  if (metadata?.trajectoryHandoff === "off" || mode === "handoff_off" || policy === "explicit_off") {
+    return "explicit_off";
+  }
+  if (metadata?.trajectoryHandoff === "on" || metadata?.trajectoryHandoffExplicit === true || mode === "plan_execute" || tierSource === "explicit_on" || policy === "explicit_on") {
+    return "explicit_on";
+  }
+  if (policy === "auto_policy" || tierSource === "auto_policy")
+    return "auto_policy";
+  return "parser_default";
+}
+function machinePresent(metadata) {
+  if (typeof metadata?.handoffState === "string" && metadata.handoffState.length > 0)
+    return true;
+  return asRecord(metadata?.handoffKernel) !== void 0;
+}
+function handoffRuntimeEnabled(metadata) {
+  if (metadata?.handoffSuspended === "session_cap")
+    return false;
+  const source = distinguishEnablementSource(metadata);
+  if (source === "explicit_on")
+    return true;
+  if (source !== "auto_policy")
+    return false;
+  if (metadata?.handoffWorkTurn === true)
+    return true;
+  return machinePresent(metadata);
+}
+function handoffAutoEligible(metadata) {
+  if (!metadata || metadata.handoffSuspended === "session_cap")
+    return false;
+  if (metadata.handoffWorkTurn === true || machinePresent(metadata))
+    return false;
+  return distinguishEnablementSource(metadata) === "auto_policy";
+}
+function handoffRuntimePath(metadata) {
+  if (handoffRuntimeEnabled(metadata))
+    return "in_machine";
+  if (handoffAutoEligible(metadata))
+    return "auto_eligible";
+  return "mechanism_off";
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/runtime/run-profile.js
+var TASK_MODES = [
+  "computer",
+  "browser",
+  "auto",
+  "deep_research",
+  "planner",
+  "teams",
+  "fast",
+  "dynamic_workflow"
+];
+var RESEARCH_TOOLS = ["web_search", "web_fetch"];
+var COMPUTER_USE_TOOLS = [
+  "computer_screenshot",
+  "computer_click",
+  "computer_type",
+  "computer_key",
+  "computer_move"
+];
+var TASK_MODE_SET = new Set(TASK_MODES);
+function isResearchTool(name) {
+  return RESEARCH_TOOLS.includes(name) || name.startsWith("research_");
+}
+function isComputerUseTool(name) {
+  return COMPUTER_USE_TOOLS.includes(name) || name.startsWith("computer_");
+}
+function applyRunProfileToTools(tools, profile, assembled) {
+  const layer = profile.toolPolicyLayer;
+  const deny2 = new Set(layer?.denylist ?? []);
+  const allow = layer?.allowlist ? new Set(layer.allowlist) : void 0;
+  const forced = new Set(layer?.forceVisible ?? []);
+  let next = tools.filter((tool) => {
+    if (deny2.has(tool.name))
+      return false;
+    if (profile.mode === "deep_research" && isComputerUseTool(tool.name))
+      return false;
+    if (allow && !allow.has(tool.name) && !forced.has(tool.name))
+      return false;
+    return true;
+  });
+  const source = assembled ?? tools;
+  for (const tool of source) {
+    if (!forced.has(tool.name) && !(profile.mode === "deep_research" && isResearchTool(tool.name))) {
+      continue;
+    }
+    if (deny2.has(tool.name))
+      continue;
+    if (!next.some((t) => t.name === tool.name))
+      next.push(tool);
+  }
+  return next;
+}
+function trajectoryHandoffGateFromMetadata(metadata) {
+  const path = handoffRuntimePath(metadata);
+  return {
+    enabled: path === "in_machine",
+    enablementSource: distinguishEnablementSource(metadata),
+    path
+  };
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/pattern-b/paths.js
+var POSIX_SEP = "/";
+function isAbsolutePosix(path) {
+  return path.startsWith(POSIX_SEP);
+}
+function normalizePosix(path) {
+  const hadTrailingSlash = path.endsWith(POSIX_SEP);
+  const out = [];
+  for (const part of path.split(POSIX_SEP)) {
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(part);
+  }
+  if (out.length === 0)
+    return POSIX_SEP;
+  const normalized = POSIX_SEP + out.join(POSIX_SEP);
+  return hadTrailingSlash ? `${normalized}${POSIX_SEP}` : normalized;
+}
+function canonicalPath(input) {
+  if (typeof input !== "string")
+    return void 0;
+  const trimmed = input.trim();
+  if (!trimmed || !isAbsolutePosix(trimmed))
+    return void 0;
+  const norm2 = normalizePosix(trimmed);
+  if (norm2.length > 1 && norm2.endsWith(POSIX_SEP))
+    return norm2.slice(0, -1);
+  return norm2;
+}
+function pathContained(root, target) {
+  const base = canonicalPath(root);
+  const leaf = canonicalPath(target);
+  if (!base || !leaf)
+    return false;
+  return leaf === base || leaf.startsWith(base + POSIX_SEP);
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/pattern-b/types.js
+var WRITE_CHANNELS = [
+  "tool",
+  "shell",
+  "mcp",
+  "browser",
+  "http",
+  "subagent",
+  "dynamic",
+  "batch"
+];
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/pattern-b/boundary.js
+function deny(code, reason) {
+  return { allowed: false, code, reason };
+}
+function earlyWriteDenial(admission) {
+  if (admission.workerClaimsSkipGate === true) {
+    return deny("self_reported", "Worker self-report cannot skip the gate");
+  }
+  if (admission.hostOperation === "create" || admission.hostOperation === "integrate" || admission.hostOperation === "cleanup") {
+    return deny("host_operation", "Create, integrate, and cleanup are host-controlled");
+  }
+  if (admission.sharedScopeChange === true) {
+    return deny("shared_scope_escalated", "Shared scope changes are refused locally");
+  }
+  return void 0;
+}
+function resolveOwnBoundary(registry, admission) {
+  const matches = registry.boundaries.filter((boundary) => boundary.identity.runId === admission.actor.runId && boundary.identity.workerId === admission.actor.workerId && boundary.identity.taskScope === admission.actor.taskScope);
+  const own = matches.length === 1 ? matches[0] : void 0;
+  if (!own)
+    return deny("not_enforced", "Host boundary enforcement is required");
+  if (own.identity.planId !== void 0 && admission.actor.planId !== own.identity.planId) {
+    return deny("outside_writable", "Write path is outside the worker writable root");
+  }
+  if (own.identity.planVersion !== void 0 && admission.actor.planVersion !== own.identity.planVersion) {
+    return deny("outside_writable", "Write path is outside the worker writable root");
+  }
+  if (admission.role === "planner" || own.role === "planner") {
+    return deny("planner_write", "Planner role cannot write");
+  }
+  if (own.effectiveWrite !== true) {
+    return deny("permission_denied", "Write is outside the permission intersection");
+  }
+  return own;
+}
+function canonicalizeRoots(registry, own) {
+  const canonicalize = registry.canonicalize;
+  if (typeof canonicalize !== "function") {
+    return deny("not_enforced", "Host boundary enforcement is required");
+  }
+  try {
+    const canonicalOwn = canonicalize(own.writableRoot);
+    if (typeof canonicalOwn !== "string")
+      return deny("not_enforced", "Host boundary enforcement is required");
+    const otherRoots = [];
+    const mounts = [];
+    const shared = [];
+    for (const boundary of registry.boundaries) {
+      if (boundary === own)
+        continue;
+      const canonical = canonicalize(boundary.writableRoot);
+      if (typeof canonical !== "string")
+        return deny("not_enforced", "Host boundary enforcement is required");
+      otherRoots.push(canonical);
+    }
+    for (const mount of registry.readOnlyMounts) {
+      const canonical = canonicalize(mount.path);
+      if (typeof canonical !== "string")
+        return deny("not_enforced", "Host boundary enforcement is required");
+      mounts.push(canonical);
+    }
+    for (const target of registry.sharedTargets) {
+      const canonical = canonicalize(target.path);
+      if (typeof canonical !== "string")
+        return deny("not_enforced", "Host boundary enforcement is required");
+      shared.push(canonical);
+    }
+    return { ownRoot: canonicalOwn, otherRoots, mounts, shared };
+  } catch {
+    return deny("not_enforced", "Host boundary enforcement is required");
+  }
+}
+function decideAdmittedPath(admitted, roots) {
+  if (roots.mounts.some((root) => pathContained(root, admitted))) {
+    return deny("read_only_mount", "Read-only mounts cannot be written");
+  }
+  if (roots.shared.some((root) => pathContained(root, admitted))) {
+    return deny("shared_target", "Shared integration target cannot be written by a worker");
+  }
+  if (roots.otherRoots.some((root) => pathContained(root, admitted))) {
+    return deny("other_worker", "Another worker workspace cannot be written");
+  }
+  if (pathContained(roots.ownRoot, admitted))
+    return { allowed: true };
+  return deny("outside_writable", "Write path is outside the worker writable root");
+}
+function admitWorkerWrite(registry, admission) {
+  const early = earlyWriteDenial(admission);
+  if (early)
+    return early;
+  if (registry.hostEnforced !== true || typeof registry.canonicalize !== "function") {
+    return deny("not_enforced", "Host boundary enforcement is required");
+  }
+  const canonicalize = registry.canonicalize;
+  let admitted;
+  try {
+    const value = canonicalize(admission.path);
+    if (typeof value !== "string")
+      return deny("outside_writable", "Write path is outside the worker writable root");
+    admitted = value;
+  } catch {
+    return deny("not_enforced", "Host boundary enforcement is required");
+  }
+  if (!WRITE_CHANNELS.some((channel) => channel === admission.channel)) {
+    return deny("unscoped_channel", "Unscoped write channel");
+  }
+  const own = resolveOwnBoundary(registry, admission);
+  if ("allowed" in own)
+    return own;
+  const roots = canonicalizeRoots(registry, own);
+  if ("allowed" in roots)
+    return roots;
+  return decideAdmittedPath(admitted, roots);
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/pattern-b/host-registry.js
+var registries = /* @__PURE__ */ new Map();
+function readHostBoundary(key) {
+  return registries.get(key);
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/pattern-b/tool-gate.js
+var PATH_KEYS = {
+  path: true,
+  paths: true,
+  file_path: true,
+  filePath: true,
+  target: true,
+  destination: true,
+  dest: true,
+  cwd: true,
+  workdir: true
+};
+function asRecord2(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return void 0;
+  return value;
+}
+function controlledName(name) {
+  const normalized = name.toLowerCase();
+  if (normalized.includes("sandbox"))
+    return false;
+  return normalized.includes("bash") || normalized.includes("shell") || normalized.includes("browser") || normalized.includes("http") || normalized.includes("mcp");
+}
+function hostOperationOf(name, call) {
+  if (call?.hostOperation)
+    return call.hostOperation;
+  const normalized = name.toLowerCase();
+  if (normalized.includes("cleanup") || normalized.includes("clean_workspace"))
+    return "cleanup";
+  if (normalized.includes("integrate"))
+    return "integrate";
+  if (normalized.includes("create_workspace") || normalized.includes("createworkspace"))
+    return "create";
+  return void 0;
+}
+function writeLike(tool, call) {
+  if (call?.hostOperation || call?.sharedScopeChange || call?.channel)
+    return true;
+  if (hostOperationOf(tool.name))
+    return true;
+  if (tool.access === "read" && tool.sideEffectLevel !== "command" && tool.sideEffectLevel !== "write" && !controlledName(tool.name)) {
+    return false;
+  }
+  return true;
+}
+function channelOf(name, call) {
+  if (typeof call?.channel === "string" && call.channel.length > 0)
+    return call.channel;
+  const normalized = name.toLowerCase();
+  if (normalized.includes("bash") || normalized.includes("shell"))
+    return "shell";
+  if (normalized.includes("mcp"))
+    return "mcp";
+  if (normalized.includes("browser"))
+    return "browser";
+  if (normalized.includes("http"))
+    return "http";
+  if (normalized.includes("subagent") || normalized.includes("delegate"))
+    return "subagent";
+  if (normalized.includes("dynamic"))
+    return "dynamic";
+  if (normalized.includes("batch"))
+    return "batch";
+  return "tool";
+}
+function absoluteTokens(value) {
+  const found = [];
+  for (const match of value.matchAll(/(?:^|[\s"'`=])(\/[^\s"'`$;&|<>]+)/g)) {
+    const token = match[1];
+    if (token && token.length > 1)
+      found.push(token);
+  }
+  return found;
+}
+function collectPaths(input) {
+  const record = asRecord2(input);
+  if (!record)
+    return [];
+  const found = [];
+  const add = (key, value) => {
+    if (PATH_KEYS[key] === true && value.length > 0)
+      found.push(value);
+    for (const token of absoluteTokens(value))
+      found.push(token);
+  };
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === "string")
+      add(key, value);
+    if (!Array.isArray(value))
+      continue;
+    for (const item of value)
+      if (typeof item === "string")
+        add(key, item);
+  }
+  return found;
+}
+function ownBoundary(registry, metadata) {
+  const runId = metadata.patternBRunId;
+  const workerId = metadata.patternBWorkerId;
+  const taskScope = metadata.patternBTaskScope;
+  if (typeof runId !== "string" || typeof workerId !== "string" || typeof taskScope !== "string")
+    return void 0;
+  return registry.boundaries.find((boundary) => boundary.identity.runId === runId && boundary.identity.workerId === workerId && boundary.identity.taskScope === taskScope);
+}
+function roleFor(own, metadata, call) {
+  if (own.role === "planner" || metadata.patternBRole === "planner" || call?.role === "planner")
+    return "planner";
+  return own.role;
+}
+function planMismatch(own, metadata) {
+  if (own.identity.planId !== void 0 && metadata.patternBPlanId !== own.identity.planId)
+    return true;
+  return own.identity.planVersion !== void 0 && metadata.patternBPlanVersion !== own.identity.planVersion;
+}
+function admissionFor(own, metadata, tool, call, path) {
+  const sharedScope = call?.sharedScopeChange === true || asRecord2(call?.input)?.sharedScopeChange === true;
+  const admission = {
+    actor: { ...own.identity },
+    role: roleFor(own, metadata, call),
+    channel: channelOf(tool.name, call),
+    path,
+    workerClaimsIsolation: call?.workerClaimsIsolation === true,
+    workerClaimsSharedWrite: call?.workerClaimsSharedWrite === true,
+    workerClaimsSkipGate: call?.workerClaimsSkipGate === true
+  };
+  const operation = hostOperationOf(tool.name, call);
+  if (operation)
+    admission.hostOperation = operation;
+  if (sharedScope)
+    admission.sharedScopeChange = true;
+  return admission;
+}
+function denyPatternBTool(session, tool, call) {
+  const metadata = asRecord2(session?.metadata);
+  if (!metadata || typeof metadata.patternBHostKey !== "string")
+    return void 0;
+  const registry = readHostBoundary(metadata.patternBHostKey);
+  if (!registry || registry.hostEnforced !== true || typeof registry.canonicalize !== "function") {
+    return writeLike(tool, call) ? "Pattern B isolation is not host-enforced" : void 0;
+  }
+  if (!writeLike(tool, call))
+    return void 0;
+  const own = ownBoundary(registry, metadata);
+  if (!own || planMismatch(own, metadata))
+    return "Pattern B isolation is not host-enforced";
+  const paths = collectPaths(call?.input);
+  const targets = paths.length > 0 ? paths : [""];
+  for (const path of targets) {
+    const decision = admitWorkerWrite(registry, admissionFor(own, metadata, tool, call, path));
+    if (!decision.allowed)
+      return decision.reason;
+  }
+  return void 0;
+}
+function patternBBoundaryPending(metadata, pending) {
+  if (!metadata || typeof metadata.patternBHostKey !== "string" || !pending)
+    return void 0;
+  const entering = metadata.handoffEntering;
+  const state = typeof metadata.handoffState === "string" ? metadata.handoffState : "";
+  const planner = state === "planner_readonly" || state === "planner_repair" || entering === "planner_readonly" || entering === "planner_repair";
+  if (!planner && metadata.patternBBoundaryCross !== true)
+    return void 0;
+  return { ok: false, reason: "in-flight writes still pending across Pattern B boundary" };
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/tool-entry.js
+var ALL_PERMS = ["read", "write", "command", "delegate", "external"];
+var PLANNER_STATE = { planner_readonly: true, planner_repair: true };
+var EXECUTOR_STATE = { executor_write: true };
+var KNOWN_STATE = {
+  planner_readonly: true,
+  plan_ready: true,
+  executor_write: true,
+  planner_repair: true,
+  awaiting_coordinator: true,
+  answered: true,
+  done: true,
+  capped: true,
+  failed: true,
+  cancelled: true,
+  timed_out: true
+};
+var inflightWrites = /* @__PURE__ */ new Map();
+function asRecord3(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return void 0;
+  return value;
+}
+function trajectoryToolPermission(tool) {
+  const access = tool.access;
+  const side = tool.sideEffectLevel;
+  if (access === "delegate")
+    return "delegate";
+  if (access === "bash" || access === "network")
+    return "command";
+  if (access === "edit")
+    return "write";
+  if (access === "other")
+    return "command";
+  if (access === "read" && (side === "none" || side == null))
+    return "read";
+  if (side === "none")
+    return "read";
+  if (side === "workspace" || side === "system")
+    return "write";
+  return "command";
+}
+function originalPerms(metadata) {
+  const raw = metadata?.originalPerms;
+  if (!Array.isArray(raw))
+    return new Set(ALL_PERMS);
+  const picked = raw.filter((item) => item === "read" || item === "write" || item === "command" || item === "delegate" || item === "external");
+  return new Set(picked);
+}
+function handoffStateOf(metadata) {
+  return typeof metadata?.handoffState === "string" ? metadata.handoffState : "planner_readonly";
+}
+function noteTrajectoryWrite(sessionId, callId) {
+  let pending = inflightWrites.get(sessionId);
+  if (!pending) {
+    pending = /* @__PURE__ */ new Set();
+    inflightWrites.set(sessionId, pending);
+  }
+  pending.add(callId);
+}
+function trajectoryWritesPending(sessionId) {
+  const pending = inflightWrites.get(sessionId);
+  return Boolean(pending && pending.size > 0);
+}
+function finishTrajectoryWrite(sessionId, callId) {
+  inflightWrites.get(sessionId)?.delete(callId);
+}
+function beginTrajectoryWrite(session, tool, callId) {
+  if (!session)
+    return false;
+  const metadata = asRecord3(session.metadata);
+  if (!trajectoryHandoffGateFromMetadata(metadata).enabled)
+    return false;
+  if (trajectoryToolPermission(tool) === "read")
+    return false;
+  noteTrajectoryWrite(session.id, callId);
+  return true;
+}
+function denyTrajectoryTool(session, tool, call) {
+  const isolated = denyPatternBTool(session, tool, call);
+  if (isolated)
+    return isolated;
+  const metadata = asRecord3(session?.metadata);
+  if (!trajectoryHandoffGateFromMetadata(metadata).enabled)
+    return void 0;
+  const state = handoffStateOf(metadata);
+  if (!Object.prototype.hasOwnProperty.call(KNOWN_STATE, state)) {
+    return `Tool execution not allowed in handoff state ${state}`;
+  }
+  const planner = state in PLANNER_STATE;
+  const executor = state in EXECUTOR_STATE;
+  if (!planner && !executor)
+    return `Tool execution not allowed in handoff state ${state}`;
+  const original = originalPerms(metadata);
+  const phase = typeof metadata?.hostPhase === "string" ? metadata.hostPhase : "ordinary";
+  if (tool.planStore?.kind === "plan_state" && (planner || executor) && phase !== "research" && phase !== "review") {
+    return void 0;
+  }
+  const phaseSet = phase === "research" || phase === "review" ? /* @__PURE__ */ new Set(["read"]) : new Set(original);
+  const roleSet = planner ? /* @__PURE__ */ new Set(["read"]) : new Set(original);
+  const perm = trajectoryToolPermission(tool);
+  const adapter = createTrajectoryHandoffAdapter({
+    kernelState: state,
+    originalAuth: original,
+    hostPhaseAuth: phaseSet,
+    roleAuth: roleSet,
+    currentRole: planner ? "planner" : "executor",
+    config: { enabled: true },
+    currentPlan: null
+  });
+  const decision = adapter.validateToolCall(perm, perm !== "read");
+  return decision.allowed ? void 0 : decision.reason ?? "tool denied by trajectory handoff";
+}
+async function prepareTrajectoryToolWave(session) {
+  const metadata = asRecord3(session.metadata);
+  const boundary = patternBBoundaryPending(metadata, trajectoryWritesPending(session.id));
+  if (boundary)
+    return boundary;
+  if (!trajectoryHandoffGateFromMetadata(metadata).enabled)
+    return { ok: true };
+  const state = handoffStateOf(metadata);
+  const entering = metadata?.handoffEntering;
+  const planner = state in PLANNER_STATE || entering === "planner_readonly" || entering === "planner_repair";
+  if (!planner)
+    return { ok: true };
+  const pending = inflightWrites.get(session.id);
+  if (!pending || pending.size === 0)
+    return { ok: true };
+  const adapter = createTrajectoryHandoffAdapter({
+    kernelState: "executor_write",
+    originalAuth: /* @__PURE__ */ new Set(["write"]),
+    hostPhaseAuth: /* @__PURE__ */ new Set(["write"]),
+    roleAuth: /* @__PURE__ */ new Set(["write"]),
+    currentRole: "executor",
+    config: { enabled: true },
+    currentPlan: null
+  });
+  for (const callId of pending)
+    adapter.trackWrite(callId);
+  try {
+    await adapter.drainWrites();
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+  return { ok: false, reason: `in-flight writes still pending: ${pending.size}` };
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/runtime/tool-loop.js
+function toolWaveHeldForApproval(results) {
+  return results.some((result) => result.hold === "approval");
+}
+function resultsToPersist(results) {
+  return results.filter((result) => result.hold !== "approval");
 }
 
 // node_modules/@mage-ai-lab/agent-loop/dist/model/token-cost.js
@@ -2097,6 +3155,47 @@ function promoteAssistantReasoning(parts) {
   return { parts: next, promoted: true };
 }
 
+// node_modules/@mage-ai-lab/agent-loop/dist/turn/startup-input-cache.js
+var CACHE_MAX = 512;
+var cache = /* @__PURE__ */ new Map();
+function mix(hash, value) {
+  return Math.imul(hash ^ value, 16777619);
+}
+function mixText(hash, text) {
+  let next = mix(hash, text.length);
+  const step = Math.max(1, Math.floor(text.length / 16));
+  for (let i = 0; i < text.length; i += step)
+    next = mix(next, text.charCodeAt(i));
+  return next;
+}
+function messageViewKey(messages) {
+  let hash = 2166136261;
+  hash = mix(hash, messages.length);
+  for (const message of messages) {
+    hash = mix(hash, message.seq ?? 0);
+    hash = mixText(hash, message.id);
+    hash = mixText(hash, message.role);
+    hash = mixText(hash, message.key ?? "");
+    for (const part of message.parts)
+      hash = mixText(hash, JSON.stringify(part));
+  }
+  return (hash >>> 0).toString(16);
+}
+function readPrepareSlice(sessionId) {
+  return cache.get(sessionId);
+}
+function writePrepareSlice(sessionId, slice) {
+  if (!cache.has(sessionId) && cache.size >= CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest)
+      cache.delete(oldest);
+  }
+  cache.set(sessionId, slice);
+}
+function copyView(messages) {
+  return messages.map((message) => ({ ...message, parts: [...message.parts] }));
+}
+
 // node_modules/@mage-ai-lab/agent-loop/dist/turn/prepare-turn-input.js
 var WORKING_LOG_APPENDIX_HEAD = "[working log \u2014 durable trail across compaction; full transcripts at the referenced paths]";
 function formatWorkingLogAppendix(tail) {
@@ -2146,39 +3245,96 @@ function applyMemoryAppendixToMessages(messages, appendix) {
     ...msg,
     parts: [{ type: "text", text: `${appendix}
 
+[End of reference context. The current user message follows.]
 ` }, ...msg.parts]
   };
   return out;
 }
-function textPart2(text) {
-  return { type: "text", text };
-}
-function applyClaimedInbox2(store, sessionId, items) {
-  for (const item of items) {
-    if (item.key)
-      store.hideByKey?.(sessionId, item.key);
-    store.appendMessage(sessionId, item.role, [textPart2(item.text)], item.key ? { key: item.key } : void 0);
+function traceStartup(deps, sessionId, payload) {
+  try {
+    deps.emitTrace?.(sessionId, { kind: "startup_phase", payload, data: payload });
+  } catch {
   }
 }
+function applyClaimedInbox2(store, sessionId, items) {
+  applyClaimedInbox(store, sessionId, items);
+}
 async function prepareTurnInput(sessionId, deps) {
+  const turnStarted = Date.now();
   const session = deps.store.getSession(sessionId);
   if (!session) {
     throw new Error(`Session ${sessionId} not found`);
   }
+  const compactStarted = Date.now();
   await deps.autoCompact(session);
+  traceStartup(deps, sessionId, {
+    phase: "auto_compact",
+    scope: "prepare",
+    durationMs: Date.now() - compactStarted
+  });
   const claimedInbox = deps.claimNextStep(sessionId);
   if (claimedInbox.length > 0) {
     applyClaimedInbox2(deps.store, sessionId, claimedInbox);
   }
+  const foldStarted = Date.now();
   const folded = deps.store.foldMessages(sessionId);
+  const seqs = folded.map((m) => m.seq).filter((s) => typeof s === "number");
+  traceStartup(deps, sessionId, {
+    phase: "fold_messages",
+    scope: "prepare",
+    durationMs: Date.now() - foldStarted,
+    messageCount: folded.length,
+    ...seqs.length > 0 ? { hiddenCount: Math.max(...seqs) - Math.min(...seqs) + 1 - folded.length } : {}
+  });
+  const budgetStarted = Date.now();
   const budgeted = deps.applyFoldBudget ? deps.applyFoldBudget(session, folded) : folded;
-  const prepared = await deps.prepareView(session, budgeted);
+  traceStartup(deps, sessionId, {
+    phase: "fold_budget",
+    scope: "prepare",
+    durationMs: Date.now() - budgetStarted,
+    messageCount: budgeted.length
+  });
+  const viewKey = messageViewKey(budgeted);
+  const cached = readPrepareSlice(sessionId);
+  let prepared;
+  if (cached?.viewKey === viewKey) {
+    prepared = copyView(cached.view);
+  } else {
+    const viewStarted = Date.now();
+    prepared = await deps.prepareView(session, budgeted);
+    traceStartup(deps, sessionId, {
+      phase: "prepare_view",
+      scope: "prepare",
+      durationMs: Date.now() - viewStarted,
+      messageCount: prepared.length
+    });
+  }
   const query = lastUserQueryFromMessages(prepared);
-  const compiled = await Promise.resolve(deps.buildAppendix(session, { query, viewMessages: prepared }));
-  const workingLogTail = !compiled.trim() && deps.readWorkingLogTail ? deps.readWorkingLogTail(sessionId) : "";
-  const appendix = resolvePackedAppendix(compiled, workingLogTail);
+  const appendixKey = `${viewKey}\0${query}\0${session.summary ?? ""}\0${session.updatedAt}`;
+  let appendix;
+  if (cached?.appendixKey === appendixKey) {
+    appendix = cached.appendix;
+  } else {
+    const appendixStarted = Date.now();
+    const compiled = await Promise.resolve(deps.buildAppendix(session, { query, viewMessages: prepared }));
+    const workingLogTail = !compiled.trim() && deps.readWorkingLogTail ? deps.readWorkingLogTail(sessionId) : "";
+    appendix = resolvePackedAppendix(compiled, workingLogTail);
+    traceStartup(deps, sessionId, {
+      phase: "memory_appendix",
+      scope: "prepare",
+      durationMs: Date.now() - appendixStarted,
+      messageCount: prepared.length
+    });
+  }
+  writePrepareSlice(sessionId, { viewKey, view: copyView(prepared), appendixKey, appendix });
   const messages = applyMemoryAppendixToMessages(prepared, appendix);
   const foldSeqs = folded.map((m) => m.seq).filter((s) => typeof s === "number");
+  traceStartup(deps, sessionId, {
+    phase: "prepare_turn",
+    scope: "prepare",
+    durationMs: Date.now() - turnStarted,
+    messageCount: messages.length
+  });
   return {
     session: deps.store.getSession(sessionId) ?? session,
     messages,
@@ -2186,6 +3342,140 @@ async function prepareTurnInput(sessionId, deps) {
     foldSeqs,
     claimedInbox
   };
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/turn/startup-phase.js
+var PHASE_NAME = /^[a-z0-9_]+$/;
+function createKernelStartupTrace(sessionId, emitTrace, startedAt = Date.now()) {
+  return { sessionId, startedAt, phases: {}, readySent: false, emitTrace };
+}
+function sanitizeKernelStartupPhase(payload) {
+  const out = {
+    phase: payload.phase,
+    scope: payload.scope,
+    durationMs: Math.max(0, Math.round(payload.durationMs))
+  };
+  for (const key of ["turn", "messageCount", "toolCount", "skillCount", "endpointCount", "slowestMs"]) {
+    const value = payload[key];
+    if (typeof value === "number" && Number.isFinite(value))
+      out[key] = Math.round(value);
+  }
+  if (typeof payload.slowest === "string" && PHASE_NAME.test(payload.slowest))
+    out.slowest = payload.slowest;
+  if (payload.phases && typeof payload.phases === "object") {
+    const phases = {};
+    for (const [name, ms] of Object.entries(payload.phases)) {
+      if (PHASE_NAME.test(name) && typeof ms === "number" && Number.isFinite(ms)) {
+        phases[name] = Math.max(0, Math.round(ms));
+      }
+    }
+    out.phases = phases;
+  }
+  return out;
+}
+function emitKernelStartupPhase(trace, payload) {
+  try {
+    const fields = { ...sanitizeKernelStartupPhase(payload) };
+    trace.emitTrace?.(trace.sessionId, { kind: "startup_phase", data: fields, payload: fields });
+  } catch {
+  }
+}
+function remember(trace, phase, durationMs) {
+  const ms = Math.max(0, Math.round(durationMs));
+  if (!trace.readySent)
+    trace.phases[phase] = ms;
+  return ms;
+}
+function recordPhase(trace, phase, durationMs, extra) {
+  if (trace.readySent)
+    return;
+  const ms = remember(trace, phase, durationMs);
+  emitKernelStartupPhase(trace, { phase, scope: "kernel", turn: 0, ...extra, durationMs: ms });
+}
+async function timeKernelPhase(trace, phase, run, extra) {
+  if (trace.readySent)
+    return await run();
+  const started = Date.now();
+  try {
+    return await run();
+  } finally {
+    recordPhase(trace, phase, Date.now() - started, extra);
+  }
+}
+async function timeOptionalKernelPhase(trace, phase, run, extra) {
+  if (!run) {
+    recordPhase(trace, phase, 0, extra);
+    return void 0;
+  }
+  return timeKernelPhase(trace, phase, run, extra);
+}
+function slowestKernelPhase(phases) {
+  let slowest;
+  let slowestMs = -1;
+  for (const [name, ms] of Object.entries(phases)) {
+    if (name === "ready")
+      continue;
+    if (ms >= slowestMs) {
+      slowest = name;
+      slowestMs = ms;
+    }
+  }
+  return { slowest, slowestMs };
+}
+function emitKernelReady(trace) {
+  if (trace.readySent)
+    return;
+  const found = slowestKernelPhase(trace.phases);
+  const slowest = found.slowest;
+  const slowestMs = found.slowestMs;
+  trace.readySent = true;
+  emitKernelStartupPhase(trace, {
+    phase: "ready",
+    scope: "kernel",
+    durationMs: Date.now() - trace.startedAt,
+    turn: 0,
+    slowest,
+    slowestMs: slowestMs < 0 ? 0 : slowestMs,
+    phases: { ...trace.phases }
+  });
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/session/steer-drain.js
+var AGENT_LOOP_SETTINGS_KEY = "loop_settings";
+var DEFAULT_STEER_DRAIN_POLICY = "next_shot_only";
+function parseSteerDrainPolicy(raw) {
+  if (raw === "next_shot_only" || raw === "tool_launch")
+    return raw;
+  return void 0;
+}
+function resolveSteerDrainPolicy(input) {
+  const fromOption = parseSteerDrainPolicy(input.option);
+  if (fromOption)
+    return fromOption;
+  const fromSession = parseSteerDrainPolicy(input.sessionMetadata?.steerDrainPolicy);
+  if (fromSession)
+    return fromSession;
+  const saved = input.store?.getDaemonControl?.(AGENT_LOOP_SETTINGS_KEY);
+  if (saved && typeof saved === "object") {
+    const rec = saved;
+    if (rec.engineEnabled !== false) {
+      const fromKv = parseSteerDrainPolicy(rec.steerDrainPolicy);
+      if (fromKv)
+        return fromKv;
+    }
+  }
+  return DEFAULT_STEER_DRAIN_POLICY;
+}
+function drainSteerAtToolLaunch(input) {
+  if (input.policy !== "tool_launch") {
+    return { drained: false, items: [], skippedIds: [] };
+  }
+  const items = input.store.claimInbox(input.sessionId, "next-step");
+  if (items.length === 0) {
+    return { drained: false, items: [], skippedIds: [] };
+  }
+  applyClaimedInbox(input.store, input.sessionId, items, { expectedWriterRunId: input.expectedWriterRunId });
+  return { drained: true, items, skippedIds: [] };
 }
 
 // node_modules/@mage-ai-lab/agent-loop/dist/session/tool-wave-close.js
@@ -2222,49 +3512,6 @@ function closeOpenToolWave(store, sessionId, reason, opts) {
   return { closedIds: ids, message };
 }
 
-// node_modules/@mage-ai-lab/agent-loop/dist/session/steer-drain.js
-var AGENT_LOOP_SETTINGS_KEY = "loop_settings";
-var DEFAULT_STEER_DRAIN_POLICY = "next_shot_only";
-function parseSteerDrainPolicy(raw) {
-  if (raw === "next_shot_only" || raw === "tool_launch")
-    return raw;
-  return void 0;
-}
-function resolveSteerDrainPolicy(input) {
-  const fromOption = parseSteerDrainPolicy(input.option);
-  if (fromOption)
-    return fromOption;
-  const fromSession = parseSteerDrainPolicy(input.sessionMetadata?.steerDrainPolicy);
-  if (fromSession)
-    return fromSession;
-  const saved = input.store?.getDaemonControl?.(AGENT_LOOP_SETTINGS_KEY);
-  if (saved && typeof saved === "object") {
-    const fromKv = parseSteerDrainPolicy(saved.steerDrainPolicy);
-    if (fromKv)
-      return fromKv;
-  }
-  return DEFAULT_STEER_DRAIN_POLICY;
-}
-function drainSteerAtToolLaunch(input) {
-  if (input.policy !== "tool_launch") {
-    return { drained: false, items: [], skippedIds: [] };
-  }
-  const items = input.store.claimInbox(input.sessionId, "next-step");
-  if (items.length === 0) {
-    return { drained: false, items: [], skippedIds: [] };
-  }
-  for (const item of items) {
-    if (item.key)
-      input.store.hideByKey(input.sessionId, item.key);
-    input.store.appendMessage(input.sessionId, item.role, [{ type: "text", text: item.text }], item.key ? { key: item.key, expectedWriterRunId: input.expectedWriterRunId } : { expectedWriterRunId: input.expectedWriterRunId });
-  }
-  const closed = closeOpenToolWave(input.store, input.sessionId, "skipped_due_to_steer", {
-    onlyToolCallIds: input.toolCallIds,
-    expectedWriterRunId: input.expectedWriterRunId
-  });
-  return { drained: true, items, skippedIds: closed.closedIds };
-}
-
 // node_modules/@mage-ai-lab/agent-loop/dist/session/step-tx.js
 function rollbackReasonOf(input) {
   if (input.runError)
@@ -2274,57 +3521,556 @@ function rollbackReasonOf(input) {
   return null;
 }
 
-// node_modules/@mage-ai-lab/agent-loop/dist/runtime/run-profile.js
-var TASK_MODES = [
-  "computer",
-  "browser",
-  "auto",
-  "deep_research",
-  "planner",
-  "teams",
-  "fast",
-  "dynamic_workflow"
-];
-var RESEARCH_TOOLS = ["web_search", "web_fetch"];
-var COMPUTER_USE_TOOLS = [
-  "computer_screenshot",
-  "computer_click",
-  "computer_type",
-  "computer_key",
-  "computer_move"
-];
-var TASK_MODE_SET = new Set(TASK_MODES);
-function isResearchTool(name) {
-  return RESEARCH_TOOLS.includes(name) || name.startsWith("research_");
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/plan-commit.js
+function acceptedPlanVersion(plan) {
+  const version = plan && "version" in plan ? plan.version : void 0;
+  return typeof version === "number" && Number.isFinite(version) && version > 0 ? Math.floor(version) : 0;
 }
-function isComputerUseTool(name) {
-  return COMPUTER_USE_TOOLS.includes(name) || name.startsWith("computer_");
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/state-machine.js
+var TRANSITIONS = {
+  planner_readonly: {
+    direct_answer: "answered",
+    submit_plan: "plan_ready",
+    escalate_no_plan: "awaiting_coordinator",
+    escalate: "awaiting_coordinator",
+    shared_scope_escalated: "awaiting_coordinator",
+    local_capped_escalated: "awaiting_coordinator",
+    fail: "failed",
+    cancel: "cancelled",
+    timeout: "timed_out"
+  },
+  plan_ready: {
+    activate_executor: "executor_write",
+    pin_failed: "failed",
+    budget_insufficient: "awaiting_coordinator",
+    cap_exceeded: "capped",
+    escalate: "awaiting_coordinator",
+    shared_scope_escalated: "awaiting_coordinator",
+    local_capped_escalated: "awaiting_coordinator",
+    fail: "failed",
+    cancel: "cancelled",
+    timeout: "timed_out"
+  },
+  executor_write: {
+    local_done: "done",
+    friction: "planner_repair",
+    coordinator_resumed: "awaiting_coordinator",
+    // executor → awaiting when re-escalating
+    escalate: "awaiting_coordinator",
+    shared_scope_escalated: "awaiting_coordinator",
+    local_capped_escalated: "awaiting_coordinator",
+    cap_exceeded: "capped",
+    fail: "failed",
+    cancel: "cancelled",
+    timeout: "timed_out"
+  },
+  planner_repair: {
+    activate_executor: "executor_write",
+    escalate: "awaiting_coordinator",
+    shared_scope_escalated: "awaiting_coordinator",
+    local_capped_escalated: "awaiting_coordinator",
+    cap_exceeded: "capped",
+    fail: "failed",
+    cancel: "cancelled",
+    timeout: "timed_out"
+  },
+  awaiting_coordinator: {
+    coordinator_resumed: "executor_write",
+    coordinator_no_plan: "planner_readonly",
+    coordinator_repair: "planner_repair",
+    coordinator_rejected: "failed",
+    escalate: "awaiting_coordinator",
+    shared_scope_escalated: "awaiting_coordinator",
+    local_capped_escalated: "awaiting_coordinator",
+    cap_exceeded: "capped",
+    fail: "failed",
+    cancel: "cancelled",
+    timeout: "timed_out"
+  },
+  // Terminal states: no outgoing edges.
+  answered: {},
+  done: {},
+  capped: {},
+  failed: {},
+  cancelled: {},
+  timed_out: {}
+};
+function handoffIncrement(from, event) {
+  if (from === "plan_ready" && event === "activate_executor")
+    return 1;
+  if (from === "executor_write" && event === "friction")
+    return 1;
+  if (from === "planner_repair" && event === "activate_executor")
+    return 1;
+  if (from === "awaiting_coordinator" && event === "coordinator_resumed")
+    return 1;
+  return 0;
 }
-function applyRunProfileToTools(tools, profile, assembled) {
-  const layer = profile.toolPolicyLayer;
-  const deny = new Set(layer?.denylist ?? []);
-  const allow = layer?.allowlist ? new Set(layer.allowlist) : void 0;
-  const forced = new Set(layer?.forceVisible ?? []);
-  let next = tools.filter((tool) => {
-    if (deny.has(tool.name))
-      return false;
-    if (profile.mode === "deep_research" && isComputerUseTool(tool.name))
-      return false;
-    if (allow && !allow.has(tool.name) && !forced.has(tool.name))
-      return false;
-    return true;
-  });
-  const source = assembled ?? tools;
-  for (const tool of source) {
-    if (!forced.has(tool.name) && !(profile.mode === "deep_research" && isResearchTool(tool.name))) {
+function checkHandoffCap(counters, sessionCap = DEFAULT_SESSION_CAP, turnCap = DEFAULT_TURN_CAP) {
+  if (counters.sessionHandoffs >= sessionCap) {
+    return { allowed: false, reason: "session_cap" };
+  }
+  if (counters.turnHandoffs >= turnCap) {
+    return { allowed: false, reason: "turn_cap" };
+  }
+  return { allowed: true };
+}
+function applyTransition(state, event, now, newTurnNumber, options) {
+  const { state: from } = state;
+  const TERMINAL_STATES = [
+    "answered",
+    "done",
+    "capped",
+    "failed",
+    "cancelled",
+    "timed_out"
+  ];
+  if (TERMINAL_STATES.includes(from)) {
+    return {
+      ok: false,
+      error: `[HandoffKernel] Terminal state ${from} has no outgoing edges; event ${event} rejected.`
+    };
+  }
+  const row = TRANSITIONS[from];
+  let toState = row?.[event];
+  if (toState === "failed" && event === "coordinator_rejected" && options?.rejection === "capped") {
+    toState = "capped";
+  }
+  if (!toState) {
+    return {
+      ok: false,
+      error: `[HandoffKernel] Illegal transition: ${from} --${event}--> (no such edge).`
+    };
+  }
+  const delta = handoffIncrement(from, event);
+  const counted = delta === 1;
+  const baseTurnHandoffs = newTurnNumber !== void 0 ? 0 : state.counters.turnHandoffs;
+  const newCounters = counted ? {
+    sessionHandoffs: state.counters.sessionHandoffs + 1,
+    turnHandoffs: baseTurnHandoffs + 1
+  } : {
+    sessionHandoffs: state.counters.sessionHandoffs,
+    turnHandoffs: baseTurnHandoffs
+  };
+  const nextTurn = newTurnNumber !== void 0 ? newTurnNumber : state.turnNumber;
+  return {
+    ok: true,
+    counted,
+    next: {
+      state: toState,
+      plan: state.plan,
+      counters: newCounters,
+      enteredAt: now,
+      turnNumber: nextTurn
+    }
+  };
+}
+function isTerminal(state) {
+  return state === "answered" || state === "done" || state === "capped" || state === "failed" || state === "cancelled" || state === "timed_out";
+}
+function createInitialKernelState(opts) {
+  return {
+    state: "planner_readonly",
+    plan: null,
+    counters: { sessionHandoffs: 0, turnHandoffs: 0 },
+    enteredAt: opts.now,
+    turnNumber: opts.turnNumber ?? 1
+  };
+}
+
+// node_modules/@mage-ai-lab/agent-loop/dist/trajectory-handoff/session-turn.js
+var PLANNER_STATE2 = { planner_readonly: true, planner_repair: true };
+var EXECUTOR_STATE2 = { executor_write: true };
+var KNOWN_STATE2 = {
+  planner_readonly: true,
+  plan_ready: true,
+  executor_write: true,
+  planner_repair: true,
+  awaiting_coordinator: true,
+  answered: true,
+  done: true,
+  capped: true,
+  failed: true,
+  cancelled: true,
+  timed_out: true
+};
+var PLAN_STATUS = {
+  draft: true,
+  accepted: true,
+  superseded: true,
+  failed: true
+};
+function asRecord4(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return void 0;
+  return value;
+}
+function roleFor2(state) {
+  if (state in PLANNER_STATE2)
+    return "planner";
+  if (state in EXECUTOR_STATE2)
+    return "executor";
+  return void 0;
+}
+function readPlan(value) {
+  const record = asRecord4(value);
+  if (!record || typeof record.version !== "number" || !Array.isArray(record.steps))
+    return null;
+  if (typeof record.planId !== "string" || !record.planId)
+    return null;
+  const steps = [];
+  for (const step of record.steps) {
+    const item = asRecord4(step);
+    if (!item || typeof item.id !== "string" || !item.id)
+      continue;
+    steps.push({
+      id: item.id,
+      description: typeof item.description === "string" ? item.description : item.id
+    });
+  }
+  const status = typeof record.status === "string" && record.status in PLAN_STATUS ? record.status : "accepted";
+  return {
+    planId: record.planId,
+    version: record.version,
+    status,
+    steps,
+    createdAt: typeof record.createdAt === "string" ? record.createdAt : (/* @__PURE__ */ new Date(0)).toISOString()
+  };
+}
+function readKernel(metadata) {
+  const raw = asRecord4(metadata?.handoffKernel);
+  if (!raw || typeof raw.state !== "string" || !Object.prototype.hasOwnProperty.call(KNOWN_STATE2, raw.state)) {
+    return void 0;
+  }
+  const counters = asRecord4(raw.counters);
+  return {
+    state: raw.state,
+    plan: readPlan(raw.plan),
+    counters: {
+      sessionHandoffs: typeof counters?.sessionHandoffs === "number" ? counters.sessionHandoffs : 0,
+      turnHandoffs: typeof counters?.turnHandoffs === "number" ? counters.turnHandoffs : 0
+    },
+    enteredAt: typeof raw.enteredAt === "string" ? raw.enteredAt : (/* @__PURE__ */ new Date(0)).toISOString(),
+    turnNumber: typeof raw.turnNumber === "number" ? raw.turnNumber : 1
+  };
+}
+function modelRef(metadata, role) {
+  const roles = asRecord4(asRecord4(metadata?.capabilityTiers)?.roles);
+  const named = roles?.[role === "planner" ? "plannerModel" : "executorModel"];
+  if (typeof named === "string" && named.trim())
+    return named.trim();
+  const pinned = metadata?.pinnedSessionModel ?? metadata?.modelRef;
+  return typeof pinned === "string" && pinned.trim() ? pinned.trim() : "session";
+}
+function capsOf(metadata) {
+  const parsed = parseCapabilityTiers(metadata?.capabilityTiers);
+  if (!parsed.ok)
+    return { session: DEFAULT_SESSION_CAP, turn: DEFAULT_TURN_CAP };
+  return { session: parsed.resolved.perSessionCap, turn: parsed.resolved.perTurnCap };
+}
+function sessionHandoffsOf(metadata) {
+  const kernel = readKernel(metadata);
+  if (kernel)
+    return kernel.counters.sessionHandoffs;
+  const raw = metadata?.handoffSessionCount;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+}
+function effectRows(value) {
+  if (!Array.isArray(value))
+    return [];
+  const rows = [];
+  for (const item of value) {
+    const record = asRecord4(item);
+    if (!record)
+      continue;
+    if (typeof record.stepId !== "string" || typeof record.dedupeId !== "string" || typeof record.attemptId !== "string") {
       continue;
     }
-    if (deny.has(tool.name))
-      continue;
-    if (!next.some((t) => t.name === tool.name))
-      next.push(tool);
+    rows.push({ stepId: record.stepId, dedupeId: record.dedupeId, attemptId: record.attemptId });
   }
-  return next;
+  return rows;
+}
+function dedupeEffects(rows) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const row of rows) {
+    const key = row.stepId + "\0" + row.dedupeId + "\0" + row.attemptId;
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+function ledger(metadata, results, planValue) {
+  return dedupeEffects([
+    ...effectRows(metadata?.completedEffects),
+    ...results.flatMap((result) => effectRows(result.metadata?.completedEffects)),
+    ...effectRows(asRecord4(planValue)?.appliedEffects)
+  ]);
+}
+function packPlan(value) {
+  const record = asRecord4(value);
+  if (!record || typeof record.version !== "number" || !Array.isArray(record.steps))
+    return void 0;
+  const steps = record.steps.flatMap((step, index) => {
+    const item = asRecord4(step);
+    if (!item)
+      return [];
+    const id = typeof item.id === "string" && item.id ? item.id : typeof item.title === "string" && item.title ? item.title : String(index + 1);
+    const description = typeof item.description === "string" ? item.description : typeof item.title === "string" ? item.title : id;
+    return [{
+      id,
+      description,
+      ...typeof item.status === "string" ? { status: item.status } : {}
+    }];
+  });
+  return {
+    version: record.version,
+    steps,
+    ...typeof record.analysis === "string" ? { analysis: record.analysis } : {}
+  };
+}
+function asPlanObject(snapshot, previous) {
+  if (!snapshot)
+    return previous;
+  return {
+    planId: previous?.planId ?? "plan",
+    version: snapshot.version,
+    status: "accepted",
+    steps: snapshot.steps.map((step) => ({ id: step.id, description: step.description })),
+    createdAt: previous?.createdAt ?? (/* @__PURE__ */ new Date(0)).toISOString()
+  };
+}
+function frictionOf(result) {
+  const raw = asRecord4(result.metadata?.handoffFriction);
+  if (!raw || raw.kind !== "step_failed")
+    return void 0;
+  const evidence = typeof raw.evidence === "string" && raw.evidence ? raw.evidence : typeof result.metadata?.failureEvidence === "string" ? result.metadata.failureEvidence : result.content;
+  return {
+    stepId: typeof raw.stepId === "string" && raw.stepId ? raw.stepId : result.toolCallId,
+    evidence
+  };
+}
+function buildPack(metadata, results, planVersion, fromRole, toRole, effects, plan, failure) {
+  return {
+    planVersion,
+    fromRole,
+    toRole,
+    fromModel: modelRef(metadata, fromRole),
+    toModel: modelRef(metadata, toRole),
+    toolPairs: results.map((result) => ({
+      callId: result.toolCallId,
+      name: result.name,
+      ok: result.ok,
+      result: result.content
+    })),
+    completedEffects: effects,
+    ...plan ? { plan } : {},
+    ...failure ? { failureEvidence: failure } : {}
+  };
+}
+function countersPatch(kernel) {
+  return {
+    handoffKernel: kernel,
+    handoffState: kernel.state,
+    handoffSessionCount: kernel.counters.sessionHandoffs,
+    handoffTurnCount: kernel.counters.turnHandoffs
+  };
+}
+function cappedPatch(kernel, reason) {
+  return {
+    ...countersPatch(kernel),
+    handoffCapReason: reason
+  };
+}
+function activePatch(kernel, pack, effects) {
+  const role = roleFor2(kernel.state);
+  return {
+    ...countersPatch(kernel),
+    ...role ? { handoffRole: role } : {},
+    handoffContext: pack,
+    completedEffects: effects,
+    handoffBlocked: void 0,
+    handoffCapReason: void 0
+  };
+}
+function exceed(kernel, now, caps) {
+  const decision = checkHandoffCap(kernel.counters, caps.session, caps.turn);
+  if (decision.allowed)
+    return { capped: false };
+  const next = applyTransition(kernel, "cap_exceeded", now);
+  if (!next.ok)
+    return { capped: false };
+  return { capped: true, patch: cappedPatch(next.next, decision.reason ?? "turn_cap") };
+}
+function handoffContextMessage(metadata) {
+  const pack = asRecord4(asRecord4(metadata)?.handoffContext);
+  if (!pack)
+    return void 0;
+  return "[handoff-context]\n" + JSON.stringify(pack);
+}
+function closePlannerDirectAnswer(metadata, assistantText) {
+  if (!assistantText.trim())
+    return void 0;
+  const record = asRecord4(metadata);
+  if (!trajectoryHandoffGateFromMetadata(record).enabled)
+    return void 0;
+  const kernel = readKernel(record);
+  if (!kernel || kernel.state !== "planner_readonly")
+    return void 0;
+  const answered = applyTransition(kernel, "direct_answer", (/* @__PURE__ */ new Date()).toISOString());
+  if (!answered.ok)
+    return void 0;
+  return countersPatch(answered.next);
+}
+async function enterAutoPlannerReadonly(host, sessionId) {
+  const session = host.store.getSession(sessionId);
+  if (!session)
+    return { ok: false, reason: "session missing" };
+  const metadata = asRecord4(session.metadata);
+  if (metadata?.handoffSuspended === "session_cap") {
+    return { ok: false, reason: "session handoff cap exhausted" };
+  }
+  const prepared = await prepareTrajectoryToolWave({
+    id: sessionId,
+    metadata: { ...metadata ?? {}, handoffState: "planner_readonly", handoffEntering: "planner_readonly" }
+  });
+  if (!prepared.ok)
+    return prepared;
+  const initial = createInitialKernelState({ now: (/* @__PURE__ */ new Date()).toISOString(), turnNumber: 1 });
+  const kernel = {
+    ...initial,
+    counters: { sessionHandoffs: sessionHandoffsOf(metadata), turnHandoffs: 0 }
+  };
+  const parsed = parseCapabilityTiers(metadata?.capabilityTiers);
+  host.mergeSessionMetadata(sessionId, {
+    ...countersPatch(kernel),
+    handoffRole: "planner",
+    handoffWorkTurn: true,
+    ...!parsed.ok ? { handoffTierWarning: parsed.warning } : {}
+  });
+  return { ok: true };
+}
+async function prepareExplicitSessionHandoff(host, sessionId, options) {
+  const session = host.store.getSession(sessionId);
+  if (!session)
+    return;
+  const metadata = asRecord4(session.metadata);
+  if (metadata?.handoffSuspended === "session_cap")
+    return;
+  const gate = trajectoryHandoffGateFromMetadata(metadata);
+  if (gate.path === "auto_eligible") {
+    const remaining = capsOf(metadata).session - sessionHandoffsOf(metadata);
+    if (session.mode === "task" && options?.userTurn === true && remaining > 0) {
+      await enterAutoPlannerReadonly(host, sessionId);
+    }
+    return;
+  }
+  if (gate.path !== "in_machine")
+    return;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  let kernel = readKernel(metadata);
+  if (kernel && isTerminal(kernel.state)) {
+    if (!options?.userTurn) {
+      host.mergeSessionMetadata(sessionId, countersPatch(kernel));
+      return;
+    }
+    const caps = capsOf(metadata);
+    const sessionExhausted = kernel.counters.sessionHandoffs >= caps.session || metadata?.handoffCapReason === "session_cap";
+    if (sessionExhausted) {
+      host.mergeSessionMetadata(sessionId, { handoffSuspended: "session_cap" });
+      return;
+    }
+    const prepared = await prepareTrajectoryToolWave({
+      id: sessionId,
+      metadata: { ...metadata, handoffState: "planner_readonly", handoffEntering: "planner_readonly" }
+    });
+    if (!prepared.ok)
+      return;
+    kernel = {
+      state: "planner_readonly",
+      plan: null,
+      counters: { sessionHandoffs: kernel.counters.sessionHandoffs, turnHandoffs: 0 },
+      enteredAt: now,
+      turnNumber: kernel.turnNumber + 1
+    };
+    host.mergeSessionMetadata(sessionId, {
+      ...countersPatch(kernel),
+      handoffRole: "planner",
+      handoffContext: void 0,
+      handoffBlocked: void 0,
+      handoffCapReason: void 0
+    });
+    return;
+  }
+  if (!kernel) {
+    const prepared = await prepareTrajectoryToolWave({
+      id: sessionId,
+      metadata: { ...metadata, handoffState: "planner_readonly", handoffEntering: "planner_readonly" }
+    });
+    if (!prepared.ok)
+      return;
+    kernel = createInitialKernelState({ now, turnNumber: 1 });
+  }
+  const role = roleFor2(kernel.state);
+  host.mergeSessionMetadata(sessionId, {
+    ...countersPatch(kernel),
+    ...role ? { handoffRole: role } : {}
+  });
+}
+function advanceExplicitHandoffAfterTools(metadata, results, sessionId) {
+  if (!trajectoryHandoffGateFromMetadata(metadata).enabled)
+    return void 0;
+  const current = readKernel(metadata);
+  if (!current)
+    return void 0;
+  const accepted = results.find((result) => result.ok && result.metadata?.handoffPlanAccepted === true);
+  const frictionResult = results.find((result) => result.ok && frictionOf(result));
+  if (!accepted && !frictionResult)
+    return void 0;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const caps = capsOf(metadata);
+  const planValue = accepted?.metadata?.plan ?? frictionResult?.metadata?.plan;
+  const snapshot = packPlan(planValue);
+  const effects = ledger(metadata, results, planValue);
+  let kernel = snapshot ? { ...current, plan: asPlanObject(snapshot, current.plan) } : current;
+  const versionRaw = accepted?.metadata?.planVersion ?? frictionResult?.metadata?.planVersion;
+  const planVersion = typeof versionRaw === "number" && versionRaw > 0 ? Math.floor(versionRaw) : snapshot && snapshot.version > 0 ? snapshot.version : acceptedPlanVersion(kernel.plan) || 1;
+  if (accepted && (kernel.state === "planner_readonly" || kernel.state === "planner_repair")) {
+    if (kernel.state === "planner_readonly") {
+      const submitted = applyTransition(kernel, "submit_plan", now);
+      if (!submitted.ok)
+        return void 0;
+      kernel = submitted.next;
+    }
+    const gate = exceed(kernel, now, caps);
+    if (gate.capped)
+      return gate.patch;
+    const activated = applyTransition(kernel, "activate_executor", now);
+    if (!activated.ok)
+      return void 0;
+    return activePatch(activated.next, buildPack(metadata, results, planVersion, "planner", "executor", effects, snapshot), effects);
+  }
+  if (frictionResult && kernel.state === "executor_write") {
+    if (sessionId && trajectoryWritesPending(sessionId)) {
+      return {
+        ...countersPatch(kernel),
+        handoffRole: "executor",
+        handoffBlocked: "pending_writes"
+      };
+    }
+    const gate = exceed(kernel, now, caps);
+    if (gate.capped)
+      return gate.patch;
+    const friction = frictionOf(frictionResult);
+    const repaired = applyTransition(kernel, "friction", now);
+    if (!repaired.ok)
+      return void 0;
+    return activePatch(repaired.next, buildPack(metadata, results, planVersion, "executor", "planner", effects, snapshot, friction), effects);
+  }
+  return void 0;
 }
 
 // node_modules/@mage-ai-lab/agent-loop/dist/workspace/default-roots.js
@@ -2333,8 +4079,111 @@ function defaultWorkspaceRoots(workspaceRoot, repoRoot) {
 }
 
 // node_modules/@mage-ai-lab/agent-loop/dist/turn/kernel.js
-function textPart3(text) {
+function handoffSessionMetadata(session) {
+  const metadata = session.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
+    return void 0;
+  return metadata;
+}
+async function executePatternBOrdinaryWave(host, live, args) {
+  const calls = args[0];
+  const turnTools = args[4];
+  const catalog = /* @__PURE__ */ new Map();
+  for (const tool of turnTools ?? host.tools)
+    catalog.set(tool.name, tool);
+  const denied = [];
+  const allowed = [];
+  for (const call of calls) {
+    const reason = denyPatternBTool(live, catalog.get(call.name) ?? { name: call.name }, { input: call.input });
+    if (reason)
+      denied.push({ toolCallId: call.toolCallId, name: call.name, ok: false, content: reason });
+    else
+      allowed.push(call);
+  }
+  if (denied.length === 0)
+    return host.executeToolCalls(...args);
+  const ran = allowed.length === 0 ? [] : await host.executeToolCalls(allowed, args[1], args[2], args[3], turnTools);
+  const byId = /* @__PURE__ */ new Map();
+  for (const result of [...denied, ...ran])
+    byId.set(result.toolCallId, result);
+  return calls.map((call) => byId.get(call.toolCallId) ?? {
+    toolCallId: call.toolCallId,
+    name: call.name,
+    ok: false,
+    content: "missing tool result"
+  });
+}
+async function executeGatedToolWave(host, session, ...args) {
+  const live = host.store.getSession(session.id) ?? session;
+  const gate = trajectoryHandoffGateFromMetadata(handoffSessionMetadata(live));
+  if (gate.path !== "in_machine") {
+    return executePatternBOrdinaryWave(host, live, args);
+  }
+  const prepared = await prepareTrajectoryToolWave(live);
+  if (!prepared.ok) {
+    return args[0].map((call) => ({
+      toolCallId: call.toolCallId,
+      name: call.name,
+      ok: false,
+      content: prepared.reason
+    }));
+  }
+  const calls = args[0];
+  const turnTools = args[4];
+  const catalog = /* @__PURE__ */ new Map();
+  for (const tool of turnTools ?? host.tools)
+    catalog.set(tool.name, tool);
+  const denied = [];
+  const allowed = [];
+  for (const call of calls) {
+    const reason = denyTrajectoryTool(live, catalog.get(call.name) ?? { name: call.name }, { input: call.input });
+    if (reason)
+      denied.push({ toolCallId: call.toolCallId, name: call.name, ok: false, content: reason });
+    else
+      allowed.push(call);
+  }
+  const ran = allowed.length === 0 ? [] : await host.executeToolCalls(allowed, args[1], args[2], args[3], turnTools);
+  const byId = /* @__PURE__ */ new Map();
+  for (const result of [...denied, ...ran])
+    byId.set(result.toolCallId, result);
+  return calls.map((call) => byId.get(call.toolCallId) ?? {
+    toolCallId: call.toolCallId,
+    name: call.name,
+    ok: false,
+    content: "missing tool result"
+  });
+}
+function recordExplicitHandoff(host, sessionId, results) {
+  const session = host.store.getSession(sessionId);
+  const patch = advanceExplicitHandoffAfterTools(handoffSessionMetadata(session ?? {}), results, sessionId);
+  if (patch)
+    host.mergeSessionMetadata(sessionId, patch);
+}
+function textPart2(text) {
   return { type: "text", text };
+}
+function foldHandoffContext(host, sessionId, turnInput) {
+  const text = handoffContextMessage(host.store.getSession(sessionId)?.metadata);
+  if (!text)
+    return turnInput;
+  const message = {
+    id: "handoff-context-" + sessionId,
+    sessionId,
+    role: "system",
+    parts: [textPart2(text)],
+    createdAt: (/* @__PURE__ */ new Date(0)).toISOString()
+  };
+  return { ...turnInput, messages: [...turnInput.messages, message] };
+}
+function closePlannerAnswer(host, sessionId, parts) {
+  if (parts.some((part) => part.type === "tool_call"))
+    return;
+  const answer = parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
+  if (!answer)
+    return;
+  const patch = closePlannerDirectAnswer(host.store.getSession(sessionId)?.metadata, answer);
+  if (patch)
+    host.mergeSessionMetadata(sessionId, patch);
 }
 function isContextOverflowError(err) {
   if (!(err instanceof Error))
@@ -2349,32 +4198,182 @@ function composePromptCacheKey(parts) {
 function isLastAnswerTurn(turn, maxTurns, force) {
   return force && Number.isFinite(maxTurns) && turn === maxTurns - 1;
 }
-async function runSessionKernel(host, sessionId, options) {
-  let session = host.store.getSession(sessionId);
+function sessionParkedForApproval(store, session) {
+  if (session.status === "waiting_approval")
+    return session;
+  return store.updateSession(session.id, { status: "waiting_approval" });
+}
+function parkResumedApproval(host, sid, remaining, writerRunId, interrupt) {
+  const approvalIds = host.store.listApprovals({ status: "pending" }).filter((approval) => approval.sessionId === sid).map((approval) => approval.id);
+  const nextInterrupt = createWaitingApprovalInterrupt({
+    toolCallIds: remaining.map((call) => call.toolCallId),
+    approvalIds,
+    writerRunId,
+    executedToolCallIds: interrupt.executedToolCallIds
+  });
+  const current = host.store.getSession(sid);
+  const outcome = runOutcomeFromEnd({
+    reason: "waiting_approval",
+    sessionStatus: "waiting_approval"
+  });
+  void host.emitTrace(sid, {
+    kind: "turn_end",
+    data: { terminal: true, reason: "waiting_approval", outcome }
+  });
+  return host.store.updateSession(sid, {
+    status: "waiting_approval",
+    metadata: mergeInterruptMetadata(current.metadata ?? {}, nextInterrupt)
+  });
+}
+function goalCheckpointTerminalReason(results) {
+  for (const row of results) {
+    if (row.name !== "goal_checkpoint" || row.metadata?.retry !== false)
+      continue;
+    const endReason = row.metadata.endReason;
+    if (typeof endReason === "string" && endReason.trim() !== "")
+      return endReason;
+    return "goal_checkpoint_unassigned";
+  }
+  return void 0;
+}
+async function endResumedGoalCheckpoint(host, sessionId, results, finish) {
+  const reason = goalCheckpointTerminalReason(results);
+  if (!reason)
+    return void 0;
+  const current = host.store.getSession(sessionId);
+  const idle = host.store.updateSession(sessionId, {
+    status: "idle",
+    metadata: mergeInterruptMetadata(current?.metadata ?? {}, null)
+  });
+  if (finish)
+    return finish(idle, reason);
+  const outcome = runOutcomeFromEnd({ reason, sessionStatus: "idle" });
+  return host.store.updateSession(sessionId, {
+    metadata: mergeOutcomeMetadata(idle.metadata ?? {}, outcome)
+  });
+}
+async function continueResumedToolWave(input) {
+  const folded = input.host.store.foldMessages(input.sid);
+  const picked = await input.pickTurnTools(input.context.session, folded, 0, false);
+  const closedByGate = { reported: false, ids: [] };
+  const gate = await input.host.checkToolApprovals?.(input.remaining, input.context, input.refreshedSession, {
+    filePolicy: input.filePolicy,
+    turnTools: picked.resolvedTools,
+    closedByGate,
+    settledApprovalIds: input.interrupt.approvalIds
+  });
+  if (gate === "waiting") {
+    return parkResumedApproval(input.host, input.sid, input.remaining, input.writerRunId, input.interrupt);
+  }
+  if (gate === "skip")
+    return void 0;
+  const allowIds = input.interrupt.toolCallIds.filter((id) => !input.interrupt.executedToolCallIds.includes(id));
+  const executable = selectExecutableToolCalls(input.remaining, closedByGate, () => unmatchedToolCallsFromFold(input.host.store.foldMessages(input.sid), allowIds));
+  if (executable.length === 0)
+    return void 0;
+  const results = await executeGatedToolWave(input.host, input.context.session, executable, input.context, picked.allowExternalAiTools, input.sessionId, picked.resolvedTools);
+  input.host.processToolResults(resultsToPersist(results), executable, input.context.session, void 0, input.sessionId, input.onModelStreamChunk);
+  recordExplicitHandoff(input.host, input.sid, results);
+  if (toolWaveHeldForApproval(results)) {
+    return parkResumedApproval(input.host, input.sid, input.remaining, input.writerRunId, input.interrupt);
+  }
+  results.forEach((result) => {
+    input.host.recordToolUse?.({
+      name: result.name,
+      sessionId: input.sid,
+      turn: input.turn,
+      ok: result.ok
+    });
+  });
+  await input.emitStep({
+    type: "tools_done",
+    results: results.map((result) => ({ ok: result.ok, content: result.content, name: result.name }))
+  });
+  return endResumedGoalCheckpoint(input.host, input.sessionId, results, input.finish);
+}
+function sessionForTurn(host, sessionId, fallback) {
+  return host.store.getSession(sessionId) ?? fallback;
+}
+async function runSessionKernelWithWriterScope(host, sessionId, options) {
+  const session = host.store.getSession(sessionId);
   if (!session) {
     throw new NotFoundError(`Session not found: ${sessionId}`);
   }
   const pendingApprovalIds = host.store.listApprovals({ status: "pending" }).filter((a) => a.sessionId === sessionId).map((a) => a.id);
   const resumeDecision = decideInterruptResume({ session, pendingApprovalIds });
-  if (resumeDecision.action === "yield_waiting") {
-    await options?.latch?.emit({
-      type: "waiting_approval",
-      approvalIds: resumeDecision.interrupt.approvalIds
-    });
-    return session;
-  }
-  let resumeFromInterrupt = resumeDecision.action === "resume_tools" ? resumeDecision.interrupt : void 0;
-  const agent = host.store.getAgent(session.agentId);
-  if (!agent) {
-    throw new NotFoundError(`Agent not found: ${session.agentId}`);
-  }
   const existingController = host.sessionAbortControllers?.get(sessionId);
   const controller = existingController ?? new AbortController();
   host.sessionAbortControllers?.set(sessionId, controller);
+  const sid = session.id;
+  const writerRunId = createId("run");
+  const emitTrace = (id, event) => {
+    try {
+      host.emitTrace(id, event);
+    } catch {
+    }
+  };
+  const tracedHost = { ...host, emitTrace };
+  const startup = createKernelStartupTrace(sid, emitTrace);
+  try {
+    await timeKernelPhase(startup, "writer_claim", () => {
+      host.store.claimWriter(sessionId, writerRunId);
+    });
+  } catch (error) {
+    emitKernelReady(startup);
+    if (!existingController && host.sessionAbortControllers?.get(sessionId) === controller)
+      host.sessionAbortControllers.delete(sessionId);
+    throw error;
+  }
+  const settle = async () => {
+    try {
+      const admittedSession = host.store.getSession(sid);
+      if (!admittedSession) {
+        emitKernelReady(startup);
+        throw new NotFoundError(`Session not found: ${sid}`);
+      }
+      const decision = decideInterruptResume({
+        session: admittedSession,
+        pendingApprovalIds: host.store.listApprovals({ status: "pending" }).filter((a) => a.sessionId === sid).map((a) => a.id)
+      });
+      if (decision.action === "yield_waiting") {
+        const parked = sessionParkedForApproval(host.store, admittedSession);
+        await options?.latch?.emit({ type: "waiting_approval", approvalIds: decision.interrupt.approvalIds });
+        emitKernelReady(startup);
+        return parked;
+      }
+      if (resumeDecision.action !== "none" && decision.action === "none") {
+        emitKernelReady(startup);
+        return admittedSession;
+      }
+      const agent = host.store.getAgent(admittedSession.agentId);
+      if (!agent) {
+        emitKernelReady(startup);
+        throw new NotFoundError(`Agent not found: ${admittedSession.agentId}`);
+      }
+      const resumeFromInterrupt = decision.action === "resume_tools" ? decision.interrupt : void 0;
+      return await runSessionKernel(tracedHost, sessionId, { session: admittedSession, agent, controller, writerRunId, resumeFromInterrupt }, options, startup);
+    } finally {
+      if (host.sessionAbortControllers?.get(sid) === controller)
+        host.sessionAbortControllers.delete(sid);
+      host.store.releaseWriter(sid, writerRunId);
+    }
+  };
+  return host.store.runWithWriter ? host.store.runWithWriter(sid, writerRunId, settle) : settle();
+}
+var KERNEL_TURN = /* @__PURE__ */ Symbol("kernel-turn");
+var KERNEL_TURN_STOPS = /* @__PURE__ */ new Set(["continue", "break", "return"]);
+function kernelTurnSignal(stop, value) {
+  return { [KERNEL_TURN]: stop, value };
+}
+function kernelTurnStop(flow) {
+  const stop = typeof flow === "object" && flow ? flow[KERNEL_TURN] : void 0;
+  return typeof stop === "string" && KERNEL_TURN_STOPS.has(stop) ? stop : void 0;
+}
+async function runSessionKernel(host, sessionId, execution, options, startup) {
+  let { session, resumeFromInterrupt } = execution;
+  const { agent, controller, writerRunId } = execution;
   const signal = controller.signal;
   const sid = session.id;
-  const writerRunId = resumeFromInterrupt?.writerRunId ?? createId("run");
-  host.store.claimWriter(sessionId, writerRunId);
   const loopConfig = resolveLoopConfig({ maxTurns: host.maxTurnsPerRun, maxContextTokens: host.maxContextTokens }, host.loopConfig, options?.config);
   const maxTurns = resolveTurnCap(loopConfig.maxTurns ?? host.maxTurnsPerRun);
   const stopAt = new Set(loopConfig.stopAtToolNames);
@@ -2391,8 +4390,8 @@ async function runSessionKernel(host, sessionId, options) {
     await host.stepTx?.beginRun?.({ sessionId, runId: writerRunId });
   } catch {
   }
-  const persistOutcome = (record, reason, rewind) => {
-    const outcome = runOutcomeFromEnd({ reason, sessionStatus: record.status, rewind });
+  const persistOutcome = (record, reason, rewind, answered) => {
+    const outcome = runOutcomeFromEnd({ reason, sessionStatus: record.status, rewind, answered });
     const next = host.store.updateSession(record.id, {
       metadata: mergeOutcomeMetadata(record.metadata ?? {}, outcome)
     });
@@ -2433,6 +4432,7 @@ async function runSessionKernel(host, sessionId, options) {
     }
   };
   const finishFailed = async (record, reason) => {
+    emitKernelReady(startup);
     const rewind = await rewindUncommitted(reason);
     await endRunTx(reason);
     const current = host.store.getSession(sid) ?? record;
@@ -2447,9 +4447,10 @@ async function runSessionKernel(host, sessionId, options) {
     await emitStep({ type: "ended", reason, outcome });
     return next;
   };
-  const finishEnded = async (record, reason) => {
+  const finishEnded = async (record, reason, answered) => {
+    emitKernelReady(startup);
     await endRunTx(reason);
-    const { record: next, outcome } = persistOutcome(record, reason);
+    const { record: next, outcome } = persistOutcome(record, reason, void 0, answered);
     void host.emitTrace(next.id, {
       kind: "turn_end",
       data: { terminal: true, reason, outcome }
@@ -2468,6 +4469,18 @@ async function runSessionKernel(host, sessionId, options) {
   const stepInfo = (turn, kind) => {
     stepCursor += 1;
     return { turn, step: stepCursor, kind, sessionId: sid };
+  };
+  const saveRetainedAssistant = async (turn, parts) => {
+    const history = host.store.foldMessages(sid);
+    if (parts.some((part) => part.type === "tool_call") || history.length > 0 && !isClosedBoundary(history)) {
+      throw new Error("Cannot commit a retained assistant reply with an unclosed tool wave");
+    }
+    const info = stepInfo(turn, "model_done");
+    await host.stepTx?.beginStep?.(info);
+    const message = host.store.appendMessage(sid, "assistant", parts);
+    await host.stepTx?.commitStep?.(info);
+    options?.onModelStreamChunk?.({ type: "assistant_saved", messageId: message.id });
+    return message;
   };
   const rollbackOpenStep = async (reason) => {
     try {
@@ -2508,7 +4521,7 @@ async function runSessionKernel(host, sessionId, options) {
     }
   };
   const env = host.env ?? {};
-  const loopGuard = loopConfig.recoveryEnabled && recoveryPolicyEnabled(env) ? new SessionLoopGuard(env) : null;
+  const loopGuard = loopConfig.recoveryEnabled && recoveryPolicyEnabled(env) ? new SessionLoopGuard(env, loopConfig.unchangedLookupTools) : null;
   const advisoryGrace = new AdvisoryGrace(loopGuard && advisoryGraceEnabled(env) ? advisoryGraceBudget(env) : 0);
   const advisoryQueue = new AdvisoryQueue();
   const riskEngine = riskEngineEnabled(env) ? new RiskEngine(riskEngineConfigFromEnv(env)) : null;
@@ -2516,8 +4529,7 @@ async function runSessionKernel(host, sessionId, options) {
     maxConsecutiveNoProgress: loopConfig.spinWatchdogMaxConsecutive
   }) : null;
   const recoveryState = createTurnRecoveryState();
-  let sameToolStreak = 0;
-  let lastToolRoundKey = "";
+  const progressGuard = loopGuard ?? new SessionLoopGuard(env);
   const packTurn = async (input) => {
     const current = host.store.getSession(sid);
     const profile = current ? host.resolveRunProfile?.(current) : void 0;
@@ -2560,13 +4572,15 @@ async function runSessionKernel(host, sessionId, options) {
           return host.applyFoldBudget(sess, foldedMsgs);
         if (!loopConfig.foldBudgetClamp)
           return foldedMsgs;
+        const compacted = microCompactMessages(foldedMsgs, DEFAULT_MICRO_COMPACT_CONFIG).messages;
         const tokenBudget = resolveHistoryTokenBudget("RAW_AGENT_COMPACT_TOKEN_THRESHOLD", { maxContextTokens: loopConfig.maxContextTokens ?? host.maxContextTokens }, env);
-        return clampFoldToVisible(foldedMsgs, {
+        return clampFoldToVisible(compacted, {
           maxVisible: loopConfig.maxVisibleMessages,
           tokenBudget
         });
       },
-      readWorkingLogTail: skipMemory || !host.readWorkingLogAppendix ? void 0 : (id) => host.readWorkingLogAppendix(id)
+      readWorkingLogTail: skipMemory || !host.readWorkingLogAppendix ? void 0 : (id) => host.readWorkingLogAppendix(id),
+      emitTrace: (id, event) => host.emitTrace?.(id, event)
     });
   };
   const pickTurnTools = async (sess, messages, systemPromptChars, emptyTools) => {
@@ -2592,6 +4606,13 @@ async function runSessionKernel(host, sessionId, options) {
     const resolvedTools = emptyTools ? [] : turnProfile ? applyRunProfileToTools(selectedTools, turnProfile, assembledForProfile) : selectedTools;
     return { allowExternalAiTools, selectedTools, resolvedTools, turnTools, turnProfile };
   };
+  const runModelTurn = async (turnInput, onStream) => {
+    const fitted = host.fitModelRequest ? await timeKernelPhase(startup, "fit_model_request", () => host.fitModelRequest(turnInput)) : turnInput;
+    if (!host.fitModelRequest)
+      await timeOptionalKernelPhase(startup, "fit_model_request", void 0);
+    emitKernelReady(startup);
+    return host.runTurnWithRetries(fitted, onStream);
+  };
   const maybeChooseRecovery = async (situation, options2, defaultId) => {
     if (!host.chooseRecovery || options2.length < 2)
       return defaultId;
@@ -2601,732 +4622,1305 @@ async function runSessionKernel(host, sessionId, options) {
     return defaultId;
   };
   try {
-    await host.ensureMcpLoaded?.(sid);
-    const filePolicy = await host.resolveFilePolicy?.();
+    await timeOptionalKernelPhase(startup, "ensure_mcp", host.ensureMcpLoaded ? () => host.ensureMcpLoaded(sid) : void 0);
+    const filePolicy = await timeOptionalKernelPhase(startup, "resolve_file_policy", host.resolveFilePolicy ? () => host.resolveFilePolicy() : void 0);
     session = host.store.updateSession(session.id, { status: "running" });
-    await host.ingestMailbox?.(session);
-    await host.autoClaimTask?.(session);
-    claimAndApplyInbox(host.store, sid, "next-run", { expectedWriterRunId: writerRunId });
-    for (let turn = 0; turn < maxTurns; turn += 1) {
-      if (signal.aborted) {
-        closeWaveIfOpen();
-        await rollbackOpenStep("abort");
-        return finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort");
-      }
-      const refreshedSession = host.store.getSession(session.id);
-      const task = host.resolveTask?.(refreshedSession) ?? (refreshedSession.taskId ? host.store.getTask?.(refreshedSession.taskId) : void 0);
-      const workspaceRoot = await host.ensureWorkspaceRoot?.(refreshedSession, task);
-      const workspaceRoots = await host.resolveWorkspaceRoots?.(refreshedSession) ?? defaultWorkspaceRoots(workspaceRoot, host.repoRoot);
-      let context = {
-        repoRoot: host.repoRoot,
-        stateDir: host.stateDir,
-        session: refreshedSession,
-        agent,
-        workspaceRoot: workspaceRoot ?? host.repoRoot,
-        workspaceRoots,
-        abortSignal: signal
-      };
-      if (resumeFromInterrupt) {
-        const interrupt = resumeFromInterrupt;
-        resumeFromInterrupt = void 0;
-        claimAndApplyInbox(host.store, sid, "next-step", { expectedWriterRunId: writerRunId });
-        const remaining = unmatchedToolCallsFromFold(host.store.foldMessages(sid), interrupt.toolCallIds.filter((id) => !interrupt.executedToolCallIds.includes(id)));
-        if (remaining.length > 0) {
-          const folded = host.store.foldMessages(sid);
-          const picked2 = await pickTurnTools(context.session, folded, 0, false);
-          const results2 = await host.executeToolCalls(remaining, context, picked2.allowExternalAiTools, sessionId, picked2.resolvedTools);
-          host.processToolResults(results2, remaining, context.session, void 0, sessionId, options?.onModelStreamChunk);
-          for (const r of results2) {
-            host.recordToolUse?.({ name: r.name, sessionId: sid, turn, ok: r.ok });
-          }
-          await emitStep({
-            type: "tools_done",
-            results: results2.map((r) => ({ ok: r.ok, content: r.content, name: r.name }))
-          });
-        }
-        host.store.updateSession(sid, {
-          metadata: mergeInterruptMetadata(context.session.metadata ?? {}, null)
-        });
-        continue;
-      }
-      ensureFoldToolCallsPaired({
-        foldMessages: () => host.store.foldMessages(sid),
-        appendMessage: (role, parts) => host.store.appendMessage(sid, role, parts)
-      });
-      const packed = await packTurn({ workspaceRoot });
-      context = { ...context, session: packed.session };
-      const visibleMessages = packed.messages;
-      const rawVisible = packed.viewMessages;
-      await emitStep({
-        type: "turn_prepared",
-        messageCount: visibleMessages.length,
-        messages: visibleMessages,
-        foldSeqs: packed.foldSeqs
-      });
-      const promptCtx = {
-        sessionId: sid,
-        agent,
-        session: context.session,
-        workspaceRoot: workspaceRoot ?? host.repoRoot,
-        repoRoot: host.repoRoot
-      };
-      const drainedAdvisory = advisoryQueue.drainCombined();
-      if (drainedAdvisory) {
-        host.store.appendMessage(sid, "system", [textPart3(drainedAdvisory)]);
-      }
-      const systemPrompt = await host.promptBuilder.buildSystemPrompt(promptCtx, rawVisible);
-      if (turn === 0) {
-        const startHook = await host.runLifecycleHook?.({
-          phase: "session_start",
-          sessionId: sid,
-          agentId: agent.id,
-          turn: 0
-        });
-        if (startHook?.block) {
-          const msg = startHook.message ?? startHook.systemMessage ?? "blocked by session_start hook";
-          host.store.appendMessage(sid, "system", [textPart3(msg)]);
-          return finishFailed(host.store.updateSession(session.id, { status: "failed" }), "session_start_blocked");
-        }
-        if (startHook?.systemMessage) {
-          host.store.appendMessage(sid, "system", [textPart3(startHook.systemMessage)]);
-        }
-      }
-      const beforeHook = await host.runLifecycleHook?.({
-        phase: "before_turn",
-        sessionId: sid,
-        agentId: agent.id,
-        turn
-      });
-      if (beforeHook?.block) {
-        const msg = beforeHook.message ?? beforeHook.systemMessage ?? "blocked by before_turn hook";
-        host.store.appendMessage(sid, "system", [textPart3(msg)]);
-        return finishFailed(host.store.updateSession(session.id, { status: "failed" }), "before_turn_blocked");
-      }
-      if (beforeHook?.systemMessage) {
-        host.store.appendMessage(sid, "system", [textPart3(beforeHook.systemMessage)]);
-      }
-      const lastTurn = isLastAnswerTurn(turn, maxTurns, loopConfig.forceAnswerOnLastTurn);
-      const picked = await pickTurnTools(context.session, visibleMessages, systemPrompt.length, lastTurn);
-      const allowExternalAiTools = picked.allowExternalAiTools;
-      const resolvedTools = picked.resolvedTools;
-      const turnTools = picked.turnTools;
-      const promptCacheKey = composePromptCacheKey([
-        turnTools?.promptCacheKey,
-        host.promptCacheEpoch,
-        loopConfig.promptCacheBustKey
-      ]);
-      void host.emitTrace(sid, {
-        kind: "turn_start",
-        data: {
-          turn,
-          adapter: adapterOf(context.session).name,
-          ...promptCacheKey ? { promptCacheKey } : {}
-        }
-      });
-      let turnInput = {
-        agent,
-        systemPrompt: lastTurn ? `${systemPrompt}
+    await timeOptionalKernelPhase(startup, "ingest_mailbox", host.ingestMailbox ? () => host.ingestMailbox(session) : void 0);
+    await timeOptionalKernelPhase(startup, "auto_claim_task", host.autoClaimTask ? () => host.autoClaimTask(session) : void 0);
+    await timeKernelPhase(startup, "claim_next_run", () => {
+      claimAndApplyInbox(host.store, sid, "next-run", { expectedWriterRunId: writerRunId });
+    });
+    {
+      const kernelFinished = await (async () => {
+        for (let turn = 0; turn < maxTurns; turn += 1) {
+          let refreshedSession;
+          let task;
+          let workspaceRoot;
+          let resolvedRoots;
+          let workspaceRoots;
+          let context;
+          let packed;
+          let visibleMessages;
+          let rawVisible;
+          let promptCtx;
+          let drainedAdvisory;
+          let systemPrompt;
+          let cacheStablePrefix;
+          let sessionPhase;
+          let beforeHook;
+          let lastTurn;
+          let picked;
+          let allowExternalAiTools;
+          let resolvedTools;
+          let turnTools;
+          let promptCacheKey;
+          let turnInput;
+          let preTurn;
+          let turnResult;
+          let promoted;
+          let stopFix;
+          let turnCostUsd;
+          let turnCostModel;
+          let recovery;
+          let spinReason;
+          let pendingRecoveryAdvisory;
+          let rawRep;
+          let repSession;
+          let repAdapter;
+          let rep;
+          let graceOut;
+          let modelStep;
+          let assistantMessage;
+          let rawToolCalls;
+          let toolCalls;
+          let closedByGate;
+          let approvalResult;
+          let hostLatch;
+          let latch;
+          let parkForApproval;
+          let drainPolicy;
+          let executable;
+          let toolsStep;
+          let results;
+          let progressDecision;
+          let toolRep;
+          let live;
+          let adapter;
+          let guarded;
+          let toolRepDecision;
+          let toolGraceOut;
+          const kernelTurnFlow = await (async () => {
+            const kernelSteps = [
+              async () => {
+                async function __gate146() {
+                  let startHook;
+                  async function __gate144() {
+                    startHook = await timeOptionalKernelPhase(startup, "session_start_hook", host.runLifecycleHook ? () => host.runLifecycleHook({
+                      phase: "session_start",
+                      sessionId: sid,
+                      agentId: agent.id,
+                      turn: 0
+                    }) : void 0);
+                    if (startHook?.block) {
+                      const msg = startHook.message ?? startHook.systemMessage ?? "blocked by session_start hook";
+                      host.store.appendMessage(sid, "system", [textPart2(msg)]);
+                      emitKernelReady(startup);
+                      return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "failed" }), "session_start_blocked"));
+                    }
+                    return void 0;
+                  }
+                  function __gate145() {
+                    if (startHook?.systemMessage) {
+                      host.store.appendMessage(sid, "system", [textPart2(startHook.systemMessage)]);
+                    }
+                    return void 0;
+                  }
+                  const __gateSignal2 = await (await __gate144() ?? __gate145());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                  return void 0;
+                }
+                async function __gate147() {
+                  if (signal.aborted) {
+                    closeWaveIfOpen();
+                    await rollbackOpenStep("abort");
+                    return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort"));
+                  }
+                  refreshedSession = host.store.getSession(session.id);
+                  task = host.resolveTask?.(refreshedSession) ?? (refreshedSession.taskId ? host.store.getTask?.(refreshedSession.taskId) : void 0);
+                  workspaceRoot = await timeOptionalKernelPhase(startup, "ensure_workspace", host.ensureWorkspaceRoot ? () => host.ensureWorkspaceRoot(refreshedSession, task) : void 0);
+                  return void 0;
+                }
+                async function __gate148() {
+                  resolvedRoots = await timeOptionalKernelPhase(startup, "resolve_workspace", host.resolveWorkspaceRoots ? () => host.resolveWorkspaceRoots(refreshedSession) : void 0);
+                  workspaceRoots = resolvedRoots ?? defaultWorkspaceRoots(workspaceRoot, host.repoRoot);
+                  context = {
+                    repoRoot: host.repoRoot,
+                    stateDir: host.stateDir,
+                    session: refreshedSession,
+                    agent,
+                    workspaceRoot: workspaceRoot ?? host.repoRoot,
+                    workspaceRoots,
+                    abortSignal: signal
+                  };
+                  return void 0;
+                }
+                async function __gate149() {
+                  if (resumeFromInterrupt) {
+                    const interrupt = resumeFromInterrupt;
+                    resumeFromInterrupt = void 0;
+                    claimAndApplyInbox(host.store, sid, "next-step", { expectedWriterRunId: writerRunId });
+                    const remaining = unmatchedToolCallsFromFold(host.store.foldMessages(sid), interrupt.toolCallIds.filter((id) => !interrupt.executedToolCallIds.includes(id)));
+                    if (remaining.length > 0) {
+                      const parked = await continueResumedToolWave({
+                        host,
+                        sid,
+                        turn,
+                        sessionId,
+                        remaining,
+                        context,
+                        refreshedSession,
+                        filePolicy,
+                        interrupt,
+                        writerRunId,
+                        pickTurnTools,
+                        emitStep,
+                        onModelStreamChunk: options?.onModelStreamChunk,
+                        finish: finishEnded
+                      });
+                      if (parked) {
+                        emitKernelReady(startup);
+                        return kernelTurnSignal("return", parked);
+                      }
+                    }
+                    const afterResume = host.store.getSession(sid);
+                    host.store.updateSession(sid, {
+                      metadata: mergeInterruptMetadata(afterResume?.metadata ?? {}, null)
+                    });
+                    return kernelTurnSignal("continue");
+                  }
+                  ensureFoldToolCallsPaired({
+                    foldMessages: () => host.store.foldMessages(sid),
+                    appendMessage: (role, parts) => host.store.appendMessage(sid, role, parts)
+                  });
+                  packed = await timeKernelPhase(startup, "pack_turn", () => packTurn({ workspaceRoot }));
+                  context = { ...context, session: packed.session };
+                  visibleMessages = packed.messages;
+                  rawVisible = packed.viewMessages;
+                  await emitStep({
+                    type: "turn_prepared",
+                    messageCount: visibleMessages.length,
+                    messages: visibleMessages,
+                    foldSeqs: packed.foldSeqs
+                  });
+                  return void 0;
+                }
+                async function __gate150() {
+                  promptCtx = {
+                    sessionId: sid,
+                    agent,
+                    session: context.session,
+                    workspaceRoot: workspaceRoot ?? host.repoRoot,
+                    repoRoot: host.repoRoot
+                  };
+                  drainedAdvisory = advisoryQueue.drainCombined();
+                  if (drainedAdvisory) {
+                    host.store.appendMessage(sid, "system", [textPart2(drainedAdvisory)]);
+                  }
+                  systemPrompt = await timeKernelPhase(startup, "build_system_prompt", async () => {
+                    if (host.promptBuilder.buildSystemPromptParts) {
+                      const parts = await host.promptBuilder.buildSystemPromptParts(promptCtx, rawVisible);
+                      cacheStablePrefix = parts.stable;
+                      sessionPhase = parts.sessionPhase;
+                      return parts.text;
+                    }
+                    cacheStablePrefix = void 0;
+                    sessionPhase = void 0;
+                    return host.promptBuilder.buildSystemPrompt(promptCtx, rawVisible);
+                  });
+                  if (turn === 0) {
+                    const __gateSignal2 = await __gate146();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  return void 0;
+                }
+                async function __gate151() {
+                  beforeHook = await timeOptionalKernelPhase(startup, "before_turn_hook", host.runLifecycleHook ? () => host.runLifecycleHook({
+                    phase: "before_turn",
+                    sessionId: sid,
+                    agentId: agent.id,
+                    turn
+                  }) : void 0);
+                  if (beforeHook?.block) {
+                    const msg = beforeHook.message ?? beforeHook.systemMessage ?? "blocked by before_turn hook";
+                    host.store.appendMessage(sid, "system", [textPart2(msg)]);
+                    return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "failed" }), "before_turn_blocked"));
+                  }
+                  return void 0;
+                }
+                async function __gate152() {
+                  if (beforeHook?.systemMessage) {
+                    host.store.appendMessage(sid, "system", [textPart2(beforeHook.systemMessage)]);
+                  }
+                  lastTurn = isLastAnswerTurn(turn, maxTurns, loopConfig.forceAnswerOnLastTurn);
+                  picked = await timeKernelPhase(startup, "pick_turn_tools", () => pickTurnTools(context.session, visibleMessages, systemPrompt.length, lastTurn));
+                  allowExternalAiTools = picked.allowExternalAiTools;
+                  resolvedTools = picked.resolvedTools;
+                  turnTools = picked.turnTools;
+                  promptCacheKey = composePromptCacheKey([
+                    turnTools?.promptCacheKey,
+                    host.promptCacheEpoch,
+                    loopConfig.promptCacheBustKey
+                  ]);
+                  const startedAdapter = adapterOf(context.session);
+                  void host.emitTrace(sid, {
+                    kind: "turn_start",
+                    data: turnStartTraceData({
+                      turn,
+                      adapterName: startedAdapter.name,
+                      modelName: startedAdapter.modelName,
+                      promptCacheKey,
+                      toolNames: resolvedTools.map((tool) => tool.name)
+                    })
+                  });
+                  return void 0;
+                }
+                async function __gate153() {
+                  turnInput = {
+                    agent,
+                    systemPrompt: lastTurn ? `${systemPrompt}
 
 ${loopConfig.lastTurnNudge}` : systemPrompt,
-        messages: visibleMessages,
-        tools: resolvedTools,
-        signal,
-        sessionId: sid,
-        resolveImageDataUrl: host.resolveImageDataUrl ? (assetId) => host.resolveImageDataUrl(assetId, context.session.id) : void 0,
-        ...promptCacheKey ? { promptCacheKey } : {}
-      };
-      const preTurn = await host.beforeModelTurn?.({
-        session: context.session,
-        messages: visibleMessages,
-        hasPendingToolCalls: false
-      });
-      if (preTurn === "skip_goal_done") {
-        host.store.appendMessage(sid, "system", [
-          textPart3("[jev-pre-turn] Goal assumed met; skipping deep model turn.")
-        ]);
-        if (host.waitSteeringChildrenIdle) {
-          await host.waitSteeringChildrenIdle(sid);
-        }
-        host.onSessionOutcome?.({
-          sessionId: session.id,
-          agentId: agent.id,
-          outcome: "success",
-          signals: { source: "jev-pre-turn" }
-        });
-        return host.handleTurnCompletion(session, agent).then((completed) => finishEnded(completed, "end"));
-      }
-      let turnResult;
-      try {
-        turnResult = await host.runTurnWithRetries(turnInput, options?.onModelStreamChunk);
-      } catch (error) {
-        if (error instanceof RepetitionLoopAbortError) {
-          void host.emitTrace(sid, {
-            kind: "repetition_abort",
-            data: { reason: error.reason, retry: true }
-          });
-          const repChoice = await maybeChooseRecovery(`repetition_abort:${error.reason}`, [
-            { id: "retry", label: "Retry the model turn once with a clean stream" },
-            { id: "stop", label: "Stop the run after repetition" }
-          ], "retry");
-          if (repChoice === "stop") {
-            host.store.appendMessage(sid, "system", [
-              textPart3(`[recovery] Stopped: model output degenerated into repetition (${error.reason})`)
-            ]);
-            if (await tryAutoFork("repetition-aborted"))
-              continue;
-            return finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition");
-          }
-          try {
-            turnResult = await host.runTurnWithRetries(turnInput, options?.onModelStreamChunk);
-          } catch (retryError) {
-            const reason = retryError instanceof RepetitionLoopAbortError ? retryError.reason : error.reason;
-            void host.emitTrace(sid, {
-              kind: "repetition_abort",
-              data: { reason, retry: false }
-            });
-            host.store.appendMessage(sid, "system", [
-              textPart3(`[recovery] Stopped: model output degenerated into repetition (${reason})`)
-            ]);
-            if (await tryAutoFork("repetition-aborted"))
-              continue;
-            return finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition");
-          }
-        } else if (isContextOverflowError(error)) {
-          void host.emitTrace(sid, {
-            kind: "model_error",
-            data: {
-              message: error instanceof Error ? error.message : String(error),
-              overflow: true
-            }
-          });
-          const compacted = await host.autoCompact(context, { force: true });
-          if (compacted.replaced) {
-            await emitStep({ type: "compacted", replaced: compacted.replaced });
-          }
-          const packedRetry = loopConfig.overflowReprepare ? await packTurn({
-            workspaceRoot,
-            skipCompact: true,
-            skipAppendix: loopConfig.overflowSkipAppendix
-          }) : {
-            messages: host.prepareMessagesForModel ? await host.prepareMessagesForModel(context.session, host.store.foldMessages(sid)) : defaultPrepareView(host.store.foldMessages(sid), {
-              refusalPreservation: loopConfig.refusalPreservation
-            })
-          };
-          turnInput = { ...turnInput, messages: packedRetry.messages };
-          turnResult = await host.runTurnWithRetries(turnInput, options?.onModelStreamChunk);
-        } else if (signal.aborted) {
-          closeWaveIfOpen();
-          await rollbackOpenStep("abort");
-          return finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort");
-        } else {
-          const err = error instanceof Error ? error : new Error(String(error));
-          const pending = unmatchedToolCallsFromFold(host.store.foldMessages(sid));
-          const recovered = await recoverFromModelBehavior({
-            error: err,
-            pending: pending.map((p) => ({ toolCallId: p.toolCallId, name: p.name })),
-            currentToolNames: resolvedTools.map((t) => t.name),
-            appendResults: (results2) => {
-              host.store.appendMessage(sid, "tool", results2.map((r) => ({
-                type: "tool_result",
-                toolCallId: r.toolCallId,
-                name: r.name,
-                ok: r.ok,
-                content: r.content
-              })));
-            }
-          });
-          if (recovered.recovered) {
-            void host.emitTrace(sid, {
-              kind: "recovery_advisory",
-              data: { reason: "model_behavior", trigger: "protocol_heal", count: recovered.results.length }
-            });
-            continue;
-          }
-          void host.emitTrace(sid, {
-            kind: "model_error",
-            data: { message: err.message }
-          });
-          const txReason = rollbackReasonOf({ runError: err.message });
-          if (txReason)
-            await rollbackOpenStep(txReason);
-          throw error;
-        }
-      }
-      const promoted = promoteAssistantReasoning(turnResult.assistantParts);
-      if (promoted.promoted) {
-        turnResult = { ...turnResult, assistantParts: promoted.parts };
-      }
-      if (lastTurn) {
-        const hadCalls = turnResult.assistantParts.some((p) => p.type === "tool_call");
-        const withoutCalls = turnResult.assistantParts.filter((p) => p.type !== "tool_call");
-        const hasText = withoutCalls.some((p) => p.type === "text" && p.text.trim());
-        turnResult = {
-          ...turnResult,
-          stopReason: "end",
-          finishReason: "stop",
-          truncated: false,
-          assistantParts: hadCalls || !hasText ? [textPart3(loopConfig.lastTurnFallback)] : withoutCalls
-        };
-      }
-      const stopFix = correctWrongStopSignal({
-        stopReason: turnResult.stopReason,
-        finishReason: turnResult.finishReason,
-        toolCallCount: toolCallParts(turnResult.assistantParts).length
-      });
-      if (stopFix.corrected) {
-        void host.emitTrace(sid, {
-          kind: "recovery_advisory",
-          data: {
-            reason: "wrong_stop_signal",
-            trigger: "wrong_stop_signal",
-            finishReason: turnResult.finishReason,
-            stopReason: turnResult.stopReason
-          }
-        });
-        turnResult = { ...turnResult, stopReason: stopFix.stopReason };
-      }
-      if (turnResult.usage) {
-        const prev = usageBySession.get(sid);
-        const split = splitCumulativePromptTokens(turnResult.usage.inputTokens, prev?.cumulative, prev?.sticky ?? false);
-        usageBySession.set(sid, {
-          cumulative: split.cumulativeInputTokens,
-          sticky: (prev?.sticky ?? false) || split.treatedAsCumulative
-        });
-        if (split.treatedAsCumulative) {
-          const cached = Math.min(turnResult.usage.cachedInputTokens ?? 0, split.turnInputTokens);
-          turnResult = {
-            ...turnResult,
-            usage: {
-              ...turnResult.usage,
-              inputTokens: split.turnInputTokens,
-              totalTokens: split.turnInputTokens + turnResult.usage.outputTokens,
-              ...cached > 0 ? { cachedInputTokens: cached } : {}
-            }
-          };
-          void host.emitTrace(sid, {
-            kind: "usage_cumulative_split",
-            data: {
-              reportedInputTokens: split.cumulativeInputTokens,
-              turnInputTokens: split.turnInputTokens
-            }
-          });
-        }
-      }
-      let turnCostUsd;
-      let turnCostModel;
-      if (turnResult.usage) {
-        try {
-          const cost = estimateUsageCostUsd(turnResult.usage, loopConfig.modelName);
-          turnCostUsd = cost.usd;
-          turnCostModel = cost.model;
-        } catch {
-        }
-      }
-      void host.emitTrace(sid, {
-        kind: "turn_end",
-        data: {
-          stopReason: turnResult.stopReason,
-          ...turnResult.finishReason ? { finishReason: turnResult.finishReason } : {},
-          ...turnResult.usage ? { usage: turnResult.usage } : {},
-          ...turnResult.truncated ? { truncated: true } : {},
-          ...turnResult.requestId ? { requestId: turnResult.requestId } : {},
-          ...turnCostUsd !== void 0 ? { costUsd: turnCostUsd, costModel: turnCostModel } : {}
-        }
-      });
-      if (turnResult.truncated) {
-        void host.emitTrace(sid, {
-          kind: "turn_truncated",
-          data: {
-            finishReason: turnResult.finishReason ?? "length",
-            ...turnResult.usage ? { outputTokens: turnResult.usage.outputTokens } : {}
-          }
-        });
-      }
-      if (turnResult.usage) {
-        try {
-          const current = host.store.getSession(session.id);
-          const prevTotals = current?.metadata?.usageTotals ?? void 0;
-          const merged = mergeUsage(prevTotals, turnResult.usage);
-          const prevCostUsd = typeof current?.metadata?.usageCostUsd === "number" ? current.metadata.usageCostUsd : void 0;
-          const usageCostUsd = mergeCostUsd(prevCostUsd, turnCostUsd);
-          if (merged) {
-            host.store.updateSession(session.id, {
-              metadata: {
-                ...current?.metadata ?? {},
-                usageTotals: merged,
-                ...usageCostUsd !== void 0 ? { usageCostUsd } : {}
+                    messages: visibleMessages,
+                    tools: resolvedTools,
+                    signal,
+                    sessionId: sid,
+                    resolveMediaDataUrl: host.resolveMediaDataUrl ? (part, mediaSignal) => host.resolveMediaDataUrl(part, context.session.id, mediaSignal) : void 0,
+                    resolveImageDataUrl: host.resolveImageDataUrl ? (assetId) => host.resolveImageDataUrl(assetId, context.session.id) : void 0,
+                    ...promptCacheKey ? { promptCacheKey } : {},
+                    ...cacheStablePrefix ? { cacheStablePrefix } : {},
+                    sessionPhase
+                  };
+                  preTurn = await timeOptionalKernelPhase(startup, "before_model", host.beforeModelTurn ? () => host.beforeModelTurn({
+                    session: context.session,
+                    messages: visibleMessages,
+                    hasPendingToolCalls: false
+                  }) : void 0);
+                  return void 0;
+                }
+                async function __gateGrp154() {
+                  const __gateSignal2 = await (await __gate147() ?? await __gate148() ?? await __gate149() ?? await __gate150());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                }
+                async function __gateGrp155() {
+                  const __gateSignal2 = await (await __gate151() ?? await __gate152() ?? await __gate153());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                }
+                const __gateSignal = await (await __gateGrp154() ?? await __gateGrp155());
+                if (__gateSignal)
+                  return __gateSignal;
+                return void 0;
+              },
+              async () => {
+                async function __gate133() {
+                  await prepareExplicitSessionHandoff(host, sid, { userTurn: turn === 0 });
+                  turnInput = foldHandoffContext(host, sid, turnInput);
+                  turnResult = await runModelTurn(turnInput, options?.onModelStreamChunk);
+                  return void 0;
+                }
+                async function __gate140(error) {
+                  async function __gate136() {
+                    let repChoice;
+                    async function __gate134() {
+                      void host.emitTrace(sid, {
+                        kind: "repetition_abort",
+                        data: { reason: error.reason, retry: true }
+                      });
+                      repChoice = await maybeChooseRecovery(`repetition_abort:${error.reason}`, [
+                        { id: "retry", label: "Retry the model turn once with a clean stream" },
+                        { id: "stop", label: "Stop the run after repetition" }
+                      ], "retry");
+                      if (repChoice === "stop") {
+                        host.store.appendMessage(sid, "system", [
+                          textPart2(`[recovery] Stopped: model output degenerated into repetition (${error.reason})`)
+                        ]);
+                        if (await tryAutoFork("repetition-aborted"))
+                          return kernelTurnSignal("continue");
+                        return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition"));
+                      }
+                      return void 0;
+                    }
+                    async function __gate135() {
+                      try {
+                        await prepareExplicitSessionHandoff(host, sid, { userTurn: false });
+                        turnInput = foldHandoffContext(host, sid, turnInput);
+                        turnResult = await runModelTurn(turnInput, options?.onModelStreamChunk);
+                      } catch (retryError) {
+                        const reason = retryError instanceof RepetitionLoopAbortError ? retryError.reason : error.reason;
+                        void host.emitTrace(sid, {
+                          kind: "repetition_abort",
+                          data: { reason, retry: false }
+                        });
+                        host.store.appendMessage(sid, "system", [
+                          textPart2(`[recovery] Stopped: model output degenerated into repetition (${reason})`)
+                        ]);
+                        if (await tryAutoFork("repetition-aborted"))
+                          return kernelTurnSignal("continue");
+                        return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition"));
+                      }
+                      return void 0;
+                    }
+                    const __gateSignal2 = await (await __gate134() ?? await __gate135());
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                    return void 0;
+                    return void 0;
+                  }
+                  async function __gate139() {
+                    async function __gate137() {
+                      let compacted;
+                      let packedRetry;
+                      void host.emitTrace(sid, {
+                        kind: "model_error",
+                        data: {
+                          message: error instanceof Error ? error.message : String(error),
+                          overflow: true
+                        }
+                      });
+                      compacted = await host.autoCompact(context, { force: true });
+                      if (compacted.replaced) {
+                        await emitStep({ type: "compacted", replaced: compacted.replaced });
+                      }
+                      packedRetry = loopConfig.overflowReprepare ? await packTurn({
+                        workspaceRoot,
+                        skipCompact: true,
+                        skipAppendix: loopConfig.overflowSkipAppendix
+                      }) : {
+                        messages: host.prepareMessagesForModel ? await host.prepareMessagesForModel(context.session, host.store.foldMessages(sid)) : defaultPrepareView(host.store.foldMessages(sid), {
+                          refusalPreservation: loopConfig.refusalPreservation
+                        })
+                      };
+                      turnInput = { ...turnInput, messages: packedRetry.messages };
+                      await prepareExplicitSessionHandoff(host, sid, { userTurn: false });
+                      turnInput = foldHandoffContext(host, sid, turnInput);
+                      turnResult = await runModelTurn(turnInput, options?.onModelStreamChunk);
+                      return void 0;
+                    }
+                    async function __gate138() {
+                      if (signal.aborted) {
+                        closeWaveIfOpen();
+                        await rollbackOpenStep("abort");
+                        return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort"));
+                      } else {
+                        const err = error instanceof Error ? error : new Error(String(error));
+                        const pending = unmatchedToolCallsFromFold(host.store.foldMessages(sid));
+                        const recovered = await recoverFromModelBehavior({
+                          error: err,
+                          pending: pending.map((p) => ({ toolCallId: p.toolCallId, name: p.name })),
+                          currentToolNames: resolvedTools.map((t) => t.name),
+                          appendResults: (results2) => {
+                            host.store.appendMessage(sid, "tool", results2.map((r) => ({
+                              type: "tool_result",
+                              toolCallId: r.toolCallId,
+                              name: r.name,
+                              ok: r.ok,
+                              content: r.content
+                            })));
+                          }
+                        });
+                        if (recovered.recovered) {
+                          void host.emitTrace(sid, {
+                            kind: "recovery_advisory",
+                            data: { reason: "model_behavior", trigger: "protocol_heal", count: recovered.results.length }
+                          });
+                          return kernelTurnSignal("continue");
+                        }
+                        void host.emitTrace(sid, {
+                          kind: "model_error",
+                          data: { message: err.message }
+                        });
+                        const txReason = rollbackReasonOf({ runError: err.message });
+                        if (txReason)
+                          await rollbackOpenStep(txReason);
+                        throw error;
+                      }
+                      return void 0;
+                    }
+                    if (isContextOverflowError(error)) {
+                      const __gateSignal2 = await __gate137();
+                      if (__gateSignal2)
+                        return __gateSignal2;
+                    } else {
+                      const __gateSignal2 = await __gate138();
+                      if (__gateSignal2)
+                        return __gateSignal2;
+                    }
+                    return void 0;
+                  }
+                  if (error instanceof RepetitionLoopAbortError) {
+                    const __gateSignal2 = await __gate136();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  } else {
+                    const __gateSignal2 = await __gate139();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  return void 0;
+                }
+                async function __gate141() {
+                  if (preTurn === "skip_goal_done")
+                    emitKernelReady(startup);
+                  if (preTurn === "skip_goal_done") {
+                    host.store.appendMessage(sid, "system", [
+                      textPart2("[jev-pre-turn] Goal assumed met; skipping deep model turn.")
+                    ]);
+                    if (host.waitSteeringChildrenIdle) {
+                      await host.waitSteeringChildrenIdle(sid);
+                    }
+                    host.onSessionOutcome?.({
+                      sessionId: session.id,
+                      agentId: agent.id,
+                      outcome: "success",
+                      signals: { source: "jev-pre-turn" }
+                    });
+                    return kernelTurnSignal("return", await host.handleTurnCompletion(session, agent).then((completed) => finishEnded(completed, "end")));
+                  }
+                  return void 0;
+                }
+                async function __gate142() {
+                  try {
+                    const __gateSignal2 = await __gate133();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  } catch (error) {
+                    const __gateSignal2 = await __gate140(error);
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  promoted = promoteAssistantReasoning(turnResult.assistantParts);
+                  if (promoted.promoted) {
+                    turnResult = { ...turnResult, assistantParts: promoted.parts };
+                  }
+                  return void 0;
+                }
+                function __gate143() {
+                  if (lastTurn) {
+                    const hadCalls = turnResult.assistantParts.some((p) => p.type === "tool_call");
+                    const withoutCalls = turnResult.assistantParts.filter((p) => p.type !== "tool_call");
+                    const hasText = withoutCalls.some((p) => p.type === "text" && p.text.trim());
+                    turnResult = {
+                      ...turnResult,
+                      stopReason: "end",
+                      finishReason: "stop",
+                      truncated: false,
+                      assistantParts: hadCalls || !hasText ? [textPart2(loopConfig.lastTurnFallback)] : withoutCalls
+                    };
+                  }
+                  stopFix = correctWrongStopSignal({
+                    stopReason: turnResult.stopReason,
+                    finishReason: turnResult.finishReason,
+                    toolCallCount: toolCallParts(turnResult.assistantParts).length
+                  });
+                  if (stopFix.corrected) {
+                    void host.emitTrace(sid, {
+                      kind: "recovery_advisory",
+                      data: {
+                        reason: "wrong_stop_signal",
+                        trigger: "wrong_stop_signal",
+                        finishReason: turnResult.finishReason,
+                        stopReason: turnResult.stopReason
+                      }
+                    });
+                    turnResult = { ...turnResult, stopReason: stopFix.stopReason };
+                  }
+                  return void 0;
+                }
+                const __gateSignal = await (await __gate141() ?? await __gate142() ?? __gate143());
+                if (__gateSignal)
+                  return __gateSignal;
+                return void 0;
+              },
+              async () => {
+                async function __gate120() {
+                  let prev;
+                  let split;
+                  function __gate118() {
+                    prev = usageBySession.get(sid);
+                    split = splitCumulativePromptTokens(turnResult.usage.inputTokens, prev?.cumulative, prev?.sticky ?? false);
+                    usageBySession.set(sid, {
+                      cumulative: split.cumulativeInputTokens,
+                      sticky: (prev?.sticky ?? false) || split.treatedAsCumulative
+                    });
+                    return void 0;
+                  }
+                  function __gate119() {
+                    if (split.treatedAsCumulative) {
+                      const cached = Math.min(turnResult.usage.cachedInputTokens ?? 0, split.turnInputTokens);
+                      turnResult = {
+                        ...turnResult,
+                        usage: {
+                          ...turnResult.usage,
+                          inputTokens: split.turnInputTokens,
+                          totalTokens: split.turnInputTokens + turnResult.usage.outputTokens,
+                          ...cached > 0 ? { cachedInputTokens: cached } : {}
+                        }
+                      };
+                      void host.emitTrace(sid, {
+                        kind: "usage_cumulative_split",
+                        data: {
+                          reportedInputTokens: split.cumulativeInputTokens,
+                          turnInputTokens: split.turnInputTokens
+                        }
+                      });
+                    }
+                    return void 0;
+                  }
+                  const __gateSignal2 = await (__gate118() ?? __gate119());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                  return void 0;
+                }
+                function __gateExpr121() {
+                  return turnCostUsd !== void 0 ? { costUsd: turnCostUsd, costModel: turnCostModel } : {};
+                }
+                function __gateExpr122() {
+                  return {
+                    stopReason: turnResult.stopReason,
+                    ...turnResult.finishReason ? { finishReason: turnResult.finishReason } : {},
+                    ...turnResult.usage ? { usage: turnResult.usage } : {},
+                    ...turnResult.truncated ? { truncated: true } : {},
+                    ...turnResult.requestId ? { requestId: turnResult.requestId } : {},
+                    ...__gateExpr121()
+                  };
+                }
+                function __gateExpr123() {
+                  return {
+                    kind: "turn_end",
+                    data: __gateExpr122()
+                  };
+                }
+                function __gateExpr124() {
+                  return host.emitTrace(sid, __gateExpr123());
+                }
+                async function __gate129() {
+                  async function __gate127() {
+                    let current;
+                    let prevTotals;
+                    let prevCostUsd;
+                    let merged;
+                    let usageCostUsd;
+                    function __gate125() {
+                      current = host.store.getSession(session.id);
+                      prevTotals = current?.metadata?.usageTotals ?? void 0;
+                      merged = mergeUsage(prevTotals, turnResult.usage);
+                      prevCostUsd = typeof current?.metadata?.usageCostUsd === "number" ? current.metadata.usageCostUsd : void 0;
+                      usageCostUsd = mergeCostUsd(prevCostUsd, turnCostUsd);
+                      return void 0;
+                    }
+                    function __gate126() {
+                      if (merged) {
+                        host.store.updateSession(session.id, {
+                          metadata: {
+                            ...current?.metadata ?? {},
+                            usageTotals: merged,
+                            ...usageCostUsd !== void 0 ? { usageCostUsd } : {}
+                          }
+                        });
+                      }
+                      return void 0;
+                    }
+                    const __gateSignal2 = await (__gate125() ?? __gate126());
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                    return void 0;
+                    return void 0;
+                  }
+                  function __gate128() {
+                    return void 0;
+                  }
+                  try {
+                    const __gateSignal2 = await __gate127();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  } catch {
+                    const __gateSignal2 = __gate128();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  return void 0;
+                }
+                async function __gate130() {
+                  if (turnResult.usage) {
+                    const __gateSignal2 = await __gate120();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  if (turnResult.usage) {
+                    try {
+                      const cost = estimateUsageCostUsd(turnResult.usage, loopConfig.modelName);
+                      turnCostUsd = cost.usd;
+                      turnCostModel = cost.model;
+                    } catch {
+                    }
+                  }
+                  void __gateExpr124();
+                  return void 0;
+                }
+                function __gate131() {
+                  if (turnResult.truncated) {
+                    void host.emitTrace(sid, {
+                      kind: "turn_truncated",
+                      data: {
+                        finishReason: turnResult.finishReason ?? "length",
+                        ...turnResult.usage ? { outputTokens: turnResult.usage.outputTokens } : {}
+                      }
+                    });
+                  }
+                  return void 0;
+                }
+                async function __gate132() {
+                  if (turnResult.usage) {
+                    const __gateSignal2 = await __gate129();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  recovery = decideTurnRecovery({
+                    stopReason: turnResult.stopReason,
+                    finishReason: turnResult.finishReason,
+                    truncated: turnResult.truncated,
+                    assistantParts: turnResult.assistantParts,
+                    state: recoveryState,
+                    userAborted: signal.aborted
+                  });
+                  return void 0;
+                }
+                const __gateSignal = await (await __gate130() ?? __gate131() ?? await __gate132());
+                if (__gateSignal)
+                  return __gateSignal;
+                return void 0;
+              },
+              async () => {
+                async function __gate110() {
+                  let recoveryOpts;
+                  let chosen;
+                  function __gate107() {
+                    function __gate101() {
+                      recovery = { action: "continue" };
+                      return void 0;
+                    }
+                    function __gate106() {
+                      function __gate102() {
+                        recovery = { action: "end" };
+                        return void 0;
+                      }
+                      function __gate105() {
+                        function __gate103() {
+                          recovery = { action: "retry-same-input" };
+                          return void 0;
+                        }
+                        function __gate104() {
+                          if (chosen === "retry-after-nudge") {
+                            recovery = {
+                              action: "retry-after-nudge",
+                              nudge: recovery.action === "retry-after-nudge" ? recovery.nudge : "[recovery] Retry after Jev recovery choice."
+                            };
+                          } else if (chosen === "abort") {
+                            recovery = {
+                              action: "abort",
+                              reason: recovery.action === "abort" ? recovery.reason : "jev_recovery_choice"
+                            };
+                          }
+                          return void 0;
+                        }
+                        if (chosen === "retry-same-input") {
+                          const __gateSignal3 = __gate103();
+                          if (__gateSignal3)
+                            return __gateSignal3;
+                        } else {
+                          const __gateSignal3 = __gate104();
+                          if (__gateSignal3)
+                            return __gateSignal3;
+                        }
+                        return void 0;
+                      }
+                      if (chosen === "end") {
+                        const __gateSignal3 = __gate102();
+                        if (__gateSignal3)
+                          return __gateSignal3;
+                      } else {
+                        const __gateSignal3 = __gate105();
+                        if (__gateSignal3)
+                          return __gateSignal3;
+                      }
+                      return void 0;
+                    }
+                    if (chosen === "continue") {
+                      const __gateSignal3 = __gate101();
+                      if (__gateSignal3)
+                        return __gateSignal3;
+                    } else {
+                      const __gateSignal3 = __gate106();
+                      if (__gateSignal3)
+                        return __gateSignal3;
+                    }
+                    return void 0;
+                  }
+                  function __gate108() {
+                    recoveryOpts = [
+                      { id: recovery.action, label: `Default: ${recovery.action}` }
+                    ];
+                    if (recovery.action === "retry-same-input" || recovery.action === "retry-after-nudge") {
+                      recoveryOpts.push({ id: "abort", label: "Stop instead of retrying" });
+                      recoveryOpts.push({ id: "end", label: "End the turn without retry" });
+                    } else if (recovery.action === "abort") {
+                      recoveryOpts.push({ id: "retry-after-nudge", label: "Nudge and retry once more" });
+                      recoveryOpts.push({ id: "end", label: "End cleanly without abort label" });
+                    } else if (recovery.action === "end") {
+                      recoveryOpts.push({ id: "continue", label: "Continue the loop" });
+                    }
+                    return void 0;
+                  }
+                  async function __gate109() {
+                    chosen = await maybeChooseRecovery(`turn_recovery:${turnResult.stopReason}:${turnResult.finishReason ?? ""}`, recoveryOpts, recovery.action);
+                    if (chosen !== recovery.action) {
+                      const __gateSignal3 = __gate107();
+                      if (__gateSignal3)
+                        return __gateSignal3;
+                    }
+                    return void 0;
+                  }
+                  const __gateSignal2 = await (__gate108() ?? await __gate109());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                  return void 0;
+                }
+                async function __gate111() {
+                  if (recovery.action !== "continue" || turnResult.truncated || turnResult.assistantParts.length === 0) {
+                    const __gateSignal2 = await __gate110();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  return void 0;
+                }
+                async function __gate112() {
+                  if (discardedAssistant(recovery)) {
+                    void host.emitTrace(sid, {
+                      kind: "recovery_advisory",
+                      data: {
+                        reason: "leaked_tool_call",
+                        trigger: "leaked_tool_call",
+                        exhausted: recovery.action === "abort",
+                        stopReason: turnResult.stopReason
+                      }
+                    });
+                  }
+                  if (recovery.action === "abort" && recovery.reason === "user_abort") {
+                    closeWaveIfOpen();
+                    await rollbackOpenStep("abort");
+                    return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort"));
+                  }
+                  if (recovery.action === "retry-same-input") {
+                    host.store.appendMessage(sid, "system", [
+                      textPart2("[recovery] Truncated/incomplete tool_call discarded; retrying the same input.")
+                    ]);
+                    return kernelTurnSignal("continue");
+                  }
+                  return void 0;
+                }
+                async function __gate113() {
+                  if (recovery.action === "retry-after-nudge") {
+                    if (!recovery.discardAssistant && turnResult.assistantParts.length > 0) {
+                      await saveRetainedAssistant(turn, turnResult.assistantParts);
+                    }
+                    host.store.appendMessage(sid, "system", [textPart2(recovery.nudge)]);
+                    return kernelTurnSignal("continue");
+                  }
+                  return void 0;
+                }
+                async function __gate114() {
+                  if (recovery.action === "abort") {
+                    const reason = recovery.reason;
+                    host.store.appendMessage(sid, "system", [
+                      textPart2(reason === "empty_assistant" ? "[recovery] Stopped: model returned no assistant content after retries." : `[recovery] Stopped: ${reason}`)
+                    ]);
+                    void host.emitTrace(sid, {
+                      kind: "recovery_abort",
+                      data: { reason, trigger: "turn_recovery" }
+                    });
+                    return kernelTurnSignal("return", await finishEnded(host.store.updateSession(session.id, { status: "idle" }), reason));
+                  }
+                  if (turnResult.assistantParts.length === 0) {
+                    host.store.appendMessage(sid, "system", [
+                      textPart2("[recovery] Stopped: model returned no assistant content after retries.")
+                    ]);
+                    return kernelTurnSignal("return", await finishEnded(host.store.updateSession(session.id, { status: "idle" }), "empty_assistant"));
+                  }
+                  spinReason = spinWatchdog?.noteParts(turnResult.assistantParts);
+                  if (spinReason) {
+                    await saveRetainedAssistant(turn, turnResult.assistantParts);
+                    host.store.appendMessage(sid, "system", [textPart2(`[recovery] Stopped: ${spinReason}`)]);
+                    void host.emitTrace(sid, {
+                      kind: "reasoning_spin_abort",
+                      data: { reason: spinReason, streak: spinWatchdog?.streak }
+                    });
+                    return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "idle" }), "reasoning_spin"));
+                  }
+                  return void 0;
+                }
+                function __gate115() {
+                  rawRep = loopGuard?.checkAssistantRepetition(turnResult.assistantParts) ?? { abort: false };
+                  repSession = host.store.getSession(sid) ?? session;
+                  repAdapter = adapterOf(repSession);
+                  rep = applyRepeatGuard({
+                    store: host.store,
+                    identity: modelIdentity({
+                      modelName: repAdapter.modelName,
+                      adapterName: repAdapter.name,
+                      metadata: repSession.metadata
+                    }),
+                    decision: rawRep
+                  });
+                  return void 0;
+                }
+                async function __gateGrp116() {
+                  const __gateSignal2 = await (await __gate111() ?? await __gate112() ?? await __gate113() ?? await __gate114());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                }
+                function __gateGrp117() {
+                  const __gateSignal2 = __gate115();
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                }
+                const __gateSignal = await (await __gateGrp116() ?? __gateGrp117());
+                if (__gateSignal)
+                  return __gateSignal;
+                return void 0;
+              },
+              async () => {
+                async function __gate89() {
+                  let guardChoice;
+                  async function __gate87() {
+                    guardChoice = await maybeChooseRecovery(`loop_guard_repetition:${graceOut.reason}`, [
+                      { id: "advise", label: "Inject advisory and continue" },
+                      { id: "abort", label: "Stop the run for repetition" },
+                      { id: "continue", label: "Ignore and continue" }
+                    ], graceOut.action);
+                    if (guardChoice === "abort") {
+                      await saveRetainedAssistant(turn, turnResult.assistantParts);
+                      await host.injectRecoveryCoach?.({
+                        session,
+                        agent,
+                        trigger: "repetition",
+                        reason: graceOut.reason
+                      });
+                      host.store.appendMessage(session.id, "system", [
+                        textPart2(`[recovery] Stopped: ${graceOut.reason}`)
+                      ]);
+                      void host.emitTrace(sid, {
+                        kind: "recovery_abort",
+                        data: { reason: graceOut.reason, trigger: "repetition" }
+                      });
+                      host.onSessionOutcome?.({
+                        sessionId: session.id,
+                        agentId: agent.id,
+                        outcome: "failure",
+                        signals: { trigger: "repetition", reason: graceOut.reason }
+                      });
+                      if (await tryAutoFork("repetition-aborted"))
+                        return kernelTurnSignal("continue");
+                      return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition"));
+                    }
+                    return void 0;
+                  }
+                  async function __gate88() {
+                    if (guardChoice === "advise") {
+                      const strike = noteCriticalHit(recoveryState);
+                      if (strike.action === "abort") {
+                        await saveRetainedAssistant(turn, turnResult.assistantParts);
+                        host.store.appendMessage(session.id, "system", [
+                          textPart2(`[recovery] Stopped: ${graceOut.reason} (critical strike)`)
+                        ]);
+                        if (await tryAutoFork("repetition-aborted"))
+                          return kernelTurnSignal("continue");
+                        return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition"));
+                      }
+                      pendingRecoveryAdvisory = graceOut.action === "advise" ? graceOut.advisory : `[recovery-advisory] ${graceOut.reason}`;
+                      void host.emitTrace(sid, {
+                        kind: "recovery_advisory",
+                        data: { reason: graceOut.reason, trigger: "repetition" }
+                      });
+                    }
+                    return void 0;
+                  }
+                  const __gateSignal2 = await (await __gate87() ?? await __gate88());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                  return void 0;
+                }
+                async function __gate97() {
+                  closePlannerAnswer(host, sid, turnResult.assistantParts);
+                  let stopPhase;
+                  let stopHook;
+                  let goal;
+                  let steeredNow;
+                  async function __gate90() {
+                    stopPhase = context.session.mode === "subagent" ? "subagent_stop" : "stop";
+                    stopHook = await host.runLifecycleHook?.({
+                      phase: stopPhase,
+                      sessionId: sid,
+                      agentId: agent.id,
+                      meta: { stopReason: turnResult.stopReason }
+                    });
+                    if (stopHook?.block) {
+                      const msg = stopHook.message ?? stopHook.systemMessage ?? "stop blocked; continuing";
+                      host.store.appendMessage(sid, "system", [textPart2(`[stop-hook] ${msg}`)]);
+                      return kernelTurnSignal("continue");
+                    }
+                    return void 0;
+                  }
+                  async function __gate91() {
+                    if (stopHook?.systemMessage) {
+                      host.store.appendMessage(sid, "system", [textPart2(stopHook.systemMessage)]);
+                    }
+                    goal = await host.evaluateGoalGate?.({
+                      session: sessionForTurn(host, sid, session),
+                      agent,
+                      signal,
+                      workspaceRoot: workspaceRoot ?? host.repoRoot,
+                      finalTurn: lastTurn === true
+                    });
+                    return void 0;
+                  }
+                  function __gate92() {
+                    if (goal?.systemMessage) {
+                      host.store.appendMessage(sid, "system", [textPart2(goal.systemMessage)]);
+                    } else if (goal && !goal.met) {
+                      host.store.appendMessage(sid, "system", [
+                        textPart2(`[goal] not yet met: ${goal.reason ?? "continuing"}`)
+                      ]);
+                    }
+                    return void 0;
+                  }
+                  async function __gate93() {
+                    if (goal && (!goal.met || goal.action === "continue")) {
+                      return kernelTurnSignal("continue");
+                    }
+                    if (host.waitSteeringChildrenIdle) {
+                      await host.waitSteeringChildrenIdle(sid);
+                    }
+                    steeredNow = claimAndApplyInbox(host.store, sid, "next-step", {
+                      expectedWriterRunId: writerRunId
+                    });
+                    return void 0;
+                  }
+                  async function __gate94() {
+                    if (steeredNow.length > 0)
+                      return kernelTurnSignal("continue");
+                    host.onSessionOutcome?.(lastTurn ? {
+                      sessionId: session.id,
+                      agentId: agent.id,
+                      outcome: "partial",
+                      signals: { reason: "max_turns_exhausted", maxTurns, answered: true }
+                    } : {
+                      sessionId: session.id,
+                      agentId: agent.id,
+                      outcome: "success"
+                    });
+                    return kernelTurnSignal("return", await host.handleTurnCompletion(session, agent).then((completed) => lastTurn ? finishEnded(completed, TURN_LIMIT_REASON, true) : finishEnded(completed, "end")));
+                    return void 0;
+                  }
+                  async function __gateGrp95() {
+                    const __gateSignal3 = await (await __gate90() ?? await __gate91() ?? __gate92() ?? await __gate93());
+                    if (__gateSignal3)
+                      return __gateSignal3;
+                    return void 0;
+                  }
+                  async function __gateGrp96() {
+                    const __gateSignal3 = await await __gate94();
+                    if (__gateSignal3)
+                      return __gateSignal3;
+                    return void 0;
+                  }
+                  const __gateSignal2 = await (await __gateGrp95() ?? await __gateGrp96());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                  return void 0;
+                }
+                async function __gate98() {
+                  graceOut = advisoryGrace.apply(rep.abort ? { abort: true, reason: rep.reason } : { abort: false });
+                  if (graceOut.action === "advise" || graceOut.action === "abort") {
+                    const __gateSignal2 = await __gate89();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  modelStep = stepInfo(turn, "model_done");
+                  await host.stepTx?.beginStep?.(modelStep);
+                  assistantMessage = host.store.appendMessage(session.id, "assistant", turnResult.assistantParts);
+                  return void 0;
+                }
+                async function __gate99() {
+                  if (pendingRecoveryAdvisory) {
+                    host.store.appendMessage(session.id, "system", [textPart2(pendingRecoveryAdvisory)]);
+                  }
+                  await emitStep({
+                    type: "model_done",
+                    stopReason: turnResult.stopReason,
+                    finishReason: turnResult.finishReason,
+                    truncated: turnResult.truncated,
+                    assistant: { parts: turnResult.assistantParts }
+                  });
+                  await host.stepTx?.commitStep?.(modelStep);
+                  options?.onModelStreamChunk?.({ type: "assistant_saved", messageId: assistantMessage.id });
+                  if (recovery.action !== "continue") {
+                    const __gateSignal2 = await __gate97();
+                    if (__gateSignal2)
+                      return __gateSignal2;
+                  }
+                  rawToolCalls = assistantMessage.parts.filter((part) => part.type === "tool_call");
+                  toolCalls = host.filterValidToolCalls ? host.filterValidToolCalls(rawToolCalls, allowExternalAiTools, sid, resolvedTools) : rawToolCalls;
+                  return void 0;
+                }
+                async function __gate100() {
+                  if (toolCalls.length === 0) {
+                    closePlannerAnswer(host, sid, turnResult.assistantParts);
+                    return kernelTurnSignal("continue");
+                  }
+                  if (signal.aborted) {
+                    closeWaveIfOpen();
+                    await rollbackOpenStep("abort");
+                    return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort"));
+                  }
+                  closedByGate = { reported: false, ids: [] };
+                  return void 0;
+                }
+                const __gateSignal = await (await __gate98() ?? await __gate99() ?? await __gate100());
+                if (__gateSignal)
+                  return __gateSignal;
+                return void 0;
+              },
+              async () => {
+                async function __gate77() {
+                  approvalResult = await host.checkToolApprovals?.(toolCalls, context, sessionForTurn(host, sid, session), {
+                    filePolicy,
+                    turnTools: resolvedTools,
+                    closedByGate
+                  }) ?? "proceed";
+                  hostLatch = loopConfig.hitlLatch ? await host.shouldLatchBeforeTools?.({ session, toolCalls }) : void 0;
+                  latch = decideHitlLatch({
+                    aborted: signal.aborted,
+                    approval: approvalResult,
+                    hostLatch
+                  });
+                  parkForApproval = async () => {
+                    host.noteGoalWaitingUser?.(sid, toolCalls);
+                    const approvalIds = host.store.listApprovals({ status: "pending" }).filter((a) => a.sessionId === sid).map((a) => a.id);
+                    const interrupt = createWaitingApprovalInterrupt({
+                      toolCallIds: toolCalls.map((c) => c.toolCallId),
+                      approvalIds,
+                      writerRunId
+                    });
+                    const current = host.store.getSession(sid);
+                    const outcome = runOutcomeFromEnd({
+                      reason: "waiting_approval",
+                      sessionStatus: "waiting_approval"
+                    });
+                    const updated = host.store.updateSession(sid, {
+                      status: "waiting_approval",
+                      metadata: mergeInterruptMetadata(mergeOutcomeMetadata(current.metadata ?? {}, outcome), interrupt)
+                    });
+                    await emitStep({ type: "waiting_approval", approvalIds, interrupt });
+                    void host.emitTrace(sid, {
+                      kind: "turn_end",
+                      data: { terminal: true, reason: "waiting_approval", outcome }
+                    });
+                    return updated;
+                  };
+                  if (latch.action === "abort") {
+                    closeWaveIfOpen();
+                    await rollbackOpenStep("abort");
+                    return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort"));
+                  }
+                  if (latch.action === "waiting") {
+                    return kernelTurnSignal("return", await parkForApproval());
+                  }
+                  return void 0;
+                }
+                async function __gate78() {
+                  if (latch.action === "skip") {
+                    return kernelTurnSignal("continue");
+                  }
+                  if (latch.action === "steer") {
+                    closeWaveIfOpen();
+                    return kernelTurnSignal("return", await finishEnded(host.store.updateSession(session.id, { status: "idle" }), "steering"));
+                  }
+                  drainPolicy = resolveSteerDrainPolicy({
+                    option: options?.steerDrainPolicy,
+                    sessionMetadata: host.store.getSession(sid)?.metadata,
+                    store: host.store
+                  });
+                  if (typeof host.store.claimInbox === "function" && typeof host.store.hideByKey === "function") {
+                    drainSteerAtToolLaunch({
+                      store: host.store,
+                      sessionId: sid,
+                      toolCallIds: toolCalls.map((c) => c.toolCallId),
+                      policy: drainPolicy,
+                      expectedWriterRunId: writerRunId
+                    });
+                  }
+                  executable = selectExecutableToolCalls(toolCalls, closedByGate, () => unmatchedToolCallsFromFold(host.store.foldMessages(sid), toolCalls.map((call) => call.toolCallId)));
+                  return void 0;
+                }
+                async function __gate79() {
+                  if (executable.length === 0) {
+                    return kernelTurnSignal("continue");
+                  }
+                  toolsStep = stepInfo(turn, "tools_done");
+                  await host.stepTx?.beginStep?.(toolsStep);
+                  results = await executeGatedToolWave(host, context.session, executable, context, allowExternalAiTools, sid, resolvedTools);
+                  host.processToolResults(resultsToPersist(results), executable, context.session, void 0, sid, options?.onModelStreamChunk);
+                  recordExplicitHandoff(host, sid, results);
+                  if (toolWaveHeldForApproval(results)) {
+                    return kernelTurnSignal("return", await parkForApproval());
+                  }
+                  for (const r of results) {
+                    host.recordToolUse?.({ name: r.name, sessionId: sid, turn, ok: r.ok });
+                  }
+                  await emitStep({
+                    type: "tools_done",
+                    results: results.map((r) => ({ ok: r.ok, content: r.content, name: r.name }))
+                  });
+                  await host.stepTx?.commitStep?.(toolsStep);
+                  return void 0;
+                }
+                async function stopUnassignedGoalCheckpoint() {
+                  const reason = goalCheckpointTerminalReason(results);
+                  if (!reason)
+                    return void 0;
+                  return kernelTurnSignal("return", await finishEnded(host.store.updateSession(session.id, { status: "idle" }), reason));
+                }
+                async function __gate80() {
+                  if (stopAt.size > 0) {
+                    const hit = results.find((r) => r.ok && stopAt.has(r.name));
+                    if (hit) {
+                      return kernelTurnSignal("return", await finishEnded(host.store.updateSession(session.id, { status: "idle" }), `stop_at:${hit.name}`));
+                    }
+                  }
+                  progressDecision = progressGuard.afterToolRound(executable, results);
+                  return stopUnassignedGoalCheckpoint();
+                }
+                function __gate81() {
+                  if (riskEngine) {
+                    for (const r of results) {
+                      riskEngine.observeTool({ toolName: r.name, success: r.ok, errorMessage: r.ok ? void 0 : r.content });
+                    }
+                    const usageTotals = host.store.getSession(sid)?.metadata?.usageTotals;
+                    const tick = riskEngine.tick({
+                      iteration: turn,
+                      iterationLimit: maxTurns,
+                      usedTokens: usageTotals?.totalTokens,
+                      budgetTokens: loopConfig.budgetTokens,
+                      sameToolStreak: progressGuard.sameToolStreak,
+                      sameToolThreshold: progressGuard.sameToolThreshold
+                    });
+                    if (tick.shouldAdvise) {
+                      const draft = advisoryQueue.enqueue(formatRiskAdvisory(tick.signals), "risk");
+                      void host.emitTrace(sid, {
+                        kind: "risk_advisory",
+                        data: { reason: tick.reason, signals: tick.signals, advisoryId: draft.id }
+                      });
+                    }
+                  }
+                  return void 0;
+                }
+                function __gate82() {
+                  toolRep = loopGuard ? progressDecision : { abort: false };
+                  live = host.store.getSession(sid) ?? session;
+                  adapter = adapterOf(live);
+                  guarded = applyRepeatGuard({
+                    store: host.store,
+                    identity: modelIdentity({
+                      modelName: adapter.modelName,
+                      adapterName: adapter.name,
+                      metadata: live.metadata
+                    }),
+                    decision: toolRep
+                  });
+                  toolRepDecision = guarded.abort ? { abort: true, reason: guarded.reason } : { abort: false, reason: "" };
+                  toolGraceOut = advisoryGrace.apply(toolRepDecision);
+                  return void 0;
+                }
+                async function __gate83() {
+                  if (toolGraceOut.action === "advise") {
+                    const strike = noteCriticalHit(recoveryState);
+                    if (strike.action === "abort") {
+                      host.store.appendMessage(session.id, "system", [
+                        textPart2(`[recovery] Stopped: ${toolGraceOut.reason} (critical strike)`)
+                      ]);
+                      if (await tryAutoFork("deadloop-exhausted"))
+                        return kernelTurnSignal("continue");
+                      return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "idle" }), loopGuardStopReason(toolGraceOut.reason)));
+                    }
+                    host.store.appendMessage(session.id, "system", [textPart2(toolGraceOut.advisory)]);
+                    void host.emitTrace(sid, {
+                      kind: "recovery_advisory",
+                      data: { reason: toolGraceOut.reason, trigger: "tools" }
+                    });
+                    return kernelTurnSignal("continue");
+                  }
+                  return void 0;
+                }
+                async function __gate84() {
+                  if (toolGraceOut.action === "abort") {
+                    await host.injectRecoveryCoach?.({
+                      session,
+                      agent,
+                      trigger: "tools",
+                      reason: toolGraceOut.reason
+                    });
+                    host.store.appendMessage(session.id, "system", [
+                      textPart2(`[recovery] Stopped: ${toolGraceOut.reason}`)
+                    ]);
+                    void host.emitTrace(sid, {
+                      kind: "recovery_abort",
+                      data: { reason: toolGraceOut.reason, trigger: "tools" }
+                    });
+                    if (await tryAutoFork("deadloop-exhausted"))
+                      return kernelTurnSignal("continue");
+                    return kernelTurnSignal("return", await finishFailed(host.store.updateSession(session.id, { status: "idle" }), loopGuardStopReason(toolGraceOut.reason)));
+                  }
+                  return void 0;
+                }
+                async function __gateGrp85() {
+                  const __gateSignal2 = await (await __gate77() ?? await __gate78() ?? await __gate79() ?? await __gate80());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                }
+                async function __gateGrp86() {
+                  const __gateSignal2 = await (__gate81() ?? __gate82() ?? await __gate83() ?? await __gate84());
+                  if (__gateSignal2)
+                    return __gateSignal2;
+                  return void 0;
+                }
+                const __gateSignal = await (await __gateGrp85() ?? await __gateGrp86());
+                if (__gateSignal)
+                  return __gateSignal;
+                return void 0;
               }
-            });
-          }
-        } catch {
-        }
-      }
-      let recovery = decideTurnRecovery({
-        stopReason: turnResult.stopReason,
-        finishReason: turnResult.finishReason,
-        truncated: turnResult.truncated,
-        assistantParts: turnResult.assistantParts,
-        state: recoveryState,
-        userAborted: signal.aborted
-      });
-      if (recovery.action !== "continue" || turnResult.truncated || turnResult.assistantParts.length === 0) {
-        const recoveryOpts = [
-          { id: recovery.action, label: `Default: ${recovery.action}` }
-        ];
-        if (recovery.action === "retry-same-input" || recovery.action === "retry-after-nudge") {
-          recoveryOpts.push({ id: "abort", label: "Stop instead of retrying" });
-          recoveryOpts.push({ id: "end", label: "End the turn without retry" });
-        } else if (recovery.action === "abort") {
-          recoveryOpts.push({ id: "retry-after-nudge", label: "Nudge and retry once more" });
-          recoveryOpts.push({ id: "end", label: "End cleanly without abort label" });
-        } else if (recovery.action === "end") {
-          recoveryOpts.push({ id: "continue", label: "Continue the loop" });
-        }
-        const chosen = await maybeChooseRecovery(`turn_recovery:${turnResult.stopReason}:${turnResult.finishReason ?? ""}`, recoveryOpts, recovery.action);
-        if (chosen !== recovery.action) {
-          if (chosen === "continue")
-            recovery = { action: "continue" };
-          else if (chosen === "end")
-            recovery = { action: "end" };
-          else if (chosen === "retry-same-input")
-            recovery = { action: "retry-same-input" };
-          else if (chosen === "retry-after-nudge") {
-            recovery = {
-              action: "retry-after-nudge",
-              nudge: recovery.action === "retry-after-nudge" ? recovery.nudge : "[recovery] Retry after Jev recovery choice."
-            };
-          } else if (chosen === "abort") {
-            recovery = {
-              action: "abort",
-              reason: recovery.action === "abort" ? recovery.reason : "jev_recovery_choice"
-            };
-          }
-        }
-      }
-      if (discardedAssistant(recovery)) {
-        void host.emitTrace(sid, {
-          kind: "recovery_advisory",
-          data: {
-            reason: "leaked_tool_call",
-            trigger: "leaked_tool_call",
-            exhausted: recovery.action === "abort",
-            stopReason: turnResult.stopReason
-          }
-        });
-      }
-      if (recovery.action === "abort" && recovery.reason === "user_abort") {
-        closeWaveIfOpen();
-        await rollbackOpenStep("abort");
-        return finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort");
-      }
-      if (recovery.action === "retry-same-input") {
-        host.store.appendMessage(sid, "system", [
-          textPart3("[recovery] Truncated/incomplete tool_call discarded; retrying the same input.")
-        ]);
-        continue;
-      }
-      if (recovery.action === "retry-after-nudge") {
-        if (!recovery.discardAssistant && turnResult.assistantParts.length > 0) {
-          host.store.appendMessage(session.id, "assistant", turnResult.assistantParts);
-        }
-        host.store.appendMessage(sid, "system", [textPart3(recovery.nudge)]);
-        continue;
-      }
-      if (recovery.action === "abort") {
-        const reason = recovery.reason;
-        host.store.appendMessage(sid, "system", [
-          textPart3(reason === "empty_assistant" ? "[recovery] Stopped: model returned no assistant content after retries." : `[recovery] Stopped: ${reason}`)
-        ]);
-        void host.emitTrace(sid, {
-          kind: "recovery_abort",
-          data: { reason, trigger: "turn_recovery" }
-        });
-        return finishEnded(host.store.updateSession(session.id, { status: "idle" }), reason);
-      }
-      if (turnResult.assistantParts.length === 0) {
-        host.store.appendMessage(sid, "system", [
-          textPart3("[recovery] Stopped: model returned no assistant content after retries.")
-        ]);
-        return finishEnded(host.store.updateSession(session.id, { status: "idle" }), "empty_assistant");
-      }
-      const spinReason = spinWatchdog?.noteParts(turnResult.assistantParts);
-      if (spinReason) {
-        host.store.appendMessage(session.id, "assistant", turnResult.assistantParts);
-        host.store.appendMessage(sid, "system", [textPart3(`[recovery] Stopped: ${spinReason}`)]);
-        void host.emitTrace(sid, {
-          kind: "reasoning_spin_abort",
-          data: { reason: spinReason, streak: spinWatchdog?.streak }
-        });
-        return finishFailed(host.store.updateSession(session.id, { status: "idle" }), "reasoning_spin");
-      }
-      let pendingRecoveryAdvisory;
-      const rep = loopGuard?.checkAssistantRepetition(turnResult.assistantParts) ?? { abort: false };
-      const graceOut = advisoryGrace.apply(rep);
-      if (graceOut.action === "advise" || graceOut.action === "abort") {
-        const guardChoice = await maybeChooseRecovery(`loop_guard_repetition:${graceOut.reason}`, [
-          { id: "advise", label: "Inject advisory and continue" },
-          { id: "abort", label: "Stop the run for repetition" },
-          { id: "continue", label: "Ignore and continue" }
-        ], graceOut.action);
-        if (guardChoice === "abort") {
-          host.store.appendMessage(session.id, "assistant", turnResult.assistantParts);
-          await host.injectRecoveryCoach?.({
-            session,
-            agent,
-            trigger: "repetition",
-            reason: graceOut.reason
-          });
-          host.store.appendMessage(session.id, "system", [
-            textPart3(`[recovery] Stopped: ${graceOut.reason}`)
-          ]);
-          void host.emitTrace(sid, {
-            kind: "recovery_abort",
-            data: { reason: graceOut.reason, trigger: "repetition" }
-          });
-          host.onSessionOutcome?.({
-            sessionId: session.id,
-            agentId: agent.id,
-            outcome: "failure",
-            signals: { trigger: "repetition", reason: graceOut.reason }
-          });
-          if (await tryAutoFork("repetition-aborted"))
+            ];
+            for (const kernelStep of kernelSteps) {
+              const kernelFlow = await kernelStep();
+              if (kernelTurnStop(kernelFlow))
+                return kernelFlow;
+            }
+            return void 0;
+          })();
+          const kernelStop = kernelTurnStop(kernelTurnFlow);
+          if (kernelStop === "continue")
             continue;
-          return finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition");
+          if (kernelStop === "break")
+            break;
+          if (kernelStop === "return")
+            return kernelTurnFlow.value;
         }
-        if (guardChoice === "advise") {
-          const strike = noteCriticalHit(recoveryState);
-          if (strike.action === "abort") {
-            host.store.appendMessage(session.id, "assistant", turnResult.assistantParts);
-            host.store.appendMessage(session.id, "system", [
-              textPart3(`[recovery] Stopped: ${graceOut.reason} (critical strike)`)
-            ]);
-            if (await tryAutoFork("repetition-aborted"))
-              continue;
-            return finishFailed(host.store.updateSession(session.id, { status: "idle" }), "repetition");
-          }
-          pendingRecoveryAdvisory = graceOut.action === "advise" ? graceOut.advisory : `[recovery-advisory] ${graceOut.reason}`;
-          void host.emitTrace(sid, {
-            kind: "recovery_advisory",
-            data: { reason: graceOut.reason, trigger: "repetition" }
-          });
-        }
-      }
-      const modelStep = stepInfo(turn, "model_done");
-      await host.stepTx?.beginStep?.(modelStep);
-      const assistantMessage = host.store.appendMessage(session.id, "assistant", turnResult.assistantParts);
-      if (pendingRecoveryAdvisory) {
-        host.store.appendMessage(session.id, "system", [textPart3(pendingRecoveryAdvisory)]);
-      }
-      await emitStep({
-        type: "model_done",
-        stopReason: turnResult.stopReason,
-        finishReason: turnResult.finishReason,
-        truncated: turnResult.truncated,
-        assistant: { parts: turnResult.assistantParts }
-      });
-      await host.stepTx?.commitStep?.(modelStep);
-      if (recovery.action !== "continue") {
-        const stopPhase = context.session.mode === "subagent" ? "subagent_stop" : "stop";
-        const stopHook = await host.runLifecycleHook?.({
-          phase: stopPhase,
-          sessionId: sid,
-          agentId: agent.id,
-          meta: { stopReason: turnResult.stopReason }
-        });
-        if (stopHook?.block) {
-          const msg = stopHook.message ?? stopHook.systemMessage ?? "stop blocked; continuing";
-          host.store.appendMessage(sid, "system", [textPart3(`[stop-hook] ${msg}`)]);
-          continue;
-        }
-        if (stopHook?.systemMessage) {
-          host.store.appendMessage(sid, "system", [textPart3(stopHook.systemMessage)]);
-        }
-        const goal = await host.evaluateGoalGate?.({
-          session,
-          agent,
-          signal,
-          workspaceRoot: workspaceRoot ?? host.repoRoot
-        });
-        if (goal?.systemMessage) {
-          host.store.appendMessage(sid, "system", [textPart3(goal.systemMessage)]);
-        } else if (goal && !goal.met) {
-          host.store.appendMessage(sid, "system", [
-            textPart3(`[goal] not yet met: ${goal.reason ?? "continuing"}`)
-          ]);
-        }
-        if (goal && (!goal.met || goal.action === "continue")) {
-          continue;
-        }
-        if (host.waitSteeringChildrenIdle) {
-          await host.waitSteeringChildrenIdle(sid);
-        }
-        host.onSessionOutcome?.({
-          sessionId: session.id,
-          agentId: agent.id,
-          outcome: "success"
-        });
-        return host.handleTurnCompletion(session, agent).then((completed) => finishEnded(completed, "end"));
-      }
-      const rawToolCalls = assistantMessage.parts.filter((part) => part.type === "tool_call");
-      const toolCalls = host.filterValidToolCalls ? host.filterValidToolCalls(rawToolCalls, allowExternalAiTools, sid, resolvedTools) : rawToolCalls;
-      if (toolCalls.length === 0) {
-        continue;
-      }
-      if (signal.aborted) {
-        closeWaveIfOpen();
-        await rollbackOpenStep("abort");
-        return finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort");
-      }
-      const approvalResult = await host.checkToolApprovals?.(toolCalls, context, session, {
-        filePolicy,
-        turnTools: resolvedTools
-      }) ?? "proceed";
-      const hostLatch = loopConfig.hitlLatch ? await host.shouldLatchBeforeTools?.({ session, toolCalls }) : void 0;
-      const latch = decideHitlLatch({
-        aborted: signal.aborted,
-        approval: approvalResult,
-        hostLatch
-      });
-      const parkForApproval = async () => {
-        host.noteGoalWaitingUser?.(sid, toolCalls);
-        const approvalIds = host.store.listApprovals({ status: "pending" }).filter((a) => a.sessionId === sid).map((a) => a.id);
-        const interrupt = createWaitingApprovalInterrupt({
-          toolCallIds: toolCalls.map((c) => c.toolCallId),
-          approvalIds,
-          writerRunId
-        });
-        const current = host.store.getSession(sid);
-        const outcome = runOutcomeFromEnd({
-          reason: "waiting_approval",
-          sessionStatus: "waiting_approval"
-        });
-        const updated = host.store.updateSession(sid, {
-          status: "waiting_approval",
-          metadata: mergeInterruptMetadata(mergeOutcomeMetadata(current.metadata ?? {}, outcome), interrupt)
-        });
-        await emitStep({ type: "waiting_approval", approvalIds, interrupt });
-        return updated;
-      };
-      if (latch.action === "abort") {
-        closeWaveIfOpen();
-        await rollbackOpenStep("abort");
-        return finishFailed(host.store.updateSession(session.id, { status: "failed" }), "abort");
-      }
-      if (latch.action === "waiting") {
-        return parkForApproval();
-      }
-      if (latch.action === "skip") {
-        continue;
-      }
-      if (latch.action === "steer") {
-        closeWaveIfOpen();
-        return finishEnded(host.store.updateSession(session.id, { status: "idle" }), "steering");
-      }
-      const drainPolicy = resolveSteerDrainPolicy({
-        option: options?.steerDrainPolicy,
-        sessionMetadata: host.store.getSession(sid)?.metadata,
-        store: host.store
-      });
-      if (typeof host.store.claimInbox === "function" && typeof host.store.hideByKey === "function") {
-        const drain = drainSteerAtToolLaunch({
-          store: host.store,
-          sessionId: sid,
-          toolCallIds: toolCalls.map((c) => c.toolCallId),
-          policy: drainPolicy,
-          expectedWriterRunId: writerRunId
-        });
-        if (drain.drained) {
-          await emitStep({
-            type: "tools_done",
-            results: drain.skippedIds.map((id) => ({
-              ok: false,
-              content: TOOL_WAVE_SKIPPED_STEER_CONTENT,
-              name: toolCalls.find((c) => c.toolCallId === id)?.name
-            }))
-          });
-          continue;
-        }
-      }
-      const toolsStep = stepInfo(turn, "tools_done");
-      await host.stepTx?.beginStep?.(toolsStep);
-      const results = await host.executeToolCalls(toolCalls, context, allowExternalAiTools, sid, resolvedTools);
-      host.processToolResults(results, toolCalls, context.session, void 0, sid, options?.onModelStreamChunk);
-      for (const r of results) {
-        host.recordToolUse?.({ name: r.name, sessionId: sid, turn, ok: r.ok });
-      }
-      await emitStep({
-        type: "tools_done",
-        results: results.map((r) => ({ ok: r.ok, content: r.content, name: r.name }))
-      });
-      await host.stepTx?.commitStep?.(toolsStep);
-      if (stopAt.size > 0) {
-        const hit = results.find((r) => r.ok && stopAt.has(r.name));
-        if (hit) {
-          return finishEnded(host.store.updateSession(session.id, { status: "idle" }), `stop_at:${hit.name}`);
-        }
-      }
-      const toolRoundKey = toolCalls.map((tc) => `${tc.name}:${JSON.stringify(tc.input ?? {})}`).join("|");
-      sameToolStreak = toolRoundKey === lastToolRoundKey ? sameToolStreak + 1 : 1;
-      lastToolRoundKey = toolRoundKey;
-      if (riskEngine) {
-        for (const r of results) {
-          riskEngine.observeTool({ toolName: r.name, success: r.ok, errorMessage: r.ok ? void 0 : r.content });
-        }
-        const usageTotals = host.store.getSession(sid)?.metadata?.usageTotals;
-        const tick = riskEngine.tick({
-          iteration: turn,
-          iterationLimit: maxTurns,
-          usedTokens: usageTotals?.totalTokens,
-          budgetTokens: loopConfig.budgetTokens,
-          sameToolStreak,
-          sameToolThreshold: loopGuard?.sameToolThreshold ?? 5
-        });
-        if (tick.shouldAdvise) {
-          const draft = advisoryQueue.enqueue(formatRiskAdvisory(tick.signals), "risk");
-          void host.emitTrace(sid, {
-            kind: "risk_advisory",
-            data: { reason: tick.reason, signals: tick.signals, advisoryId: draft.id }
-          });
-        }
-      }
-      const toolRep = loopGuard?.afterToolRound(toolCalls.map((tc) => ({ name: tc.name, input: tc.input })), results.map((r) => ({ name: r.name, ok: r.ok }))) ?? { abort: false };
-      const toolRepDecision = toolRep.abort ? { abort: true, reason: toolRep.reason } : { abort: false, reason: "" };
-      const toolGraceOut = advisoryGrace.apply(toolRepDecision);
-      if (toolGraceOut.action === "advise") {
-        const strike = noteCriticalHit(recoveryState);
-        if (strike.action === "abort") {
-          host.store.appendMessage(session.id, "system", [
-            textPart3(`[recovery] Stopped: ${toolGraceOut.reason} (critical strike)`)
-          ]);
-          if (await tryAutoFork("deadloop-exhausted"))
-            continue;
-          return finishFailed(host.store.updateSession(session.id, { status: "idle" }), "tool_loop");
-        }
-        host.store.appendMessage(session.id, "system", [textPart3(toolGraceOut.advisory)]);
-        void host.emitTrace(sid, {
-          kind: "recovery_advisory",
-          data: { reason: toolGraceOut.reason, trigger: "tools" }
-        });
-        continue;
-      }
-      if (toolGraceOut.action === "abort") {
-        await host.injectRecoveryCoach?.({
-          session,
-          agent,
-          trigger: "tools",
-          reason: toolGraceOut.reason
-        });
-        host.store.appendMessage(session.id, "system", [
-          textPart3(`[recovery] Stopped: ${toolGraceOut.reason}`)
-        ]);
-        void host.emitTrace(sid, {
-          kind: "recovery_abort",
-          data: { reason: toolGraceOut.reason, trigger: "tools" }
-        });
-        if (await tryAutoFork("deadloop-exhausted"))
-          continue;
-        return finishFailed(host.store.updateSession(session.id, { status: "idle" }), "tool_loop");
-      }
+        return void 0;
+      })();
+      if (kernelFinished !== void 0)
+        return kernelFinished;
     }
     host.onSessionOutcome?.({
       sessionId: session.id,
@@ -3337,8 +5931,13 @@ ${loopConfig.lastTurnNudge}` : systemPrompt,
         maxTurns: Number.isFinite(maxTurns) ? maxTurns : 0
       }
     });
-    return finishEnded(host.store.updateSession(session.id, { status: "idle" }), "max_turns");
+    return await finishEnded(host.store.updateSession(session.id, { status: "idle" }), TURN_LIMIT_REASON);
   } catch (err) {
+    emitKernelReady(startup);
+    if (host.store.isWriterCurrent && !host.store.isWriterCurrent(sid, writerRunId)) {
+      host.emitTrace(sid, { kind: "stale_writer_rejected", payload: { writerRunId } });
+      return host.store.getSession(sid) ?? session;
+    }
     const aborted = signal.aborted || err instanceof Error && /session aborted/i.test(err.message);
     closeWaveIfOpen();
     const rewindReason = aborted ? "abort" : rollbackReasonOf({ runError: err instanceof Error ? err.message : String(err) }) ?? "run-error";
@@ -3347,13 +5946,8 @@ ${loopConfig.lastTurnNudge}` : systemPrompt,
     if (current) {
       persistOutcome(host.store.updateSession(sid, { status: "failed" }), aborted ? "abort" : "model_error", rewind);
     }
+    emitKernelReady(startup);
     throw err;
-  } finally {
-    host.sessionAbortControllers?.delete(sessionId);
-    const current = host.store.getSession(sessionId);
-    if (current?.status !== "waiting_approval") {
-      host.store.releaseWriter(sessionId, writerRunId);
-    }
   }
 }
 
@@ -3371,22 +5965,7 @@ function defaultMiniPrompt(systemPrompt) {
   };
 }
 function applyIoOverrides(host, io) {
-  if (io.ensureMcpLoaded)
-    host.ensureMcpLoaded = io.ensureMcpLoaded;
-  if (io.ensureWorkspaceRoot)
-    host.ensureWorkspaceRoot = io.ensureWorkspaceRoot;
-  if (io.resolveWorkspaceRoots)
-    host.resolveWorkspaceRoots = io.resolveWorkspaceRoots;
-  if (io.resolveFilePolicy)
-    host.resolveFilePolicy = io.resolveFilePolicy;
-  if (io.resolveImageDataUrl)
-    host.resolveImageDataUrl = io.resolveImageDataUrl;
-  if (io.resolveModelAdapter)
-    host.resolveModelAdapter = io.resolveModelAdapter;
-  if (io.resolveTurnTools)
-    host.resolveTurnTools = io.resolveTurnTools;
-  if (io.resolveRunProfile)
-    host.resolveRunProfile = io.resolveRunProfile;
+  applyTurnInputIoOverrides(host, io);
   if (io.evaluateGoalGate)
     host.evaluateGoalGate = io.evaluateGoalGate;
   if (io.beforeModelTurn)
@@ -3429,6 +6008,8 @@ function applyIoOverrides(host, io) {
     host.processToolResults = io.processToolResults;
   if (io.runTurnWithRetries)
     host.runTurnWithRetries = io.runTurnWithRetries;
+  if (io.fitModelRequest)
+    host.fitModelRequest = io.fitModelRequest;
   if (io.autoCompact)
     host.autoCompact = io.autoCompact;
   if (io.prepareMessagesForModel)
@@ -3448,18 +6029,20 @@ function requireModel(io) {
   }
   return io.model;
 }
-async function executeToolsSimple(tools, toolCalls, context, allowExternalAiTools, turnTools) {
+async function executeToolsSimple(tools, toolCalls, context, allowExternalAiTools, turnTools, readSession) {
   const pool = turnTools ?? tools;
   const results = [];
   for (const tc of toolCalls) {
-    const tool = pool.find((t) => t.name === tc.name);
+    const tool = pool.find((item) => item.name === tc.name);
+    const session = readSession?.(context.session.id) ?? context.session;
+    const live = session === context.session ? context : { ...context, session };
+    const denied = denyTrajectoryTool(session, tool ?? { name: tc.name }, { input: tc.input });
+    if (denied) {
+      results.push({ toolCallId: tc.toolCallId, name: tc.name, ok: false, content: denied });
+      continue;
+    }
     if (!tool) {
-      results.push({
-        toolCallId: tc.toolCallId,
-        name: tc.name,
-        ok: false,
-        content: `Unknown tool ${tc.name}`
-      });
+      results.push({ toolCallId: tc.toolCallId, name: tc.name, ok: false, content: `Unknown tool ${tc.name}` });
       continue;
     }
     if (tool.isExternal && !allowExternalAiTools) {
@@ -3471,14 +6054,17 @@ async function executeToolsSimple(tools, toolCalls, context, allowExternalAiTool
       });
       continue;
     }
+    const tracked = beginTrajectoryWrite(session, tool, tc.toolCallId);
     try {
-      const result = await tool.execute(context, tc.input);
+      const result = await tool.execute(live, tc.input);
       results.push({
         toolCallId: tc.toolCallId,
         name: tool.name,
         ok: result.ok,
         content: result.content,
-        metadata: result.metadata
+        metadata: result.metadata,
+        images: result.images,
+        media: result.media
       });
     } catch (err) {
       results.push({
@@ -3487,6 +6073,9 @@ async function executeToolsSimple(tools, toolCalls, context, allowExternalAiTool
         ok: false,
         content: err instanceof Error ? err.message : String(err)
       });
+    } finally {
+      if (tracked)
+        finishTrajectoryWrite(session.id, tc.toolCallId);
     }
   }
   return results;
@@ -3532,7 +6121,7 @@ function createMiniAssembledLoop(input = {}) {
       }
       return adapter.runTurn(turnInput);
     },
-    executeToolCalls: (toolCalls, context, allowExternalAiTools, _sessionId, turnTools) => executeToolsSimple(tools, toolCalls, context, allowExternalAiTools, turnTools),
+    executeToolCalls: (toolCalls, context, allowExternalAiTools, _sessionId, turnTools) => executeToolsSimple(tools, toolCalls, context, allowExternalAiTools, turnTools, (sessionId) => store.getSession(sessionId)),
     async autoCompact() {
       return {};
     },
@@ -3552,6 +6141,7 @@ function createMiniAssembledLoop(input = {}) {
         ];
         store.appendMessage(session.id, "tool", parts);
       }
+      appendMediaObservations(store, session.id, results);
     },
     prepareMessagesForModel: async (_session, messages) => defaultPrepareView(messages, { refusalPreservation: input.config?.refusalPreservation })
   };
@@ -3565,13 +6155,42 @@ function createMiniAssembledLoop(input = {}) {
     store,
     loadedModules: moduleIdsForPreset("mini"),
     run(sessionId, options) {
-      return runSessionKernel(host, sessionId, {
+      return runSessionKernelWithWriterScope(host, sessionId, {
         ...options,
         hooks: options?.hooks ?? input.hooks,
         config: options?.config ?? input.config
       });
     }
   };
+}
+function appendMediaObservations(store, sessionId, results) {
+  const media = results.flatMap((result) => [...result.images ?? [], ...result.media ?? []]);
+  if (media.length === 0)
+    return;
+  store.appendMessage(sessionId, "user", [
+    { type: "text", text: "[Tool observations: media returned by tools, not a new user instruction.]" },
+    ...media
+  ]);
+}
+function applyTurnInputIoOverrides(host, io) {
+  if (io.ensureMcpLoaded)
+    host.ensureMcpLoaded = io.ensureMcpLoaded;
+  if (io.ensureWorkspaceRoot)
+    host.ensureWorkspaceRoot = io.ensureWorkspaceRoot;
+  if (io.resolveWorkspaceRoots)
+    host.resolveWorkspaceRoots = io.resolveWorkspaceRoots;
+  if (io.resolveFilePolicy)
+    host.resolveFilePolicy = io.resolveFilePolicy;
+  if (io.resolveMediaDataUrl)
+    host.resolveMediaDataUrl = io.resolveMediaDataUrl;
+  if (io.resolveImageDataUrl)
+    host.resolveImageDataUrl = io.resolveImageDataUrl;
+  if (io.resolveModelAdapter)
+    host.resolveModelAdapter = io.resolveModelAdapter;
+  if (io.resolveTurnTools)
+    host.resolveTurnTools = io.resolveTurnTools;
+  if (io.resolveRunProfile)
+    host.resolveRunProfile = io.resolveRunProfile;
 }
 export {
   DEFAULT_EMBED_AGENT,
