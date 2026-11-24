@@ -477,10 +477,14 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       } while (Date.now() < deadline);
       return null;
     }
-    const target = button(root, /^\+?\s*添加尺码表$/u);
-    if (!target) return attachedChart() ? fail("SIZE_CHART_ALREADY_ATTACHED", "页面已有尺码表，请核对现有模板。") :
+    const addChart = () => button(root, /^\+?\s*添加尺码表$/u);
+    if (!addChart()) return attachedChart() ? fail("SIZE_CHART_ALREADY_ATTACHED", "页面已有尺码表，请核对现有模板。") :
       fail("SIZE_CHART_MISSING", "当前服装页没有可用的添加尺码表按钮。");
+    if (openMenu().length) await waitFor(() => blocked() || !openMenu().length, 1200);
+    if (!onPage() || blocked()) return fail("PAGE_CHANGED", "打开尺码表前 Temu 商品草稿已切换或出现弹窗。");
     if (openMenu().length) return fail("MENU_STILL_OPEN", "请关闭其他下拉后再添加尺码表。");
+    const target = addChart();
+    if (!target) return fail("SIZE_CHART_MISSING", "添加尺码表入口已变化。");
     target.click();
     const modal = await waitFor(picker);
     if (!modal) return fail("SIZE_CHART_MISSING", "未打开选择尺码表模板弹窗。");

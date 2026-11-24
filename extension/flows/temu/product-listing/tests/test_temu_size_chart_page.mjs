@@ -9,6 +9,7 @@ function fixture(existing, { warnAboutFit = false, anchoredAttachment = false } 
   const dom = new JSDOM('<main id="page_container_id">' + `
     <section id="attached"><span>* 尺码表</span><button id="open">+ 添加尺码表</button></section>
     <button id="publish">创建</button><button id="save-draft">保存草稿</button>
+    <div role="listbox" id="previous-menu" hidden><div role="option">之前的下拉选项</div></div>
     <div aria-modal="true" id="picker" hidden>
       <h2>选择尺码表模板</h2>
       <input data-testid="beast-core-select-htmlInput" readonly>
@@ -86,9 +87,13 @@ function fixture(existing, { warnAboutFit = false, anchoredAttachment = false } 
   const button = (area, label) => [...area.querySelectorAll("button")].find(node => node.textContent === label);
   id("publish").addEventListener("click", () => { actions.forbidden++; });
   id("save-draft").addEventListener("click", () => { actions.forbidden++; });
+  id("previous-menu").addEventListener("click", () => { actions.forbidden++; });
   id("other-notice").querySelector("button").addEventListener("click", () => { actions.forbidden++; });
   id("unrelated-switch").querySelector("button").addEventListener("click", () => { actions.forbidden++; });
-  id("open").addEventListener("click", () => { picker.hidden = false; });
+  id("open").addEventListener("click", () => {
+    if (!id("previous-menu").hidden) actions.forbidden++;
+    picker.hidden = false;
+  });
   picker.querySelector("[tabindex]").addEventListener("click", () => { menu.hidden = !menu.hidden; });
   menu.textContent = existing ? "" : "暂无数据";
   if (existing) {
@@ -161,6 +166,11 @@ function fixture(existing, { warnAboutFit = false, anchoredAttachment = false } 
     values: selector => [...doc.querySelectorAll(selector)].map(node => node.value),
     url: () => window.location.href,
     showTip: () => { id("notice").hidden = false; },
+    showPreviousMenu: closeAfter => {
+      const previous = id("previous-menu");
+      previous.hidden = false;
+      if (closeAfter != null) window.setTimeout(() => { previous.hidden = true; }, closeAfter);
+    },
     isOpen: selector => !id(selector).hidden,
     actions,
     reviews,
@@ -208,11 +218,24 @@ const normalized = { name, unit: "cm", rows: [
 
 {
   const page = fixture(true, { anchoredAttachment: true });
+  page.showPreviousMenu(190);
   const result = await page.run({ kind: "create-size-chart", value: normalized });
   assert.equal(result.status, "verified", result.message);
   assert.equal(result.created, false);
   assert.equal(page.actions.attached, 1);
   assert.equal((await page.run({ kind: "create-size-chart", value: normalized })).code, "SIZE_CHART_ALREADY_ATTACHED");
+  page.close();
+}
+
+{
+  const page = fixture(true);
+  page.showPreviousMenu();
+  const result = await page.run({ kind: "create-size-chart", value: normalized });
+  assert.equal(result.code, "MENU_STILL_OPEN");
+  assert.equal(page.actions.forbidden, 0);
+  assert.equal(page.actions.attached, 0);
+  assert.equal(page.isOpen("previous-menu"), true);
+  assert.equal(page.isOpen("picker"), false);
   page.close();
 }
 
