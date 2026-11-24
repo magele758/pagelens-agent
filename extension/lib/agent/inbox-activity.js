@@ -30,10 +30,14 @@ export async function clearActivity() {
   await chrome.storage.local.remove(ACTIVITY_KEY);
 }
 
-async function appendActivity(entry) {
-  const list = await readActivity();
-  list.unshift(entry);
-  await chrome.storage.local.set({ [ACTIVITY_KEY]: list.slice(0, MAX_ENTRIES) });
+let activityWrites = Promise.resolve();
+function appendActivity(entry) {
+  const write = activityWrites.then(async () => {
+    const list = await readActivity();
+    await chrome.storage.local.set({ [ACTIVITY_KEY]: [entry, ...list].slice(0, MAX_ENTRIES) });
+  });
+  activityWrites = write.catch(() => {});
+  return write;
 }
 
 export function markJobStarted() {

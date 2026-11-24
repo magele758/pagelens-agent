@@ -396,9 +396,10 @@ export function createDelegateManager({
       taint = ingestData(taint, { source: "delegate", tool: "run_parallel_tasks" });
       task.taint = taint.level;
     }
+    let run = null;
     try {
       const settings = await loadSettings();
-      const run = await createRun({ task, settings, signal });
+      run = await createRun({ task, settings, signal });
       const tools = withUntrustedOutput(run.tools || [], {
         onIngest: (info) => {
           taint = ingestData(taint, info);
@@ -449,6 +450,8 @@ export function createDelegateManager({
       await finish(task, TASK_STATUS.FAILED, {
         error: { code: err?.code || "TASK_FAILED", message: String(err?.message || err).slice(0, 500) },
       });
+    } finally {
+      await run?.cleanup?.().catch(() => {});
     }
   }
 

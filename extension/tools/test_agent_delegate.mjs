@@ -682,4 +682,83 @@ const toolMessages = (seen) => seen.flatMap((s) => s.messages.filter((m) => m.ro
   console.log("PASS createSwRun does not assign the focused window");
 }
 
+{
+  const events = [];
+  const previousChrome = globalThis.chrome;
+  const swTabs = [{ id: 11, windowId: 4, url: "https://news.example/a", groupId: -1 }];
+  globalThis.chrome = {
+    permissions: { contains: async () => true, request: async () => true },
+    windows: {
+      get: async (id) => ({ id, type: "normal", incognito: false }),
+    },
+    tabs: {
+      get: async (id) => swTabs.find((t) => t.id === id),
+      create: async (props) => {
+        const tab = { id: 12, windowId: props.windowId ?? 4, url: props.url, groupId: -1 };
+        swTabs.push(tab);
+        return tab;
+      },
+      query: async (q) => swTabs.filter((t) =>
+        (q.windowId == null || t.windowId === q.windowId) &&
+        (q.groupId == null || t.groupId === q.groupId)),
+      group: async ({ tabIds }) => {
+        for (const id of tabIds) {
+          const t = swTabs.find((x) => x.id === id);
+          if (t) t.groupId = 33;
+        }
+        events.push(["group", tabIds]);
+        return 33;
+      },
+      ungroup: async (tabIds) => {
+        for (const id of tabIds) {
+          const t = swTabs.find((x) => x.id === id);
+          if (t) t.groupId = -1;
+        }
+        events.push(["ungroup", tabIds]);
+      },
+    },
+    tabGroups: {
+      get: async () => ({ id: 33, windowId: 4 }),
+      update: async (id, props) => events.push(["update", id, props.title]),
+    },
+  };
+  try {
+    const { createSwRun } = await import("../lib/agent/delegate-sw.js");
+    const settings = { text: { baseUrl: "http://127.0.0.1:11434/v1", model: "m", apiKey: "" }, nativeShell: false };
+    const capsule = resolveDelegateCapsule({ prompt: "打开 https://news.example/b" }).capsule;
+    let cleanupRuns = 0;
+    const manager = createDelegateManager({
+      storage: memoryTaskStorage(),
+      approvals: createApprovalQueue({ storage: memoryAdapter() }),
+      loadSettings: async () => ({ hitlMode: "balanced", ...settings }),
+      createRun: async ({ task, signal }) => {
+        const run = await createSwRun({ task, settings, signal });
+        return {
+          ...run,
+          model: scriptedModel([[{ name: "open_tab", args: { url: "https://news.example/b" } }]]),
+          cleanup: async () => {
+            cleanupRuns++;
+            await run.cleanup();
+          },
+        };
+      },
+    });
+    const started = await manager.start({
+      prompt: "打开 https://news.example/b",
+      capsule,
+      tabId: 11,
+      windowId: 4,
+      session: { agentName: "codex" },
+    });
+    const done = await manager.wait(started.id);
+    assert.equal(done.status, TASK_STATUS.DONE);
+    assert.equal(cleanupRuns, 1, "delegate executes run.cleanup() in finally");
+    assert.deepEqual(events.at(-1), ["ungroup", [12]], "delegate cleanup dissolves generated task tab group");
+    assert.equal(swTabs.find((t) => t.id === 12).groupId, -1);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+  console.log("PASS delegate cleanup deletes generated task tab group on completion");
+}
+
 console.log("ALL PASS test_agent_delegate");

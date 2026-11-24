@@ -43,6 +43,7 @@ const env = {
     reload: async (id) => log("tabs.reload", id),
     goBack: async (id) => log("tabs.goBack", id),
     goForward: async (id) => log("tabs.goForward", id),
+    ungroup: async (ids) => log("tabs.ungroup", ids),
     remove: async (id) => log("tabs.remove", id),
   },
   windows: {
@@ -162,6 +163,17 @@ assert.ok(!find("windows.remove"));
 res = await req("close_window", { windowId: 20 });
 assert.equal(res.ok, true);
 assert.deepEqual(find("windows.remove").slice(1), [20]);
+
+// close_window ungroups grouped tabs before removing the window so Chrome deletes the group instead of saving it.
+reset();
+TABS.get(3).groupId = 19;
+res = await req("close_window", { windowId: 20 });
+assert.equal(res.ok, true);
+assert.deepEqual(
+  calls.filter((c) => c[0] === "tabs.ungroup" || c[0] === "windows.remove"),
+  [["tabs.ungroup", [3]], ["windows.remove", 20]],
+);
+delete TABS.get(3).groupId;
 
 // ---- snapshot + ref resolution ----
 const snapItems = [
