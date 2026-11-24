@@ -196,8 +196,9 @@ function skuDom() {
     );
     input.dispatchEvent(new Event("change", { bubbles: true }));
     field("product_name")?.focus();
-    input.blur();
+    blurOut(input);
   }
+  const blurOut = e => e && (e.blur(), e.dispatchEvent(new Event("focusout", { bubbles: true })));
   const numeric = (e) =>
     e?.value?.trim() ? Number(e.value.replaceAll(",", "")) : null;
   const options = () => byPrefix("sale_property.value.name");
@@ -217,7 +218,7 @@ function skuDom() {
         price: field("skus.sale_price." + id)?.querySelector("input"),
       };
     });
-  return { all, field, byPrefix, text, norm, visible, wait, sleep, set, numeric, options, optionLabels, rows };
+  return { all, field, byPrefix, text, norm, visible, wait, sleep, set, blurOut, numeric, options, optionLabels, rows };
 }
 
 function commerceDom(ui, localizedColor) {
@@ -414,11 +415,17 @@ export async function sellerVariants(ui, plan) {
     }
     input.focus();
     input.select();
-    document.execCommand("insertText", false, sku.option);
+    if (!document.execCommand?.("insertText", false, sku.option) || input.value !== sku.option) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, sku.option);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     await sleep(350);
     if (matches()) continue;
-    if (!input.isConnected || input.value !== sku.option)
+    if (!input.isConnected || input.value !== sku.option) {
+      const committedEarly = await wait(matches, "early option " + sku.option, 8).catch(() => null);
+      if (committedEarly) continue;
       throw Error("Variant input changed before commit: " + sku.option);
+    }
     input.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Enter",
@@ -428,8 +435,8 @@ export async function sellerVariants(ui, plan) {
         bubbles: true,
       }),
     );
-    input.blur();
-    field("product_name").focus();
+    ui.blurOut(input);
+    field("product_name")?.focus();
     await wait(matches, "committed option " + sku.option, 45);
   }
   return true;
@@ -535,61 +542,61 @@ function validateInventory(before, after, current) {
   if (current !== before && current !== after) throw Error("SKU stock changed before editing");
 }
 
-export async function setDraftSkuPrice(ui, resolve, singleBatch, validateStock, option, baseline, target, allowCap = false, inventory = null) {
+export async function setDraftSkuPrice(ui, resolve, singleBatch, validateStock, option, baseline, target, allowCap = false, inv = null) {
   const skuPrice = () => resolve(ui, option).price;
   const stock = () => ui.numeric(resolve(ui, option).stock);
-  const checkStock = () => inventory && validateStock(inventory.before, inventory.after, stock());
+  const checkStock = () => inv && validateStock(inv.before, inv.after, stock());
   const priceMatches = price => [baseline, target, price].includes(ui.numeric(skuPrice()));
   const input = skuPrice();
   if (!input) throw Error("Missing SKU price control");
   checkStock();
-  const result = (priceMXN, maxPriceMXN) => ({ priceMXN, ...(maxPriceMXN && { maxPriceMXN }), ...(inventory && { stock: stock() }) });
+  const result = (priceMXN, maxPriceMXN) => ({ priceMXN, ...(maxPriceMXN && { maxPriceMXN }), ...(inv && { stock: stock() }) });
   const current = ui.numeric(input);
   if (current === target) return result(target);
   if (current !== baseline) throw Error("SKU price changed before editing " + option);
-  const batchControls = () => {
-    const controls = singleBatch(ui);
-    if (controls?.stock.value.trim() && ui.numeric(controls.stock) !== inventory?.after)
+  const bc = () => {
+    const c = singleBatch(ui);
+    if (c?.stock.value.trim() && ui.numeric(c.stock) !== inv?.after)
       throw Error("Batch SKU stock must be empty or match requested stock");
-    return controls;
+    return c;
   };
   async function applyBatch(price) {
-    const controls = batchControls();
-    if (!controls) throw Error("Single-SKU batch controls changed");
-    if (inventory && ui.numeric(controls.stock) !== inventory.after) ui.set(controls.stock, inventory.after);
-    ui.set(batchControls()?.price, price);
+    let c = bc();
+    if (!c) throw Error("Single-SKU batch controls changed");
+    if (inv && ui.numeric(c.stock) !== inv.after) ui.set(c.stock, inv.after);
+    ui.set(bc()?.price, price);
+    await ui.sleep(45);
+    c = bc();
+    for (const e of [inv && c?.stock, c?.price]) e && (e.focus(), ui.blurOut(e));
     const apply = await ui.wait(() => {
-      const controls = batchControls();
-      const button = controls?.apply;
-      return button && !button.disabled && button.getAttribute("aria-disabled") !== "true" &&
-        (!inventory || ui.numeric(controls.stock) === inventory.after) &&
-        ui.numeric(controls.price) === price && button;
+      const x = bc(), btn = x?.apply;
+      return btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true" &&
+        (!inv || ui.numeric(x.stock) === inv.after) && ui.numeric(x.price) === price && btn;
     }, "single SKU batch price", 6);
     if (!priceMatches(price)) throw Error("SKU price changed before applying");
     checkStock();
     apply.click();
   }
-  function maximum(priceInput) {
-    const pattern = /^价格不能超过\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)$/;
-    const limits = ui.all("span.text-critical-on-surface", priceInput.closest('[data-id^="product.publish.skus.sale_price."]'))
-      .filter(ui.visible).map(node => ui.text(node).match(pattern)).filter(Boolean);
-    if (limits.length > 1) throw Error("Ambiguous seller price maximum for " + option);
-    return limits.length ? Number(limits[0][1].replaceAll(",", "")) : null;
+  function maximum(pIn) {
+    const pat = /^价格不能超过\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)$/;
+    const lims = ui.all("span.text-critical-on-surface", pIn.closest('[data-id^="product.publish.skus.sale_price."]'))
+      .filter(ui.visible).map(n => ui.text(n).match(pat)).filter(Boolean);
+    if (lims.length > 1) throw Error("Ambiguous seller price maximum for " + option);
+    return lims.length ? Number(lims[0][1].replaceAll(",", "")) : null;
   }
-  function observePrice(price, detectMaximum = false) {
-    const earliest = Date.now() + (detectMaximum ? 800 : 0);
-    let previousMatch = false;
+  function observePrice(price, dm = false) {
+    const earliest = Date.now() + (dm ? 800 : 0);
+    let pm = false;
     return ui.wait(() => {
-      const field = skuPrice();
-      const limit = maximum(field);
-      if (detectMaximum && limit !== null) return { maxPriceMXN: limit };
-      const match = limit === null && ui.numeric(field) === price && (!inventory || !batch || stock() === inventory.after);
-      const settled = match && previousMatch && Date.now() >= earliest;
-      previousMatch = match;
-      return settled;
-    }, "price commit for " + option, 8);
+      const f = skuPrice(), lim = maximum(f);
+      if (dm && lim !== null) return { maxPriceMXN: lim };
+      const m = lim === null && ui.numeric(f) === price && (!inv || !batch || stock() === inv.after);
+      const ok = m && pm && Date.now() >= earliest;
+      pm = m;
+      return ok;
+    }, "price commit for " + option, 16);
   }
-  const batch = batchControls();
+  const batch = bc();
   if (batch) await applyBatch(target);
   else ui.set(input, target);
   const observed = await observePrice(target, allowCap);
@@ -622,6 +629,9 @@ export async function setDraftSkuStock(ui, resolve, singleBatch, validateStock, 
   const batch = batchControls();
   ui.set(batch?.stock ?? stock, target);
   if (batch) {
+    await ui.sleep(45);
+    const el = batchControls()?.stock;
+    if (el) { el.focus(); ui.blurOut(el); }
     const apply = await ui.wait(() => {
       const controls = batchControls();
       const button = controls?.apply;
@@ -642,6 +652,33 @@ export async function setDraftSkuStock(ui, resolve, singleBatch, validateStock, 
     return settled;
   }, "stock commit for " + option, 8);
   return { stock: target };
+}
+
+// The ceiling hint span may never render while a price settles. The price
+// control's own currency configuration carries the same sale price limitation.
+export async function readDraftSkuCeiling(ui, resolve, option) {
+  const input = resolve(ui, option).price;
+  if (!input) throw Error("Missing SKU price control");
+  const key = Object.keys(input).find(name => name.startsWith("__reactFiber$"));
+  for (let fiber = key ? input[key] : null, depth = 0; fiber && depth < 30; depth++, fiber = fiber.return) {
+    const rules = fiber.memoizedProps?.currency?.price_limitation;
+    if (rules) {
+      const limits = [...new Set(rules.map(rule => Number(rule?.max_sale_price)).filter(value => value > 0))];
+      return limits.length === 1 ? limits[0] : null;
+    }
+  }
+  return null;
+}
+
+export async function readDraftSkuNumbers(ui, resolve, option) {
+  const row = resolve(ui, option);
+  return { priceMXN: ui.numeric(row.price), stock: ui.numeric(row.stock) };
+}
+
+// A one-row editor commits through the batch controls. Every other editor
+// commits through the row inputs, which ignore synthetic events.
+export async function draftSkuEditorMode(ui, singleBatch) {
+  return singleBatch(ui) ? "batch" : "row";
 }
 
 export async function sellerNumbers(ui, readState, mode, plan) {
@@ -716,25 +753,29 @@ export async function sellerNumbers(ui, readState, mode, plan) {
 // Each submission stays within PageLens's run_js source limit. Send only the
 // current batch of SKUs; provenance belongs in the local receipt.
 export function commerceScript(fn, ...args) {
-  const source = fn => fn.toString().replace(/^ *\/\/.*\n/gm, "");
+  const source = fn => fn.toString().replace(/^ *\/\/.*\n/gm, "").replace(/\n\s*\n/g, "\n");
   const skuSource = "(" + source(skuDom) + ")()";
+  const ceilingRead = fn === readDraftSkuCeiling || fn === readDraftSkuNumbers;
+  const modeRead = fn === draftSkuEditorMode;
   const draftMutation = fn === setDraftSkuPrice || fn === setDraftSkuStock;
-  const domSource = draftMutation ? skuSource : "(" + source(commerceDom) + ")(" + skuSource + "," + localizedColor + ")";
-  const helpers = draftMutation ? [resolveSkuRow, singleSkuBatch, validateInventory] :
+  const domSource = draftMutation || ceilingRead || modeRead ? skuSource : "(" + source(commerceDom) + ")(" + skuSource + "," + localizedColor + ")";
+  const helpers = modeRead ? [singleSkuBatch] :
+    ceilingRead ? [resolveSkuRow] :
+    draftMutation ? [resolveSkuRow, singleSkuBatch, validateInventory] :
     fn === sellerNumbers ? [sellerRead] : fn === locateSkuInput ? [resolveSkuRow] : [];
   let code =
     "return await (" +
-    fn.toString() +
+    source(fn) +
     ")(" + domSource + "," +
     helpers.map(helper => "(" + source(helper) + "),").join("") +
     "..." +
     JSON.stringify(args) +
     ")";
-  if (draftMutation || code.length > 7700)
-    code = code
-      .split("\n")
-      .map((line) => line.trimStart())
-      .join("\n");
+  code = code
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
   if (code.length > 7800)
     throw new Error("Commercial field batch exceeds PageLens run_js limit");
   return code;

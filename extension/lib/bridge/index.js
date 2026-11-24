@@ -53,6 +53,7 @@ export function createDefaultEnv() {
       reload: (id) => chrome.tabs.reload(id),
       goBack: (id) => chrome.tabs.goBack(id),
       goForward: (id) => chrome.tabs.goForward(id),
+      ungroup: (ids) => chrome.tabs.ungroup(ids),
       remove: (id) => chrome.tabs.remove(id),
     },
     windows: {

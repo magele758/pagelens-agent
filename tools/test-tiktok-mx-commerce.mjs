@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { attributeCode, checkAttributes, mxEditor, repairCategoryOptionsCode, repairCategorySearchCode,
+import { attributeCode, checkAttributes, mxEditor, repairCategoryOptionsCode, repairCategorySearchCode, sellerCategorySearchCode,
   runMxDraftJob, runMxDraftRead, saveDraftCode } from "./tiktok-mx-editor.mjs";
 import { JSDOM } from "jsdom";
 import {
@@ -781,6 +781,7 @@ console.log(
   };
   const run = code => win.eval("(async()=>{" + code + "})()");
   assert.throws(() => repairCategorySearchCode(url.replace("edit-draft/1738598470326847052", "create")), /existing MX/);
+  assert.equal(typeof sellerCategorySearchCode(url.replace("edit-draft/1738598470326847052", "create")), "string");
   await assert.rejects(run(repairCategoryOptionsCode(url)), /Search the current draft/);
   const search = await run(repairCategorySearchCode(url));
   const input = doc.querySelector(search.selector);

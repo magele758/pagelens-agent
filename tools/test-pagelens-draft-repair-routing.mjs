@@ -100,6 +100,9 @@ await assert.rejects(call("run_js", { tabId: ownedId }), /outside draft workflow
 await assert.rejects(call("navigate_tab", { tabId: ownedId, url: otherDraft }), /Unexpected draft destination/);
 await call("navigate_tab", { tabId: ownedId, url: target });
 assert.equal(currentUrl, target);
+currentUrl = `${seller}/account/login?redirect_url=${encodeURIComponent(target)}`;
+await assert.rejects(call("list_tabs", {}), /SELLER_LOGIN_REQUIRED/);
+await assert.rejects(call("run_js", { tabId: ownedId }), /SELLER_LOGIN_REQUIRED/);
 await call("close_tab", { tabId: ownedId });
-assert.deepEqual(calls, ["open_tab", "list_tabs", "list_tabs", "navigate_tab", "close_tab"]);
+assert.deepEqual(calls, ["open_tab", "list_tabs", "list_tabs", "navigate_tab", "list_tabs", "close_tab"]);
 console.log("TikTok MX repair routing accepts only directed requests and the exact repair editor");

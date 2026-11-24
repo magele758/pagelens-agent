@@ -32,6 +32,7 @@ globalThis.chrome = {
       return Object.assign(await this.get(id), props);
     },
     async remove(ids) { mutations.push(["remove", ids]); },
+    async ungroup(ids) { mutations.push(["ungroup", ids]); },
     async move(ids, props) { mutations.push(["move", ids, props]); },
     async group(props) { mutations.push(["group", props]); return 8; },
   },
@@ -137,4 +138,11 @@ assert.equal((await firstTask).windowId, 10);
 assert.equal(second.windowId, 30);
 await assert.rejects(withWindowTask(10, () => { throw new Error("cancelled run"); }), /cancelled run/);
 assert.equal(await withWindowTask(10, () => "available"), "available");
+
+// Closing a grouped tab in the task window ungroups it first so Chrome deletes the group instead of saving it.
+tabs.push({ id: 99, windowId: 10, active: false, url: "https://a.example/grouped", groupId: 7 });
+const beforeClose = mutations.length;
+await run("close_tab", { tabId: 99 });
+assert.deepEqual(mutations.slice(beforeClose), [["ungroup", 99], ["remove", 99]]);
+
 console.log("PASS independent window creation, exclusive tasks and scoped tab operations");
