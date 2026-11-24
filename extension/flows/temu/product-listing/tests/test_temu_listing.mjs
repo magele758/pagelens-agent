@@ -155,6 +155,41 @@ const input = {
 }
 
 {
+  const fields = [{ ...title }, {
+    ...price, kind: "text", required: true, value: "",
+  }, {
+    ...price, key: "productSkuMap.orange-s.siteSupplierPriceMap.100", skuGroup: "orange-s",
+    rowLabels: ["橙色", "S"], kind: "text", required: true, value: "",
+  }];
+  const writes = [];
+  const receipt = await replayTemuListing({
+    tabId: 1, input: { ...input, mainImages: [], skus: [
+      ...input.skus, { options: { Color: "橙色", Size: "Small" }, price: "25" },
+    ] },
+    async call(tool, args) {
+      if (tool === "temu_category") return { ok: true, href: editor };
+      if (tool === "temu_editor_state") return {
+        ok: true, fields: structuredClone(fields), uploads: [],
+        validation: fields[1].value ? [] : [{ key: price.key, kind: "text", message: "请输入申报价" }],
+      };
+      if (tool === "temu_write") {
+        writes.push([args.key, args.value]);
+        if (args.key === price.key && writes.filter(([key]) => key === price.key).length < 3) {
+          return { ok: false, code: "READBACK_MISMATCH", message: "该 SKU 行尚未回显" };
+        }
+        fields.find(field => field.key === args.key).value = args.value;
+        return { ok: true, status: "filled" };
+      }
+      throw new Error("unexpected action: " + tool);
+    },
+  });
+  assert.deepEqual(writes.filter(([key]) => key === price.key), Array.from({ length: 3 }, () => [price.key, "19.80"]));
+  assert.deepEqual(writes.filter(([key]) => key === fields[2].key), [[fields[2].key, "25"]]);
+  assert.equal(receipt.status, "ready-for-review");
+  assert.equal(receipt.verifiedSkuCount, 2);
+}
+
+{
   let failed = false;
   const result = await replayTemuListing({
     tabId: 1, input,

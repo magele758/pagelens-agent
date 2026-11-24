@@ -316,20 +316,38 @@ export async function temuControls(request) {
       ? openMenus[0] : null;
   }
 
+  const controlHead = control => control.input.closest(HEAD) || control.wrapper;
+  function reachable(control) {
+    const { left, top, width, height } = controlHead(control).getBoundingClientRect();
+    if (!width || !height) return true;
+    const x = left + width / 2;
+    const y = top + height / 2;
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+    const hit = document.elementFromPoint?.(x, y);
+    return !hit || control.wrapper.contains(hit) || hit.contains(control.wrapper);
+  }
+
   async function open(control) {
     if (!validPage() || blocked() || !control?.input?.isConnected) return null;
     if (menus().length && !await poll(() => !menus().length, 400)) return null;
     if (!control.input.isConnected || !visible(control.input)) return null;
-    const { input, wrapper } = control;
-    const boundary = input.closest(HEAD) || wrapper;
-    const rect = boundary.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-    if (rect.width && rect.height && x >= 0 && y >= 0 && x < innerWidth && y < innerHeight &&
-      typeof document.elementFromPoint === "function") {
-      const hit = document.elementFromPoint(x, y);
-      if (hit && !wrapper.contains(hit) && !hit.contains(wrapper)) return null;
+    if (!reachable(control)) {
+      const boundary = controlHead(control);
+      if (typeof boundary.scrollIntoView !== "function") return null;
+      boundary.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      // Sticky bars can cover the control. Resolve its original locator again after scrolling.
+      const recovered = await settle(() => {
+        if (menus().length) return null;
+        const current = locate(control.field);
+        if (!current || !reachable(current)) return null;
+        const node = controlHead(current);
+        return { node, current, signature: JSON.stringify(geometry(node.getBoundingClientRect())) };
+      }, 650);
+      if (!recovered) return null;
+      Object.assign(control, recovered.current);
     }
+    if (!validPage() || blocked() || menus().length || !control.input.isConnected || !reachable(control)) return null;
+    const { input, wrapper } = control;
     const findMenu = () => associatedMenu(control);
     input.focus({ preventScroll: true });
     let menu = findMenu();
@@ -346,6 +364,12 @@ export async function temuControls(request) {
       }
     }
     return menu;
+  }
+
+  function failureToOpen() {
+    if (!validPage()) return fail("PAGE_CHANGED", "当前 Temu 商品草稿已变化。");
+    if (blocked()) return fail("MODAL_BLOCKED", "Temu 表单上有弹窗，请核对后继续。");
+    return fail("MENU_UNAVAILABLE", "无法安全打开该下拉选项列表。");
   }
 
   async function close(control, menu) {
@@ -400,15 +424,30 @@ export async function temuControls(request) {
     return !menuVisible(menu);
   }
 
+  const isSeason = field => /^(?:季节(?:\s*season)?|season)$/iu.test(field.label);
+  const seasons = [
+    ["春", "春季", "Spring"], ["夏", "夏季", "Summer"], ["秋", "秋季", "Autumn", "Fall"], ["冬", "冬季", "Winter"],
+  ];
+  const [spring, summer, autumn, winter] = seasons;
+  const seasonPairs = [
+    { seasons: [spring, summer], aliases: ["春夏", "春夏季", "春、夏", "春季、夏季", "Spring/Summer", "Spring and Summer"] },
+    { seasons: [autumn, winter], aliases: ["秋冬", "秋冬季", "秋、冬", "秋季、冬季", "Autumn/Winter", "Fall/Winter", "Autumn and Winter", "Fall and Winter"] },
+  ];
+  const includesName = (group, value) => {
+    const normalized = key(value);
+    return group.some(name => key(name) === normalized);
+  };
+
   function exactAliases(field, value) {
-    const groups = /^(?:季节(?:\s*season)?|season)$/iu.test(field.label) ? [
-      ["春", "春季", "Spring"], ["夏", "夏季", "Summer"], ["秋", "秋季", "Autumn", "Fall"], ["冬", "冬季", "Winter"],
-    ] : /^(?:门襟类型(?:\s*placket\s*type)?|placket\s*type)$/iu.test(field.label) ? [
+    const groups = isSeason(field) ? [...seasons, ...seasonPairs.map(pair => pair.aliases)] :
+      /^(?:袖型(?:\s*sleeve\s*type)?|sleeve\s*type)$/iu.test(field.label) ? [
+        ["帽袖", "短帽袖", "Cap Sleeve", "Cap Sleeves"],
+      ] : /^(?:门襟类型(?:\s*placket\s*type)?|placket\s*type)$/iu.test(field.label) ? [
       ["套头", "套头衫", "Pullover", "Pullovers"],
     ] : /^composition-material-\d+$/u.test(field.key) ? [
       ["聚酯纤维", "涤纶", "Polyester"], ["氨纶", "Spandex", "Elastane"],
     ] : [];
-    return groups.find(group => group.some(alias => key(alias) === key(value))) || [];
+    return groups.find(group => includesName(group, value)) || [];
   }
 
   function choices(menu, field) {
@@ -503,7 +542,7 @@ export async function temuControls(request) {
 
   async function probe(control, query) {
     let menu = await open(control);
-    if (!menu) return fail("MENU_UNAVAILABLE", "无法安全打开该下拉选项列表。");
+    if (!menu) return failureToOpen();
     let result;
     let closed;
     try {
@@ -539,7 +578,11 @@ export async function temuControls(request) {
 
   function checkValues(field, value) {
     const multiple = Boolean(field.constraints.multiple);
-    const values = Array.isArray(value) ? value : [value];
+    const requested = Array.isArray(value) ? value : [value];
+    // A single-select may offer a combined season. Both requested seasons must be represented.
+    const pair = !multiple && isSeason(field) && requested.length === 2 && seasonPairs.find(({ seasons }) =>
+      seasons.every(aliases => requested.some(season => includesName(aliases, season))));
+    const values = pair ? [pair.aliases[0]] : requested;
     if ((!multiple && values.length !== 1) || values.some((item) => (typeof item !== "string" && typeof item !== "number") || !key(item)) ||
       values.length > MAX_OPTIONS || new Set(values.map(key)).size !== values.length) {
       return fail("INPUT_TYPE", multiple ? "此多选下拉需要不重复的选项数组。" : "此下拉需要一个选项名称或选项值。");
@@ -550,7 +593,7 @@ export async function temuControls(request) {
 
   async function select(control, field, value, query) {
     let menu = await open(control);
-    if (!menu) return fail("MENU_UNAVAILABLE", "无法安全打开该下拉选项列表。");
+    if (!menu) return failureToOpen();
     let changed = false;
     let live = control;
     let ambiguous = [];

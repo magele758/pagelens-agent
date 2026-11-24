@@ -182,14 +182,14 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
     return matches.length === 1 ? matches[0] : null;
   };
   function validation(entries, media) {
-    const errors = root.querySelectorAll('[aria-invalid="true"],[data-invalid="true"],[data-testid*="error"],[role="alert"],[class*="Form_error_"],[class*="itemError_"]');
+    const marker = '[aria-invalid="true"],[data-invalid="true"],[data-testid*="error"],[role="alert"],[class*="Form_error_"],[class*="itemError_"]';
+    const wording = /请(?:输入|填写|选择|上传|补充|检查).+|必填|非空|不能为?空|不可为?空|不能为0|未填写|超出|有误|格式不正确|不符合|不合法|must be|required|out of range|invalid|please (?:enter|select|upload).+/iu;
+    const errors = [...root.querySelectorAll(marker)];
     const notifications = [...document.querySelectorAll('[role="alert"],[data-testid*="toast"],[class*="Toast_content"]')]
       .filter(el => /失败|错误|未成功|有误|超出|没有权限|error|failed|invalid/iu.test(clean(el.textContent)));
-    const present = [...new Set([...errors, ...notifications])].filter(visible);
-    if (!present.length) return [];
-
     const owners = entries.map(({ input, field }) => ({
       input, holder: holderFor(input) || input, key: field.key, label: field.label, kind: field.kind,
+      ...(field.skuGroup != null && { rowLabels: field.rowLabels }),
     }));
     // The dropdown adapter reads these controls separately. Use only unique platform attribute IDs to associate their errors.
     for (const holder of root.querySelectorAll('[id^="productProperties"]')) {
@@ -204,27 +204,90 @@ export async function temuEditorPage({ kind, href, categoryPath, key, value, rol
       const holder = document.getElementById(upload.key);
       if (holder && root.contains(holder)) {
         const label = upload.variant ? `${upload.variant}规格图` : uploadLabels[upload.role];
-        owners.push({ holder, key: upload.key, label, kind: "upload" });
+        owners.push({ holder, key: upload.key, label, kind: "upload", rowLabels: upload.rowLabels });
       }
     }
-    const referenceIds = input => [input?.getAttribute("aria-describedby"), input?.getAttribute("aria-errormessage")]
-      .filter(Boolean).flatMap(value => value.split(/\s+/u));
-    const rows = present.map(error => {
-      const item = error.closest(formItem);
-      const direct = owners.filter(({ input }) => input === error || error.id && referenceIds(input).includes(error.id));
-      const local = direct.length || !root.contains(error) ? direct : owners.filter(({ input, holder }) =>
-        holder.contains(error) || error.contains(input || holder) || item && (input || holder).closest(formItem) === item);
-      const owner = local.length === 1 ? local[0] : null;
-      const detail = owner && (owner.input === error || owner.holder === error) ?
-        referenceIds(owner.input).map(id => document.getElementById(id)).filter(el => visible(el) && root.contains(el))
-          .map(el => clean(el.textContent, 160)).find(Boolean) : "";
-      const message = detail || (!error.matches(control) ? clean(error.textContent, 160) : "") ||
-        clean(error.getAttribute("aria-label"), 160) || (owner ? "当前控件校验未通过" : nearby(error));
-      return message ? {
-        ...(owner && { key: owner.key, ...(owner.label && { label: translated(owner.label) }), kind: owner.kind }), message,
-      } : null;
-    }).filter(Boolean);
-    return [...new Map(rows.map(row => [JSON.stringify([row.key, row.message]), row])).values()].slice(0, 35);
+    const within = node => node.closest('td,[role="cell"]') || node.closest(formItem);
+    const scopes = new Map();
+    for (const owner of owners) {
+      owner.scope = within(owner.input || owner.holder) || owner.holder;
+      owner.references = [owner.input?.getAttribute("aria-describedby"), owner.input?.getAttribute("aria-errormessage")]
+        .filter(Boolean).flatMap(value => value.split(/\s+/u));
+      const list = scopes.get(owner.scope) || [];
+      list.push(owner);
+      scopes.set(owner.scope, list);
+    }
+    const only = options => options.length === 1 ? options[0] : null;
+    const ownerFor = error => {
+      const direct = owners.filter(owner => owner.input === error || error.id && owner.references.includes(error.id));
+      if (direct.length) return only(direct);
+      if (!root.contains(error)) return null;
+      const contained = owners.filter(({ holder }) => holder.contains(error));
+      if (contained.length) return only(contained);
+      return only(scopes.get(within(error)) || []);
+    };
+    const scopedMessage = "当前控件校验未通过";
+    const findings = [];
+    function add(owner, message) {
+      if (!message) return;
+      findings.push({
+        ...(owner && { key: owner.key, ...(owner.label && { label: translated(owner.label) }), kind: owner.kind,
+          ...(owner.rowLabels?.length && { rowLabels: owner.rowLabels }) }),
+        message,
+      });
+    }
+    for (const error of new Set([...errors, ...notifications])) {
+      if (!visible(error)) continue;
+      const owner = ownerFor(error);
+      const errorReferences = owner?.input?.getAttribute("aria-errormessage")?.split(/\s+/u) || [];
+      const detail = owner && (owner.input === error || owner.holder === error) &&
+        owner.references.map(id => document.getElementById(id)).filter(el => visible(el) && root.contains(el))
+          .filter(el => el.matches(marker) || errorReferences.includes(el.id) || wording.test(clean(el.textContent)))
+          .map(el => clean(el.textContent, 160)).find(Boolean);
+      add(owner, detail || (!error.matches(control) ? clean(error.textContent, 160) : "") ||
+        clean(error.getAttribute("aria-label"), 160) || (owner ? scopedMessage : nearby(error)));
+    }
+
+    const styles = new Map();
+    const style = node => {
+      if (!styles.has(node)) styles.set(node, getComputedStyle(node));
+      return styles.get(node);
+    };
+    const red = color => {
+      const [r = 0, g = r, b = r, opacity = 1] = color?.match(/\d+(?:\.\d+)?/gu)?.map(Number) || [];
+      return opacity > 0 && r >= 150 && r > g + 65 && r > b + 65;
+    };
+    const foreign = labels + ',[role="listbox"],[role="option"],[role="tooltip"]';
+    for (const area of scopes.keys()) {
+      for (const node of area.querySelectorAll("p,small,span,div")) {
+        if (node.matches(marker) || node.closest(foreign)) continue;
+        const text = clean([...node.childNodes].filter(child => child.nodeType === 3).map(child => child.nodeValue).join(" "), 160);
+        if (!wording.test(text)) continue;
+        const owner = ownerFor(node);
+        if (owner && visible(node) && red(style(node).color)) add(owner, text);
+      }
+    }
+    for (const owner of owners) {
+      const input = owner.input;
+      if (input?.value && input.willValidate && !input.validity.valid) {
+        add(owner, clean(input.validationMessage, 160) || scopedMessage);
+      }
+      const singleField = scopes.get(owner.scope).length === 1;
+      for (let node = input || owner.holder; node && owner.scope.contains(node); node = node.parentElement) {
+        if ((!singleField && !owner.holder.contains(node)) || node.contains(document.activeElement)) continue;
+        const computed = style(node);
+        if (["Top", "Right", "Bottom", "Left"].some(side => red(computed[`border${side}Color`]) &&
+            !["none", "hidden"].includes(computed[`border${side}Style`]) &&
+            Number.parseFloat(computed[`border${side}Width`]) > 0)) {
+          add(owner, scopedMessage);
+          break;
+        }
+      }
+    }
+    const described = new Set(findings.filter(row => row.key && row.message !== scopedMessage).map(row => row.key));
+    const distinct = new Map(findings.filter(row => row.message !== scopedMessage || !described.has(row.key))
+      .map(row => [JSON.stringify([row.key, row.message]), row]));
+    return [...distinct.values()].slice(0, 35);
   }
 
   function uploads() {

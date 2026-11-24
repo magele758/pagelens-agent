@@ -32,16 +32,19 @@ export async function temuSensitivePage({ href, key, value }) {
   }
 
   function negativeSelected(holder) {
-    const input = anchor(holder, true);
-    if (!input) return false;
-    if (["否", "非敏感品"].includes(clean(input.value))) return true;
-    const chips = [...holder.querySelectorAll('[class*="ST_selectValueMultipleItem_"],[class*="ST_selectValueSingle_"]')].filter(node =>
-      visible(node) && !node.closest(`${portalSelector},label,[role=radio]`) &&
-      ["否", "非敏感品"].includes(clean(node.textContent)));
-    if (chips.length) return chips.length === 1;
-    return [...holder.querySelectorAll('span,div')].some(node =>
-      visible(node) && !node.childElementCount && !node.closest(`${portalSelector},label,[role=radio]`) &&
-      ["否", "非敏感品"].includes(clean(node.textContent)));
+    if (!holder) return false;
+    const negative = text => ["否", "非敏感品"].includes(clean(text));
+    if (negative(anchor(holder, true)?.value)) return true;
+    // The committed SKU value can be a display-only chip with no remaining input.
+    const display = node => visible(node) && !node.closest(
+      `${portalSelector},label,button,[role="button"],[role="radio"],[role="listbox"],[role="option"]`,
+    );
+    const chips = [...holder.querySelectorAll('[class*="ST_selectValueMultipleItem_"],[class*="ST_selectValueSingle_"]')]
+      .filter(display);
+    if (chips.length) return chips.length === 1 && negative(chips[0].textContent);
+    const matching = [holder, ...holder.querySelectorAll("span,div,p,em,strong,b")].filter(node =>
+      !node.childElementCount && display(node) && negative(node.textContent));
+    return matching.length === 1;
   }
 
   function radioChoice(portal, name) {
@@ -118,14 +121,23 @@ export async function temuSensitivePage({ href, key, value }) {
       fail("MENU_STILL_OPEN", "当前 SKU 的敏感属性弹层尚未关闭。");
   }
   if (!checked(negative)) negative.target.click();
-  const applied = await waitFor(() => negativeSelected(field()) &&
-    (!visible(portal) || checked(radioChoice(portal, "否")) ||
-      [...portal.querySelectorAll(textNodes)].some(node => visible(node) && /^是否敏感品\s*:\s*否$/u.test(clean(node.textContent)))));
+  let checkedSince;
+  await waitFor(() => {
+    if (!visible(portal)) return negativeSelected(field());
+    if ([...portal.querySelectorAll(textNodes)].some(node =>
+      visible(node) && /^是否敏感品\s*:\s*否$/u.test(clean(node.textContent)))) return true;
+    if (!checked(radioChoice(portal, "否"))) {
+      checkedSince = undefined;
+      return false;
+    }
+    checkedSince ??= Date.now();
+    return Date.now() - checkedSince >= 100;
+  });
   if (!onPage() || blocked()) return fail("PAGE_CHANGED", "核对这条 SKU 时 Temu 草稿页已变化或弹出其他窗口。");
   if (!await close()) {
     return fail("MENU_STILL_OPEN", "当前 SKU 的敏感属性弹层尚未关闭。");
   }
-  if (!applied) return fail("READBACK_MISMATCH", "Temu 尚未回显此 SKU 的「否」。");
+  // Temu can commit the row value only after the popover closes.
   return await waitFor(() => negativeSelected(field()) && !popovers().length)
     ? { ok: true, status: "verified", value: "非敏感品" }
     : fail("READBACK_MISMATCH", "关闭弹层后未能核对此 SKU 的敏感属性。");

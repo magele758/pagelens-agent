@@ -1,7 +1,7 @@
 import { dialogNote } from "../../../lib/agent/cdp-tools.js";
 import { isSensitiveUploadPath } from "../../../lib/bridge/tools-browser.js";
 import { getCdp } from "../../../lib/cdp.js";
-import { createTemuOptionCache } from "./attribute-cache.js";
+import { createTemuOptionCache, temuCategoryDropdownShape } from "./attribute-cache.js";
 import { temuApparelPage } from "./apparel-page.js";
 import { temuControls } from "./controls.js";
 import { temuDecorationPage } from "./decoration-page.js";
@@ -37,10 +37,16 @@ export function createTemuListingToolCaller({
   let href = url;
   let documentId;
   let categoryPath;
+  let categoryId;
   let site;
+  let merchantId;
+  let observedOptionScope;
+  let observedDropdownShape;
   let stage = "category";
   let siteAndCategorySet = false;
   let busy = false;
+  const probedFields = new Set();
+  const cachedChoiceHints = new Map();
   const verifiedMaterials = new Map();
   const currentTab = () => api.tabs.get(tabId).catch(() => null);
   const editorScope = () => ({ origin: SITE, path: "/goods/edit", href });
@@ -261,7 +267,10 @@ export function createTemuListingToolCaller({
           if (!applied.ok) return applied;
           siteAndCategorySet = true;
           categoryPath = args.categoryPath;
+          categoryId = args.categoryId;
           site = args.site;
+          // Only accept a store identifier read back by the bound seller page.
+          merchantId = applied.merchantId;
           const next = await runInPage(temuStagePage, { ...selection, kind: "next" });
           return next.ok ? await enteredEditor() : next;
         }
@@ -272,8 +281,16 @@ export function createTemuListingToolCaller({
             if (!state.ok) return state;
             const dropdowns = await runInPage(temuControls, { kind: "inspect", scope: editorScope() });
             if (!dropdowns.ok) return dropdowns;
-            return { ...state, fields: [...state.fields, ...dropdowns.fields],
-              unsupported: dropdowns.unsupported, truncated: Boolean(state.truncated || dropdowns.truncated) };
+            const fields = [...state.fields, ...dropdowns.fields];
+            const truncated = Boolean(state.truncated || dropdowns.truncated);
+            const cached = await optionCache.observe({ site, categoryPath, categoryId, storeId: merchantId }, fields, { truncated });
+            if (observedOptionScope?.attributeShape !== cached.optionsScope?.attributeShape) probedFields.clear();
+            observedOptionScope = cached.optionsScope;
+            observedDropdownShape = observedOptionScope && temuCategoryDropdownShape(dropdowns.fields);
+            cachedChoiceHints.clear();
+            for (const field of cached.fields) if (field.cachedOptions) cachedChoiceHints.set(field.key, field.options);
+            return { ...state, fields: cached.fields, schemaCache: cached.schemaCache,
+              unsupported: dropdowns.unsupported, truncated };
           }
           case "temu_field_options":
           case "temu_select": {
@@ -282,20 +299,45 @@ export function createTemuListingToolCaller({
             const fields = options.fields.filter(field => field.key === args.key);
             if (fields.length !== 1) return failure("FIELD_MISSING", "没有唯一匹配的动态下拉字段。");
             const [field] = fields;
-            const scope = { site, categoryPath };
+            const scope = !options.truncated && observedOptionScope &&
+              observedDropdownShape === temuCategoryDropdownShape(options.fields) ? observedOptionScope : null;
             const request = { field, query: args.query, scope: editorScope() };
             if (tool === "temu_select") {
               if (field.skuMember === "sensitiveAttr") {
                 return await runInPage(temuSensitivePage, { href, key: field.key, value: args.value });
               }
-              const selected = await runInPage(temuControls, { ...request, kind: "select", value: args.value });
-              if (selected?.options?.length) await optionCache.write(scope, field, selected.options);
+              const hints = !scope || !probedFields.has(field.key) ? cachedChoiceHints.get(field.key) : undefined;
+              const values = Array.isArray(args.value) ? args.value : [args.value];
+              // Cached opaque IDs can go stale. Resolve their names in the live menu again.
+              const targets = hints ? values.map(value => hints.find(option => option.value === String(value))?.label ?? value) : values;
+              const selected = await runInPage(temuControls, { ...request, kind: "select",
+                value: Array.isArray(args.value) ? targets : targets[0] });
+              if (scope && selected?.options?.length) {
+                probedFields.add(field.key);
+                await optionCache.write(scope, field, selected.options);
+              } else if (scope && ["OPTION_MISSING", "OPTION_AMBIGUOUS"].includes(selected?.code)) {
+                probedFields.delete(field.key);
+                cachedChoiceHints.delete(field.key);
+                await optionCache.invalidate(scope, field);
+              }
               return selected;
             }
-            const cached = !args.forceLive && !args.query && await optionCache.read(scope, field);
-            if (cached) return { ok: true, options: cached };
+            const cached = scope && !args.forceLive && !args.query && await optionCache.read(scope, field);
+            if (cached) {
+              cachedChoiceHints.set(field.key, cached);
+              return { ok: true, field, options: cached, cached: true };
+            }
             const live = await runInPage(temuControls, { ...request, kind: "probe" });
-            if (live.ok && !args.query) await optionCache.write(scope, field, live.options);
+            if (live.ok && !args.query) {
+              cachedChoiceHints.delete(field.key);
+              if (scope && live.options?.length) {
+                probedFields.add(field.key);
+                await optionCache.write(scope, field, live.options);
+              } else {
+                probedFields.delete(field.key);
+                if (scope) await optionCache.invalidate(scope, field);
+              }
+            }
             return live;
           }
           case "temu_write":

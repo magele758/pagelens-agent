@@ -37,6 +37,7 @@ let navigation;
 let replayed;
 let recommended = [];
 let picked = 0;
+let typedDirectory;
 let back = 0;
 const open = bindTemuListingPanel({
   getTargetTab: async () => ({ id: 4, url: "https://agentseller.temu.com/goods/list" }),
@@ -44,6 +45,10 @@ const open = bindTemuListingPanel({
   fetchImpl,
   chooseDirectory: async () => ++picked === 1
     ? { directoryName: "跨境", products: [product], issues: [] } : null,
+  readDirectory: async path => {
+    typedDirectory = path;
+    return { root: path, products: [product], issues: [] };
+  },
   suggestCategory: async ({ title, operatorNotes }, { useModel }) => {
     recommended.push([title, operatorNotes, useModel]);
     return { category, source: useModel ? "model" : "local" };
@@ -123,5 +128,10 @@ assert.equal(back, 1);
 assert.equal(get(".temu-listing-dialog").open, false);
 await open();
 assert.equal(value("listing-site"), "加拿大站");
+inputText(get("#temu-directory-path"), " /Products/Fit sample ");
+get('[data-action="read-directory"]').click();
+await delay(10);
+assert.equal(typedDirectory, "/Products/Fit sample");
+assert.equal(get("#temu-directory-summary").textContent, "Water Bottle");
 dom.window.close();
 console.log("Temu listing selector, directory, recommendation, and auto-navigation verified.");
