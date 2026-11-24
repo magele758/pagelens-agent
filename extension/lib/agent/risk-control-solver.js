@@ -147,26 +147,35 @@ export async function solveRiskControlPlayground(options) {
     }
     const listenWin = iframe.contentWindow;
     if (!listenWin) return;
-    await dragHandle(handle, listenWin, 2000);
-    const waitPassed = Math.ceil(500 / 50);
-    for (let i = 0; i <= waitPassed; i += 1) {
-      const frameDoc = iframe.contentDocument;
-      const frameBody = frameDoc && frameDoc.body;
-      const framePassed = !!(frameBody && frameBody.dataset && frameBody.dataset.status === "passed");
-      let widgetPassed = !!(root.dataset && root.dataset.rcStatus === "passed");
-      if (!widgetPassed && typeof root.querySelectorAll === "function") {
-        const marked = root.querySelectorAll("[data-rc-status]");
-        for (const node of marked) {
-          if (node.dataset && node.dataset.rcStatus === "passed") {
-            widgetPassed = true;
-            break;
-          }
+    const cardWaits = !!(root.hasAttribute && root.hasAttribute("data-rc-status"));
+    const waitMs = cardWaits ? 2000 : 500;
+
+    async function pollFrame() {
+      const slices = Math.ceil(waitMs / 50);
+      for (let i = 0; i <= slices; i += 1) {
+        const frameDoc = iframe.contentDocument;
+        const frameBody = frameDoc && frameDoc.body;
+        const frameStatus = frameBody && frameBody.dataset ? frameBody.dataset.status : "";
+        const cardPassed = !!(root.dataset && root.dataset.rcStatus === "passed");
+        if (cardWaits) {
+          if (cardPassed) return "passed";
+          if (frameStatus === "failed") return "failed";
+        } else if (frameStatus === "passed") {
+          return "passed";
+        } else if (frameStatus === "failed") {
+          return "failed";
         }
+        if (i === slices) return "timeout";
+        await sleep(50);
       }
-      if (framePassed || widgetPassed) return;
-      if (i === waitPassed) return;
-      await sleep(50);
+      return "timeout";
     }
+
+    await dragHandle(handle, listenWin, 2000);
+    const first = await pollFrame();
+    if (first !== "failed") return;
+    await dragHandle(handle, listenWin, 2000);
+    await pollFrame();
   }
 
   async function solveRateLimit(root) {
@@ -205,105 +214,6 @@ export async function solveRiskControlPlayground(options) {
     const luma = 0.299 * r + 0.587 * g + 0.114 * b;
     if (luma >= 140) return false;
     return Math.max(r, g, b) - Math.min(r, g, b) > 30 || luma < 70;
-  }
-
-  function blobsFrom(imageData) {
-    const w = imageData.width;
-    const h = imageData.height;
-    const data = imageData.data;
-    const visited = new Uint8Array(w * h);
-    const blobs = [];
-    const stack = [];
-
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        const i = row + x;
-        if (visited[i]) continue;
-        const p = i * 4;
-        const ink = isInkPixel(data[p], data[p + 1], data[p + 2], data[p + 3]);
-        visited[i] = 1;
-        if (!ink) continue;
-
-        let n = 0;
-        let sumX = 0;
-        let sumY = 0;
-        let minX = x;
-        let maxX = x;
-        let minY = y;
-        let maxY = y;
-        stack.push(x, y);
-
-        while (stack.length) {
-          const py = stack.pop();
-          const px = stack.pop();
-          n++;
-          sumX += px + 0.5;
-          sumY += py + 0.5;
-          if (px < minX) minX = px;
-          else if (px > maxX) maxX = px;
-          if (py < minY) minY = py;
-          else if (py > maxY) maxY = py;
-
-          for (let dy = -1; dy <= 1; dy++) {
-            const ny = py + dy;
-            if (ny < 0 || ny >= h) continue;
-            const nrow = ny * w;
-            for (let dx = -1; dx <= 1; dx++) {
-              if (dx === 0 && dy === 0) continue;
-              const nx = px + dx;
-              if (nx < 0 || nx >= w) continue;
-              const ni = nrow + nx;
-              if (visited[ni]) continue;
-              const np = ni * 4;
-              const nink = isInkPixel(data[np], data[np + 1], data[np + 2], data[np + 3]);
-              visited[ni] = 1;
-              if (!nink) continue;
-              stack.push(nx, ny);
-            }
-          }
-        }
-
-        blobs.push({ n: n, cx: sumX / n, cy: sumY / n, minX: minX, maxX: maxX, minY: minY, maxY: maxY });
-      }
-    }
-
-    const bn = blobs.length;
-    for (let i = (bn >> 1) - 1; i >= 0; i--) {
-      let root = i;
-      for (;;) {
-        const left = (root << 1) + 1;
-        if (left >= bn) break;
-        let small = left;
-        const right = left + 1;
-        if (right < bn && blobs[right].n < blobs[left].n) small = right;
-        if (blobs[small].n >= blobs[root].n) break;
-        const tmp = blobs[root];
-        blobs[root] = blobs[small];
-        blobs[small] = tmp;
-        root = small;
-      }
-    }
-    for (let heap = bn; heap > 1;) {
-      heap--;
-      const top = blobs[0];
-      blobs[0] = blobs[heap];
-      blobs[heap] = top;
-      let root = 0;
-      for (;;) {
-        const left = (root << 1) + 1;
-        if (left >= heap) break;
-        let small = left;
-        const right = left + 1;
-        if (right < heap && blobs[right].n < blobs[left].n) small = right;
-        if (blobs[small].n >= blobs[root].n) break;
-        const tmp = blobs[root];
-        blobs[root] = blobs[small];
-        blobs[small] = tmp;
-        root = small;
-      }
-    }
-    return blobs;
   }
 
   function templateFor(ch, font, rotRad, fracX, fracY) {
@@ -525,19 +435,41 @@ export async function solveRiskControlPlayground(options) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const blobs = blobsFrom(imageData);
-    if (!blobs || blobs.length < 6) return;
-    const top = blobs.slice(0, 6);
-
     const font = 'bold 28px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
     const chars = [...pool];
     const score = [0, 1, 2, 3, 4, 5].map(() => [0, 0, 0, 0, 0, 0]);
     const data = imageData.data;
     const w = imageData.width;
     const h = imageData.height;
+    const cells = [];
+    for (let row = 0; row < 2; row++) {
+      for (let col = 0; col < 3; col++) {
+        const cx0 = col * 100 + 56;
+        const cy0 = row * 74 + 43;
+        const x0 = Math.max(0, cx0 - 36);
+        const x1 = Math.min(w - 1, cx0 + 36);
+        const y0 = Math.max(0, cy0 - 30);
+        const y1 = Math.min(h - 1, cy0 + 30);
+        let n = 0;
+        let sumX = 0;
+        let sumY = 0;
+        for (let y = y0; y <= y1; y++) {
+          const rowOff = y * w;
+          for (let x = x0; x <= x1; x++) {
+            const p = (rowOff + x) * 4;
+            if (!isInkPixel(data[p], data[p + 1], data[p + 2], data[p + 3])) continue;
+            n += 1;
+            sumX += x + 0.5;
+            sumY += y + 0.5;
+          }
+        }
+        if (n < 40) return;
+        cells.push({ cx: sumX / n, cy: sumY / n });
+      }
+    }
 
     for (let bi = 0; bi < 6; bi++) {
-      const blob = top[bi];
+      const blob = cells[bi];
       for (let ci = 0; ci < 6; ci++) {
         let best = -1;
         for (let deg = -24; deg <= 24; deg++) {
@@ -582,7 +514,7 @@ export async function solveRiskControlPlayground(options) {
     if (!bestPerm) return;
 
     const blobFor = new Map();
-    for (let i = 0; i < 6; i++) blobFor.set(chars[bestPerm[i]], top[i]);
+    for (let i = 0; i < 6; i++) blobFor.set(chars[bestPerm[i]], cells[i]);
     const targets = [];
     for (const text of sequence) {
       for (const ch of text) {
