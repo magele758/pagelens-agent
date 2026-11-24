@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
-import { createPlaygroundServer } from '../../tools/risk-control-playground/server.mjs';
+import { DEFAULT_PORT, createPlaygroundServer } from '../../tools/risk-control-playground/server.mjs';
+
+assert.equal(DEFAULT_PORT, 18473, 'Default playground port should avoid common 4173 conflicts');
 
 function stubCanvas2D(window) {
   const noop = () => {};
@@ -47,7 +49,7 @@ assert.equal(/https?:\/\//i.test(frameHtml), false, 'verifycenter-captcha-frame.
 // 2. Boot index.html in JSDOM and assert all 8 widgets + modal workflows initialize cleanly
 const pageErrors = [];
 const dom = new JSDOM(indexHtml, {
-  url: 'http://127.0.0.1:4173/',
+  url: `http://127.0.0.1:${DEFAULT_PORT}/`,
   runScripts: 'dangerously',
   beforeParse(window) {
     stubCanvas2D(window);
@@ -121,7 +123,7 @@ dom.window.close();
 // 6. Boot verifycenter-captcha-frame.html in JSDOM
 const frameErrors = [];
 const frameDom = new JSDOM(frameHtml, {
-  url: 'http://127.0.0.1:4173/verifycenter-captcha-frame.html',
+  url: `http://127.0.0.1:${DEFAULT_PORT}/verifycenter-captcha-frame.html`,
   runScripts: 'dangerously',
   beforeParse(w) {
     w.addEventListener('error', e => frameErrors.push(e.error || e.message));
