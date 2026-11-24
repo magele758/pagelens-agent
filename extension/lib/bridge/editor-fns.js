@@ -329,6 +329,7 @@ export function plSetInputValue(spec) {
   else el.value = value;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
+  if (o.commit === true) el.blur();
   return { ok: true, value: el.value, matches: el.value === value, length: el.value.length };
 }
 

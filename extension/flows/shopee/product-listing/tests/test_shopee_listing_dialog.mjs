@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { mountProductListingDialog } from "../sidepanel/dialog.js";
 import { bindPtcFlow } from "../sidepanel/flow-ui.js";
+import { resetPermissionPrompter } from "../../../../lib/optional-permissions.js";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom");
 const shopUrl = "https://seller.shopee.cn/portal/mtsku/new?cnsc_shop_id=1901697826";
@@ -140,6 +141,106 @@ test("starts the selected write mode with a bounded concurrency and shows verifi
     assert.deepEqual(starts, [{ mode: "create", concurrency: 5 }, { mode: "publish", concurrency: 10 }]);
     assert.match(byId("ptc-batch-status").textContent, /已提交上架 1\/1/u);
   } finally {
+    globalThis.document = originalDocument;
+    globalThis.chrome = originalChrome;
+    window.close();
+  }
+});
+
+test("starts from a Shopee product list, acknowledges the click, and clears loading on failure", async () => {
+  const { window } = new JSDOM("<!doctype html><body></body>");
+  const { document } = window;
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const activate = [];
+  const sourceTab = { id: 13, windowId: 1, url: shopUrl.replace("/portal/mtsku/new", "/portal/product/mtsku/list") };
+  const starts = [];
+  const permission = Promise.withResolvers();
+  const batch = Promise.withResolvers();
+  let requests = 0;
+  let tab = { ...sourceTab, url: sourceTab.url.replace("seller.shopee.cn", "example.com") };
+  resetPermissionPrompter();
+  globalThis.document = document;
+  globalThis.chrome = {
+    permissions: { contains: async () => false, request: () => { requests++; return permission.promise; } },
+    tabs: {
+      get: async () => tab,
+      query: async () => [tab],
+      onActivated: { addListener(listener) { activate.push(listener); } },
+      onUpdated: { addListener() {} },
+    },
+    runtime: { getURL: path => "chrome-extension://test/" + path, onMessage: { addListener() {} } },
+  };
+  try {
+    const open = bindPtcFlow({
+      getTargetTab: async () => tab,
+      chooseDirectory: async () => ({
+        root: "/Products", directoryName: "Products",
+        products: Array.from({ length: 30 }, (_, index) => ({ title: `Product ${index}`, folder: `product-${index}`,
+          input: { imagePath: `/Products/product-${index}/cover.jpg` } })), issues: [],
+      }),
+      startBatch: ({ sourceTab: anchor, shopId, mode, concurrency, products, onJob }) => {
+        starts.push({ anchor, shopId, mode, concurrency, count: products.length });
+        onJob(0, { phase: "opening" });
+        return batch.promise;
+      },
+    });
+    const byId = id => document.getElementById(id);
+    const dialog = byId("ptc-flow-dialog");
+    dialog.showModal ??= () => { dialog.open = true; };
+    open();
+    await nextTurn();
+    byId("ptc-load-directory").click();
+    await nextTurn();
+    const create = byId("ptc-batch-start");
+    const publish = byId("ptc-batch-publish");
+    const consent = byId("ptc-batch-upload-consent");
+    const concurrency = byId("ptc-batch-concurrency");
+    assert.match(byId("ptc-batch-status").textContent, /已读入 30 个商品/u);
+
+    for (const url of [tab.url, sourceTab.url.split("?")[0], sourceTab.url + "&cnsc_shop_id=42"]) {
+      tab = { ...sourceTab, url };
+      activate[0]();
+      await nextTurn();
+      consent.checked = true;
+      consent.dispatchEvent(new window.Event("change"));
+      assert.equal(create.disabled, true, url);
+      assert.equal(publish.disabled, true, url);
+      create.click();
+    }
+    assert.equal(requests, 0);
+
+    tab = sourceTab;
+    activate[0]();
+    await nextTurn();
+    consent.checked = true;
+    consent.dispatchEvent(new window.Event("change"));
+    concurrency.value = "10";
+    concurrency.dispatchEvent(new window.Event("input"));
+    assert.equal(create.disabled, false);
+    create.click();
+    assert.equal(create.getAttribute("aria-busy"), "true");
+    assert.match(create.textContent, /启动中/u);
+    assert.equal(create.disabled, true);
+    assert.equal(publish.disabled, true);
+    create.click();
+    assert.equal(requests, 1);
+    assert.deepEqual(starts, []);
+
+    permission.resolve(true);
+    await nextTurn();
+    assert.deepEqual(starts, [{ anchor: sourceTab, shopId: "1901697826", mode: "create", concurrency: 10, count: 30 }]);
+    assert.equal(create.getAttribute("aria-busy"), "true");
+    assert.match(create.textContent, /创建中/u);
+    assert.equal(publish.disabled, true);
+
+    batch.reject(new Error("模拟启动失败"));
+    await nextTurn();
+    assert.notEqual(create.getAttribute("aria-busy"), "true");
+    assert.equal(create.textContent.trim(), "创建商品");
+    assert.match(byId("ptc-batch-status").textContent, /模拟启动失败/u);
+  } finally {
+    resetPermissionPrompter();
     globalThis.document = originalDocument;
     globalThis.chrome = originalChrome;
     window.close();

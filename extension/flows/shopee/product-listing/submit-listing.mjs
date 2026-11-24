@@ -6,6 +6,27 @@ const PUBLISH = '/portal/product-distribute/single-product-publish/';
 const RECORDS = '/portal/product-distribute/publish-record';
 const clean = value => String(value ?? '').trim().replace(/\s+/gu, ' ');
 const ledgerKey = (shopId, sku) => `pl.shopee.submission.v1.${shopId}.${encodeURIComponent(sku)}`;
+const globalListUrl = shopId => `${ORIGIN}${GLOBAL_LIST}?cnsc_shop_id=${shopId}&page=1&size=48`;
+const PENDING_CREATE_MIN_AGE = 5 * 60 * 1000;
+const sameNumber = (value, expected) => clean(value) !== '' && Number(value) === Number(expected);
+
+function salesAndShippingMatch(form, input, expectedRows = []) {
+  const rows = form.variant?.rows ?? [];
+  if (rows.length !== expectedRows.length) return false;
+  if (expectedRows.length) {
+    const options = form.variant?.options ?? [];
+    if (options.length !== expectedRows.length || expectedRows.some(expected => {
+      const matches = rows.filter(row => row.option === expected.option);
+      const row = matches[0];
+      return !options.includes(expected.option) || matches.length !== 1 || row.sku !== expected.sku ||
+        !sameNumber(row.price, expected.price) || !sameNumber(row.quantity, expected.quantity) ||
+        expected.imageVerified && !row.image?.present;
+    })) return false;
+  } else if (form.fields.variantName || form.variant?.options?.length) return false;
+  const keys = ['weight', 'width', 'length', 'height', 'shipDays'];
+  if (!expectedRows.length) keys.push('price', 'quantity');
+  return keys.every(key => input[key] == null || sameNumber(form.fields[key]?.value, input[key]));
+}
 
 function target(url, shopId) {
   try {
@@ -18,7 +39,7 @@ function target(url, shopId) {
 }
 
 // Runs in the seller tab. All mutations are bound to an exact page, SKU and control.
-export function sellerSubmitPage({ action, expectedUrl, title, sku }) {
+export function sellerSubmitPage({ action, expectedUrl, title, sku, expectedPage }) {
   const trim = value => String(value ?? '').trim().replace(/\s+/gu, ' ');
   const visible = el => el.getClientRects().length && getComputedStyle(el).visibility === 'visible' &&
     !el.closest('[hidden],[inert],[aria-hidden=true]');
@@ -33,13 +54,16 @@ export function sellerSubmitPage({ action, expectedUrl, title, sku }) {
   if (location.href !== expectedUrl || location.origin !== 'https://seller.shopee.cn') return { stage: 'page-changed' };
   const path = location.pathname;
   if (path === '/portal/mtsku/new') {
-    const fields = nodes(document, '.edit-row').filter(row => {
+    const field = key => unique(nodes(document, '.edit-row').filter(row => {
       const text = trim(row.querySelector(':scope > .edit-label')?.textContent).replace(/^[*＊]\s*/u, '');
-      return ['商品名称', '全球商品货号'].includes(text);
-    });
-    const titlePresent = fields.some(row => trim(row.querySelector('input:not([type=hidden])')?.value) === title);
-    const skuPresent = !sku || fields.some(row => trim(row.querySelector('input:not([type=hidden])')?.value) === sku);
-    const error = body.match(/仍有\s*\d+\s*个必填字段为空[^。]*。?|(?:创建|提交)失败[^。]*。?/u)?.[0];
+      return text === key;
+    }))?.querySelector('input:not([type=hidden])');
+    const titlePresent = trim(field('商品名称')?.value) === title;
+    const skuPresent = !sku || trim(field('全球商品货号')?.value) === sku;
+    const summary = body.match(/仍有\s*\d+\s*个必填字段为空[^。]*。?|\d+\s*个错误需调整|(?:创建|提交)失败[^。]*。?/u)?.[0];
+    const fieldErrors = [...new Set(nodes(document, '.eds-form-item__error,.eds-input__error,.eds-message--error')
+      .map(label).filter(Boolean))].slice(0, 3);
+    const error = [summary, ...fieldErrors].filter(Boolean).join(' · ').slice(0, 300);
     const ready = titlePresent && skuPresent && !error && !modals.length;
     if (ready && ['create', 'publish'].includes(action)) {
       const button = unique(buttons(document, action === 'create' ? '创建' : '创建并发布'));
@@ -54,15 +78,35 @@ export function sellerSubmitPage({ action, expectedUrl, title, sku }) {
     const rows = [...document.querySelectorAll('tr,[role=row]')].filter(row =>
       !row.closest('[hidden],[inert],[aria-hidden=true]') && !row.querySelector('tr,[role=row]'));
     const records = [];
+    const inventory = global && ['list-receipts', 'list-next-page'].includes(action);
     for (const row of rows) {
       const record = label(row) || trim(row.textContent);
       const match = record.match(/全球商品货号\s*[：:]\s*(.*?)\s*商品\s*ID\s*[：:]\s*(\d+)/iu);
       if (!match) continue;
-      if (action === 'list-receipts' || (sku ? match[1] === sku : nodes(row, 'a').some(a => label(a) === title))) {
+      if (inventory || (sku ? match[1] === sku : nodes(row, 'a').some(a => label(a) === title))) {
         records.push({ sku: match[1], itemId: match[2] });
       }
     }
-    if (action === 'list-receipts') return { stage: 'list-receipts', records };
+    if (inventory) {
+      const count = unique([...body.matchAll(/(?:^|\s)([\d,]+)\s*全球商品(?=\s|$)/gu)]);
+      const total = count ? Number(count[1].replace(/,/gu, '')) : null;
+      const loading = modals.length || nodes(document, '[aria-busy=true],.eds-spin--spinning,.eds-react-spin-spinning').length;
+      const unfiltered = [...new URL(location.href).searchParams.keys()].every(key => ['cnsc_shop_id', 'page', 'size'].includes(key)) &&
+        !nodes(document, 'input[placeholder="请输入单字的至少首 2 个字符"]').some(el => trim(el.value));
+      const identified = !loading && unfiltered && body.includes('新增全球商品') &&
+        (total === 0 && records.length === 0 && body.includes('找不到商品') || total > 0 && records.length > 0);
+      const pager = unique(nodes(document, '.eds-react-pagination,.eds-pagination'));
+      const selected = pager && unique(nodes(pager, '[aria-current=page],.eds-react-pagination-item-active,.eds-pagination__item--active'));
+      const page = selected ? Number(label(selected)) : null;
+      const next = pager && unique(nodes(pager, 'button,[role=button]').filter(el =>
+        !el.disabled && !el.closest('[aria-disabled=true],.eds-react-pagination-disabled,.eds-pagination__disabled') &&
+        /^(?:下一页|Next Page|Next)$/iu.test(el.getAttribute('aria-label') || el.title || label(el))));
+      if (action === 'list-next-page' && identified && page === expectedPage && next) {
+        next.click();
+        return { stage: 'list-advanced' };
+      }
+      return { stage: 'list-receipts', records, total: identified ? total : null, page, hasNext: Boolean(next) };
+    }
     const ids = new Set(records.map(record => record.itemId));
     if (ids.size > 1) return { stage: 'ambiguous' };
     if (ids.size === 1) return { stage: global ? 'global-item' : 'shop-item', itemId: [...ids][0] };
@@ -125,40 +169,114 @@ export function sellerSubmitPage({ action, expectedUrl, title, sku }) {
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+async function scanGlobalInventory({ tabId, shopId, signal, tabs, scripting, timeout = 10000 }) {
+  const records = new Map();
+  const deadline = Date.now() + timeout;
+  let total = null;
+  let page = 1;
+  let previous;
+  let stableSince = 0;
+  let complete = false;
+  while (!signal?.aborted && Date.now() < deadline) {
+    const tab = await tabs.get(tabId);
+    const url = target(tab?.url, shopId);
+    if (tab?.status === 'complete' && url?.pathname === GLOBAL_LIST) {
+      const read = async action => {
+        const [reply] = await scripting.executeScript({ target: { tabId, frameIds: [0] }, func: sellerSubmitPage,
+          args: [{ action, expectedUrl: url.href, expectedPage: page }] });
+        return reply?.result;
+      };
+      try {
+        const current = await read('list-receipts');
+        if (current?.stage === 'list-receipts' && (current.page === page ||
+            page === 1 && current.page == null && !current.hasNext)) {
+          const signature = JSON.stringify(current);
+          if (signature !== previous) {
+            previous = signature;
+            stableSince = Date.now();
+          } else if (Date.now() - stableSince >= (current.total === 0 ? 1000 : 250)) {
+            if (total !== null && total !== current.total) break;
+            total = current.total;
+            for (const record of current.records) records.set(record.itemId, record.sku);
+            if (total === records.size && !current.hasNext) {
+              complete = true;
+              break;
+            }
+            if (total !== null && current.hasNext && page < 10) {
+              const advanced = await read('list-next-page');
+              if (advanced?.stage !== 'list-advanced') break;
+              page++;
+              previous = null;
+            } else if (total !== null) {
+              break;
+            }
+          }
+        } else {
+          previous = null;
+        }
+      } catch {
+        previous = null;
+      }
+    } else if (tab?.status === 'complete' && tab.url !== 'about:blank') {
+      break;
+    }
+    await wait(250);
+  }
+  const idsBySku = new Map();
+  for (const [itemId, sku] of records) {
+    if (!idsBySku.has(sku)) idsBySku.set(sku, []);
+    idsBySku.get(sku).push(itemId);
+  }
+  return { complete, idsBySku };
+}
+
+export async function prepareShopeeCreationCheck({ windowId, shopId, skus, signal, tabs = chrome.tabs,
+  scripting = chrome.scripting, storage = chrome.storage.local }) {
+  const keys = [...new Set(skus.map(clean).filter(Boolean).map(sku => ledgerKey(shopId, sku)))];
+  if (!keys.length || signal?.aborted) return null;
+  const prior = await storage.get(keys);
+  if (!keys.some(key => ['created', 'creating'].includes(prior[key]?.stage))) return null;
+  const tab = await tabs.create({ windowId, url: globalListUrl(shopId), active: false });
+  try {
+    const inventory = await scanGlobalInventory({ tabId: tab.id, shopId, signal, tabs, scripting });
+    return { ...inventory, prior, checkedAt: Date.now() };
+  } catch {
+    return null;
+  } finally {
+    await tabs.remove(tab.id);
+  }
+}
+
 export async function reconcileShopeeCreated({ tabId, shopId, skus, signal, tabs = chrome.tabs,
   scripting = chrome.scripting, storage = chrome.storage.local }) {
   const matches = new Map();
-  const pending = new Set(skus.filter(Boolean));
-  if (!pending.size) return matches;
-  const deadline = Date.now() + 9000;
-  while (pending.size && !signal?.aborted && Date.now() < deadline) {
-    const tab = await tabs.get(tabId);
-    const url = target(tab?.url, shopId);
-    if (url?.pathname === GLOBAL_LIST) {
-      let reply;
-      try {
-        [reply] = await scripting.executeScript({ target: { tabId, frameIds: [0] }, func: sellerSubmitPage,
-          args: [{ action: 'list-receipts', expectedUrl: url.href }] });
-      } catch {
-        if (signal?.aborted) return matches;
-      }
-      if (reply?.result?.stage === 'list-receipts') {
-        const records = reply.result.records;
-        for (const sku of pending) {
-          const ids = new Set(records.filter(record => record.sku === sku).map(record => record.itemId));
-          if (ids.size !== 1) continue;
-          const [globalItemId] = ids;
-          const key = ledgerKey(shopId, sku);
-          const prior = (await storage.get(key))[key];
-          if (prior?.stage === 'creating') {
-            await storage.set({ [key]: { stage: 'created', globalItemId, updatedAt: Date.now() } });
-          }
-          matches.set(sku, globalItemId);
-          pending.delete(sku);
-        }
-      }
+  const pending = new Set(skus.map(clean).filter(Boolean));
+  for (const delay of [0, 1500, 3500, 7000]) {
+    if (!pending.size || signal?.aborted) break;
+    if (delay) {
+      await wait(delay);
+      if (signal?.aborted) break;
+      const url = globalListUrl(shopId);
+      if ((await tabs.get(tabId))?.url === url) await tabs.reload(tabId);
+      else await tabs.update(tabId, { url });
     }
-    if (pending.size) await wait(500);
+    const { idsBySku } = await scanGlobalInventory({ tabId, shopId, signal, tabs, scripting, timeout: 8000 });
+    for (const sku of pending) {
+      const ids = idsBySku.get(sku);
+      if (ids?.length !== 1) continue;
+      const [globalItemId] = ids;
+      const key = ledgerKey(shopId, sku);
+      const settle = async () => {
+        const prior = (await storage.get(key))[key];
+        if (prior?.stage === 'creating') {
+          await storage.set({ [key]: { stage: 'created', globalItemId, updatedAt: Date.now() } });
+        }
+      };
+      const locks = globalThis.navigator?.locks;
+      await (locks ? locks.request(key, settle) : settle());
+      matches.set(sku, globalItemId);
+      pending.delete(sku);
+    }
   }
   return matches;
 }
@@ -167,7 +285,7 @@ export function checkShopeeSubmission(args) {
   return submitShopeeListing({ ...args, preflight: true });
 }
 
-export async function submitShopeeListing({ tabId, shopId, input, mode, replayReceipt, signal, call, onStep, preflight = false,
+export async function submitShopeeListing({ tabId, shopId, input, mode, replayReceipt, signal, call, onStep, preflight = false, inventory,
   tabs = chrome.tabs, scripting = chrome.scripting, storage = chrome.storage.local }) {
   if (!['create', 'publish'].includes(mode) || !preflight && replayReceipt?.status !== 'verified') {
     return { status: 'needs-review', details: '商品表单尚未核对。' };
@@ -220,8 +338,8 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
     const persist = (stage, extra = {}) => storage.set({ [key]: {
       stage, ...(globalItemId && { globalItemId }), updatedAt: Date.now(), ...extra,
     } });
-    const lookup = async stage => {
-      let search = 'prepare-search';
+    const lookup = async (stage, { applySearch = true, timeout = 19000 } = {}) => {
+      let search = applySearch ? 'prepare-search' : null;
       const wakeAt = Date.now() + 4500;
       let woke = false;
       return until(async () => {
@@ -239,16 +357,31 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
           if (current.stage === 'searched') search = null;
         }
         return null;
-      }, 19000);
+      }, timeout);
     };
-    const globalListUrl = `${ORIGIN}${GLOBAL_LIST}?cnsc_shop_id=${shopId}&page=1&size=48`;
     try {
       const prior = (await storage.get(key))[key];
       globalItemId = /^\d+$/u.test(prior?.globalItemId) ? prior.globalItemId : undefined;
+      if (preflight && mode === 'create' && sku && inventory?.complete) {
+        const ids = inventory.idsBySku.get(sku);
+        if (ids?.length > 1) return result('submission-unknown', '全球商品列表中有多个同货号商品，请核对。');
+        if (ids?.length === 1 && !['publishing', 'published'].includes(prior?.stage)) {
+          globalItemId = ids[0];
+          await persist('created');
+          return result('skipped', '已在 Shopee 全球商品列表核对到相同货号。');
+        }
+        const checked = inventory.prior[key];
+        if (!ids && checked && prior?.updatedAt === checked.updatedAt && prior?.stage === checked.stage &&
+            prior?.globalItemId === checked.globalItemId &&
+            (prior.stage === 'created' || prior.stage === 'creating' && inventory.checkedAt - prior.updatedAt >= PENDING_CREATE_MIN_AGE)) {
+          await storage.remove(key);
+          return null;
+        }
+      }
       if (preflight && (!prior || mode === 'publish' && globalItemId && prior.stage === 'created')) return null;
       if (prior?.stage === 'creating' || prior?.stage === 'publishing') {
         const recoveringPublish = prior.stage === 'publishing';
-        await tabs.update(tabId, { url: recoveringPublish ? `${ORIGIN}${SHOP_LIST}?cnsc_shop_id=${shopId}` : globalListUrl });
+        await tabs.update(tabId, { url: recoveringPublish ? `${ORIGIN}${SHOP_LIST}?cnsc_shop_id=${shopId}` : globalListUrl(shopId) });
         const found = await lookup(recoveringPublish ? 'shop-item' : 'global-item');
         if (!found?.itemId || (!sku && !recoveringPublish)) {
           return result('submission-unknown', '此前提交尚未核实，请先在 Shopee 后台核对。');
@@ -269,6 +402,9 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
             input.imagePath && (!form.image.coverReady || form.image.readyCount !== form.image.count)) {
           return result('needs-review', '创建前核对未通过，请检查必填项、图片及货号。');
         }
+        if (!salesAndShippingMatch(form, input, replayReceipt.skuRows)) {
+          return result('needs-review', '创建前发现规格、价格、库存或运费字段已变化，请核对。');
+        }
         onStep?.({ step: 'submit-create' });
         await persist('creating');
         clicked = true;
@@ -278,9 +414,14 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
           return result('needs-review', click.error || 'Shopee 创建按钮未确认。');
         }
         if (mode === 'create') {
-          const reachedList = await until(() => reached(GLOBAL_LIST));
-          if (reachedList) await tabs.update(tabId, { url: globalListUrl });
-          const found = reachedList && await lookup('global-item');
+          const outcome = await until(async () => {
+            if (await reached(GLOBAL_LIST)) return { stage: 'list' };
+            const current = await operate('read', route => route === NEW);
+            return current.stage === 'form' && current.error ? current : null;
+          });
+          if (outcome?.stage === 'form') return result('submission-unknown', outcome.error);
+          if (outcome?.stage === 'list' && !(await readTab())) await tabs.update(tabId, { url: globalListUrl(shopId) });
+          const found = outcome?.stage === 'list' && await lookup('global-item', sku ? { applySearch: false, timeout: 3000 } : undefined);
           if (found?.stage !== 'global-item') return result('submission-unknown', '创建按钮已点击，全球商品列表尚未核对到唯一编号。');
           globalItemId = found.itemId;
           await persist('created');

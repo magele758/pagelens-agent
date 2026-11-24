@@ -35,6 +35,21 @@
   border-radius: 6px;
 }
 .ptc-actions { margin-top: 13px; }
+#ptc-batch-form .ptc-actions button:disabled:not([aria-busy="true"]) { opacity: .5; cursor: not-allowed; }
+#ptc-batch-form .ptc-actions button[aria-busy="true"] { display: inline-flex; align-items: center; gap: 6px; cursor: wait; }
+#ptc-batch-form .ptc-actions button[aria-busy="true"]::before {
+  content: "";
+  inline-size: .8em;
+  block-size: .8em;
+  border: 1.5px solid currentColor;
+  border-inline-end-color: transparent;
+  border-radius: 50%;
+  animation: ptc-batch-spinner .7s linear infinite;
+}
+@keyframes ptc-batch-spinner { to { transform: rotate(1turn); } }
+@media (prefers-reduced-motion: reduce) {
+  #ptc-batch-form .ptc-actions button[aria-busy="true"]::before { animation: none; }
+}
 #ptc-flow-dialog .ptc-status { margin: 12px 0 6px; color: var(--muted); overflow-wrap: anywhere; }
 #ptc-flow-dialog .ptc-status[data-state="running"] { color: var(--accent); }
 #ptc-flow-dialog .ptc-status[data-state="verified"] { color: var(--ok); }

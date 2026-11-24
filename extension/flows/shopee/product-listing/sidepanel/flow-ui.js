@@ -1,5 +1,6 @@
 import { listFlows } from "../../../../lib/flow/runtime.js";
 import { $ } from "../../../../sidepanel/dom.js";
+import { shopeeShopId } from "../definition.js";
 import { bindPtcBatch } from "./batch-ui.js";
 import { mountProductListingDialog } from "./dialog.js";
 
@@ -58,6 +59,11 @@ const REASONS = new Map([
 ]);
 const LABELS = { label: "属性", choice: "选项", category: "类目", recommendations: "页面推荐类目", option: "规格选项", key: "字段",
   expected: "预期", actual: "当前", text: "提示", error: "工具错误", message: "提示" };
+const FIELD_LABELS = {
+  title: "商品名称", description: "商品描述", price: "全球商品价格", quantity: "商品数量",
+  weight: "重量", width: "包裹宽度", length: "包裹长度", height: "包裹高度",
+  shipDays: "发货时间", sku: "全球商品货号",
+};
 
 function detailsText(value, depth = 0) {
   if (value == null || value === "" || depth > 2) return "";
@@ -65,19 +71,9 @@ function detailsText(value, depth = 0) {
   if (Array.isArray(value)) return value.slice(0, 5).map((item) => detailsText(item, depth + 1)).filter(Boolean).join("\n");
   if (typeof value !== "object") return "";
   return Object.entries(value).filter(([key]) => Object.hasOwn(LABELS, key)).map(([key, raw]) => {
-    const text = detailsText(raw, depth + 1);
+    const text = key === "key" && Object.hasOwn(FIELD_LABELS, raw) ? FIELD_LABELS[raw] : detailsText(raw, depth + 1);
     return text ? `${LABELS[key]} ${text}` : "";
   }).filter(Boolean).join("\n");
-}
-
-function shopFor(url, flow, { requireListing = true } = {}) {
-  try {
-    const page = new URL(url);
-    const values = page.searchParams.getAll("cnsc_shop_id");
-    return page.origin === flow.origin && (!requireListing || page.pathname === flow.path) &&
-      !page.username && !page.password && values.length === 1 &&
-      /^\d+$/.test(values[0]) ? values[0] : "";
-  } catch { return ""; }
 }
 
 async function activeTab() {
@@ -86,7 +82,8 @@ async function activeTab() {
 }
 
 function errorText(receipt) {
-  return [REASONS.get(receipt.code) || "请检查商家后台的商品资料。", detailsText(receipt.details)].filter(Boolean).join("\n");
+  const location = ["control-changed", "field-missing"].includes(receipt.code) && STEP_LABELS.get(receipt.step);
+  return [REASONS.get(receipt.code) || "请检查商家后台的商品资料。", location, detailsText(receipt.details)].filter(Boolean).join("\n");
 }
 
 export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = activeTab, chooseDirectory, startBatch } = {}) {
@@ -111,7 +108,7 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
   const stepLabel = step => STEP_LABELS.get(step);
   const batch = bindPtcBatch({
     flow, chooseDirectory, startBatch,
-    getTarget: () => ({ tab: selectedTab, shopId: shopFor(selectedTab?.url, flow) }),
+    getTarget: () => ({ tab: selectedTab, shopId: shopeeShopId(selectedTab?.url) }),
     isBlocked: () => remote?.status === "running" || isAgentBusy?.(),
     onChange: displayControls,
     onReview: onReview ? problem => { dialog.close(); onReview(problem); } : null,
@@ -121,6 +118,13 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
   function displayControls() {
     close.disabled = back.disabled = batch.busy;
     review.hidden = !issue || typeof onReview !== "function";
+    const shop = batch.runningShop || shopeeShopId(selectedTab?.url);
+    target.textContent = shop ? `卖家中心 · 当前店铺 ${shop}` : selectedTab?.id && !selectedTab.url
+      ? "开始时由 Chrome 确认此站点的访问权限。"
+      : "请在 Shopee 卖家中心打开要操作的店铺。";
+    listingLink.href = flow.origin;
+    listingLink.textContent = "打开 Shopee 卖家中心";
+    listingLink.hidden = Boolean(shop || (selectedTab?.id && !selectedTab.url));
     batch.updateControls();
   }
 
@@ -128,18 +132,8 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
     const revision = ++tabRevision;
     const tab = await getTargetTab().catch(() => null);
     if (revision !== tabRevision) return;
-    if (selectedTab?.id !== tab?.id || selectedTab?.url !== tab?.url) batch.resetConsent();
+    if (!batch.busy && (selectedTab?.id !== tab?.id || selectedTab?.url !== tab?.url)) batch.resetConsent();
     selectedTab = tab;
-    const shop = shopFor(tab?.url, flow);
-    target.textContent = shop ? `卖家中心 · 当前店铺 ${shop}` : tab?.id && !tab.url
-      ? "开始时由 Chrome 确认此站点的访问权限。"
-      : "请打开 Shopee 卖家中心的「新增商品」页面。";
-    const currentShop = shopFor(tab?.url, flow, { requireListing: false });
-    const destination = new URL(currentShop ? flow.path : "/", flow.origin);
-    if (currentShop) destination.searchParams.set("cnsc_shop_id", currentShop);
-    listingLink.href = destination.href;
-    listingLink.textContent = currentShop ? "打开当前店铺的新增商品页" : "打开 Shopee 卖家中心";
-    listingLink.hidden = Boolean(shop || (tab?.id && !tab.url));
     displayControls();
   }
 
@@ -158,7 +152,7 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
   dialog.addEventListener("cancel", event => { if (batch.busy) event.preventDefault(); });
   review.addEventListener("click", async () => {
     const tab = await getTargetTab().catch(() => null);
-    if (!issue || issue.tabId !== tab?.id || !shopFor(tab.url, flow)) {
+    if (!issue || issue.tabId !== tab?.id || !shopeeShopId(tab.url, { listingOnly: true })) {
       status.textContent = "请返回发生异常的 Shopee 表单。";
       return;
     }
@@ -178,7 +172,7 @@ export function bindPtcFlow({ isAgentBusy, onReview, onBack, getTargetTab = acti
       if (remote?.runId !== message.runId) {
         if (message.status !== "running") return;
         const tab = await getTargetTab();
-        if (!tab || tab.id !== message.tabId || !shopFor(tab.url, flow) || batch.busy) return;
+        if (!tab || tab.id !== message.tabId || !shopeeShopId(tab.url, { listingOnly: true }) || batch.busy) return;
         selectedTab = tab;
         remote = { runId: message.runId, status: message.status };
         issue = null;

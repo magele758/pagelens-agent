@@ -1,5 +1,6 @@
 import { matchesFlowTarget, runFlow } from "../../../../lib/flow/runtime.js";
-import { checkShopeeSubmission, reconcileShopeeCreated, submitShopeeListing } from "../submit-listing.mjs";
+import { shopeeShopId } from "../definition.js";
+import { checkShopeeSubmission, prepareShopeeCreationCheck, reconcileShopeeCreated, submitShopeeListing } from "../submit-listing.mjs";
 import { createPtcToolCaller } from "./tool-adapter.js";
 
 const READY =
@@ -47,18 +48,23 @@ export async function runProductBatch({
   prepareInput, completeChart, createAttributeAdvisor, tabs = chrome.tabs, replay = runFlow, createCall = createPtcToolCaller,
   submit = submitShopeeListing, reconcile = submit === submitShopeeListing ? reconcileShopeeCreated : null,
   checkPrevious = submit === submitShopeeListing ? checkShopeeSubmission : null,
+  prepareCreationCheck = checkPrevious === checkShopeeSubmission ? prepareShopeeCreationCheck : null,
 }) {
   if (mode !== "create" && mode !== "publish") throw new TypeError("请选择创建商品或创建并上架。");
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) {
     throw new RangeError(`并发标签数须在 1 到 ${MAX_CONCURRENCY} 之间。`);
   }
   const source = await tabs.get(sourceTab.id);
+  const sourceShop = shopeeShopId(source?.url);
   if (source?.id !== sourceTab.id || source.windowId !== sourceTab.windowId ||
-      !matchesFlowTarget(flow.id, source.url, shopId)) {
+      !sourceShop || sourceShop !== shopId) {
     throw new Error("源标签或店铺已变化。");
   }
   const url = new URL(flow.path, flow.origin);
   url.searchParams.set("cnsc_shop_id", shopId);
+  const inventory = mode === "create" ? await prepareCreationCheck?.({
+    windowId: source.windowId, shopId, tabs, signal, skus: products.map(({ input }) => input.sku),
+  }) : undefined;
   let next = 0;
   const uncertainCreations = [];
 
@@ -89,7 +95,7 @@ export async function runProductBatch({
       tabId = created.id;
       onJob(index, { tabId });
       const tab = await waitForTab(tabs, tabId, flow.id, shopId, signal);
-      receipt = await checkPrevious?.({ tabId, shopId, input: prepared, mode, signal, tabs });
+      receipt = await checkPrevious?.({ tabId, shopId, input: prepared, mode, signal, tabs, inventory });
       if (!receipt) {
         const confirmUpload = ({ tabId: requestedTab, paths }) => uploadApproved &&
           requestedTab === tabId && paths?.length === 1 && approvedPaths.has(paths[0]);
@@ -164,7 +170,10 @@ export async function runProductBatch({
       const matches = await reconcile({ tabId: verificationTab.id, shopId, tabs, signal, skus: uncertainCreations.map(job => job.sku) });
       for (const { index, sku, receipt } of uncertainCreations) {
         const globalItemId = matches.get(sku);
-        if (globalItemId) onJob(index, { phase: 'created', tabId: null, receipt: { ...receipt, status: 'created', globalItemId } });
+        if (globalItemId) {
+          const { code, details, ...verified } = receipt;
+          onJob(index, { phase: 'created', tabId: null, receipt: { ...verified, status: 'created', globalItemId } });
+        }
       }
     } catch {
       // Keep the original uncertain receipts if the read-only check could not complete.

@@ -3,15 +3,21 @@ import { id, version, replayShopeeListing } from "./listing.flow.mjs";
 const origin = "https://seller.shopee.cn";
 const path = "/portal/mtsku/new";
 
-function matchesTarget(url, shopId) {
+export function shopeeShopId(url, { listingOnly = false } = {}) {
   try {
     const target = new URL(url);
     const shops = target.searchParams.getAll("cnsc_shop_id");
-    return target.origin === origin && target.pathname === path &&
-      shops.length === 1 && /^\d+$/.test(shops[0]) && (shopId == null || shops[0] === shopId);
+    const sellerPage = listingOnly ? target.pathname === path : target.pathname.startsWith("/portal/");
+    return target.origin === origin && !target.username && !target.password && sellerPage &&
+      shops.length === 1 && /^\d+$/.test(shops[0]) ? shops[0] : "";
   } catch {
-    return false;
+    return "";
   }
+}
+
+function matchesTarget(url, shopId) {
+  const currentShop = shopeeShopId(url, { listingOnly: true });
+  return Boolean(currentShop && (shopId == null || currentShop === shopId));
 }
 
 export const shopeeProductListing = {
