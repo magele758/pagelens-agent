@@ -20,7 +20,7 @@ const products = ["alpha", "beta"].map((key) => ({
 }));
 
 function makeRun({ anchor = sourceTab, data = products, redirect = false, uploadApproved = true, prepareInput,
-  concurrency, mode, remove, submit, reconcile } = {}) {
+  concurrency, mode, remove, submit, reconcile, waitForForm, readForm, observeTab } = {}) {
   const records = new Map([[anchor.id, anchor]]);
   const created = [];
   const events = [];
@@ -29,7 +29,7 @@ function makeRun({ anchor = sourceTab, data = products, redirect = false, upload
   const submissions = [];
   let peak = 0;
   const tabs = {
-    get: async (id) => records.get(id),
+    get: async (id) => observeTab ? observeTab(records.get(id)) : records.get(id),
     create: async (args) => {
       const id = 40 + created.length;
       created.push(args);
@@ -52,16 +52,17 @@ function makeRun({ anchor = sourceTab, data = products, redirect = false, upload
     flow, shopId, sourceTab: anchor, products: data, uploadApproved, signal: controller.signal, tabs, prepareInput, concurrency, mode, reconcile,
     onJob: (index, event) => events.push({ index, ...event }),
     createCall: ({ tabId, confirmUpload }) => {
-      const product = data[tabId - 40];
-      const itemPaths = imagePathsFor(product.input);
+      const input = data[tabId - 40]?.input;
+      const itemPaths = imagePathsFor(input);
       for (const image of itemPaths) assert.equal(confirmUpload({ tabId, paths: [image] }), true);
-      if (product.input.sizeChartImagePath) assert.equal(confirmUpload({ tabId, paths: [product.input.sizeChartImagePath] }), false);
+      if (input?.sizeChartImagePath) assert.equal(confirmUpload({ tabId, paths: [input.sizeChartImagePath] }), false);
       assert.equal(confirmUpload({ tabId, paths: ["/batch/secret/cover.jpg"] }), false);
       assert.equal(confirmUpload({ tabId: 12, paths: [itemPaths[0]] }), false);
-      return async (tool, { selector }) => {
+      return async (tool, { selector, timeoutMs }) => {
+        if (tool === "flow_page_state" && readForm) return readForm(await tabs.get(tabId));
         assert.equal(tool, "wait_for");
         assert.ok(selector.includes(".product-basic-info"));
-        return { ok: true };
+        return waitForForm ? waitForForm(tabId, timeoutMs) : { ok: true };
       };
     },
     replay: async (args) => {
@@ -184,6 +185,65 @@ function jobs(count) {
 }
 
 const nextTick = () => new Promise((resolve) => setImmediate(resolve));
+
+const emptyForm = ({ url }) => ({
+  url, fields: { title: { value: "" }, description: { value: "" } }, category: null, image: { count: 0 },
+});
+
+test("reopens a blank form once after the extended control timeout and submits only from the replacement", async () => {
+  const { run, events, active, created, closed, submissions } = makeRun({
+    data: jobs(1), concurrency: 1, readForm: emptyForm,
+    waitForForm: (tabId, timeoutMs) => {
+      assert.equal(timeoutMs, 30000);
+      return tabId === 40 ? { ok: false, error: "等待超时" } : { ok: true };
+    },
+  });
+  await run();
+  assert.equal(created.length, 2);
+  assert.deepEqual(closed, [40, 41]);
+  assert.deepEqual(active.map(({ tabId }) => tabId), [41]);
+  assert.deepEqual(submissions.map(({ tabId }) => tabId), [41]);
+  assert.equal(events.filter(event => event.phase === "reopening").length, 1);
+});
+
+test("waits for the extended browser loading deadline before replacing an untouched pending tab", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { run, created, closed, submissions } = makeRun({
+    data: jobs(1), concurrency: 1,
+    observeTab: tab => tab?.id === 40 ? { ...tab, status: "loading", url: "about:blank", pendingUrl: tab.url } : tab,
+  });
+  const pending = run();
+  await nextTick();
+  t.mock.timers.tick(44999);
+  await nextTick();
+  assert.equal(created.length, 1);
+  t.mock.timers.tick(121);
+  await pending;
+  assert.deepEqual(closed, [40, 41]);
+  assert.deepEqual(submissions.map(({ tabId }) => tabId), [41]);
+});
+
+test("retries an early failure only when the current form is empty and keeps the replacement if it still fails", async () => {
+  const failure = { status: "needs-review", step: "basic", code: "readback-mismatch" };
+  for (const occupiedBy of [null, "title", "weight", "photo", "variant"]) {
+    const { run, events, active, closed, submissions } = makeRun({
+      data: jobs(1), concurrency: 1,
+      readForm: tab => {
+        const state = emptyForm(tab);
+        if (occupiedBy === "title") state.fields.title.value = "已经填过的商品";
+        if (occupiedBy === "weight") state.fields.weight = { value: "0.32" };
+        if (occupiedBy === "photo") state.image.readyCount = 1;
+        if (occupiedBy === "variant") state.variant = { options: ["红银色5件"] };
+        return state;
+      },
+    });
+    await run(() => failure);
+    assert.deepEqual(active.map(({ tabId }) => tabId), occupiedBy ? [40] : [40, 41]);
+    assert.deepEqual(closed, occupiedBy ? [] : [40]);
+    assert.equal(events.at(-1).tabId, occupiedBy ? 40 : 41);
+    assert.equal(submissions.length, 0);
+  }
+});
 
 test("defaults to five open workers and rolls through thirty products without waiting for the first wave", async () => {
   const gates = jobs(30).map(() => Promise.withResolvers());

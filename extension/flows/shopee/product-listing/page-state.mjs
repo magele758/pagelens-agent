@@ -74,8 +74,14 @@ export function readPage(category) {
   const blankOptions = optionFields.filter(el => value(el) === '');
   add('variantOption', !options.length && only(blankOptions.filter(el => el.closest('.drag-item') &&
     !el.closest('.virtual-options-item'))) || only(blankOptions.filter(el => el.closest('.virtual-options-item'))));
+  const salesAndShippingControls = new Set();
   for (const [key, node] of fields) {
-    if (node) out.fields[key] = { selector: selectorOf(node), value: value(node) };
+    if (!node) continue;
+    out.fields[key] = { selector: selectorOf(node), value: value(node) };
+    if (['price', 'quantity', 'weight', 'width', 'length', 'height', 'shipDays', 'sku'].includes(key)) {
+      const row = node.closest('.edit-row');
+      if (row) salesAndShippingControls.add(row);
+    }
   }
 
   const categoryNode = one('.product-category-text', basic);
@@ -106,7 +112,7 @@ export function readPage(category) {
 
   const opened = [];
   const attributeRows = new Set();
-  const validationMarker = '[aria-invalid=true],.eds-form-item__error,.eds-message--error,[role=alert]';
+  const validationMarker = '[aria-invalid=true],.eds-form-item__error,.eds-input__error,.eds-message--error,[role=alert]';
   const validationText = el => clean(el.textContent || el.getAttribute('aria-label') ||
     labelNode(el.closest('.edit-row'))?.textContent);
   function labelStar(label) {
@@ -219,6 +225,10 @@ export function readPage(category) {
         quantity: one('.table-cell.stock-column input', group),
         sku: one('.table-cell .sku-textarea textarea', group),
       };
+      for (const control of Object.values(fields)) {
+        const cell = control?.closest('.table-cell');
+        if (cell) salesAndShippingControls.add(cell);
+      }
       const images = one('.shopee-image-manager', firstCells[index]);
       const uploads = all('.shopee-image-manager__upload input[type=file][accept="image/*"]', images)
         .filter(el => !el.disabled);
@@ -246,8 +256,11 @@ export function readPage(category) {
   out.missingRequired = Number(document.body.innerText?.match(/仍有\s*(\d+)\s*个必填字段为空/u)?.[1] ?? 0);
   const validationNodes = shown(validationMarker);
   const validation = nodes => [...new Set(nodes.map(validationText).filter(Boolean))].slice(0, 12);
+  const unscoped = validationNodes.filter(node => !attributeRows.has(node.closest('.edit-row')));
   out.validation = validation(validationNodes);
-  out.unscopedValidation = validation(validationNodes.filter(node => !attributeRows.has(node.closest('.edit-row'))));
+  out.unscopedValidation = validation(unscoped);
+  out.validationOutsideSalesAndShipping = validation(unscoped.filter(node =>
+    !salesAndShippingControls.has(node.closest('.edit-row,.table-cell'))));
   return out;
 }
 

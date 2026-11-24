@@ -8,6 +8,7 @@ const clean = value => String(value ?? '').trim().replace(/\s+/gu, ' ');
 const ledgerKey = (shopId, sku) => `pl.shopee.submission.v1.${shopId}.${encodeURIComponent(sku)}`;
 const globalListUrl = shopId => `${ORIGIN}${GLOBAL_LIST}?cnsc_shop_id=${shopId}&page=1&size=48`;
 const PENDING_CREATE_MIN_AGE = 5 * 60 * 1000;
+const CREATE_RETRY_SETTLE_MS = 1000;
 const sameNumber = (value, expected) => clean(value) !== '' && Number(value) === Number(expected);
 
 function salesAndShippingMatch(form, input, expectedRows = []) {
@@ -60,18 +61,34 @@ export function sellerSubmitPage({ action, expectedUrl, title, sku, expectedPage
     }))?.querySelector('input:not([type=hidden])');
     const titlePresent = trim(field('商品名称')?.value) === title;
     const skuPresent = !sku || trim(field('全球商品货号')?.value) === sku;
-    const summary = body.match(/仍有\s*\d+\s*个必填字段为空[^。]*。?|\d+\s*个错误需调整|(?:创建|提交)失败[^。]*。?/u)?.[0];
+    const summaryPattern = /[1-9]\d*\s*个错误需调整/u;
+    const reviewSummary = body.match(summaryPattern)?.[0];
+    const fieldSummary = body.match(/仍有\s*\d+\s*个必填字段为空[^。]*。?|(?:创建|提交)失败[^。]*。?/u)?.[0];
+    const requestError = reviewSummary &&
+      body.match(/(?:(?:操作|请求|提交)(?:过于|太)?频繁|网络(?:异常|错误)|请求超时)[^。]*。?/u)?.[0];
+    const directError = fieldSummary || requestError;
     const fieldErrors = [...new Set(nodes(document, '.eds-form-item__error,.eds-input__error,.eds-message--error')
-      .map(label).filter(Boolean))].slice(0, 3);
-    const error = [summary, ...fieldErrors].filter(Boolean).join(' · ').slice(0, 300);
-    const ready = titlePresent && skuPresent && !error && !modals.length;
-    if (ready && ['create', 'publish'].includes(action)) {
-      const button = unique(buttons(document, action === 'create' ? '创建' : '创建并发布'));
-      if (!button) return { stage: 'form', error: 'Shopee 提交按钮尚不可用。' };
+      .map(label).filter(text => text && text.replace(/[。！!]$/u, '') !== reviewSummary))].slice(0, 3);
+    const invalidField = nodes(document, '[aria-invalid=true],.eds-form-item--error,.eds-input--error,.eds-selector--error')
+      .some(el => el.closest('.edit-row,.product-sales-info,.mtsku-product-shipping'));
+    const error = [directError, reviewSummary, ...fieldErrors].filter(Boolean).join(' · ').slice(0, 300);
+    const busy = nodes(document,
+      '[aria-busy=true],.eds-spin--spinning,.eds-react-spin-spinning,.eds-button--loading,.eds-button.is-loading').length > 0 ||
+      /正在(?:创建|提交)|(?:创建|提交)中/u.test(body);
+    const accepted = nodes(document, '.eds-message--success,.eds-toast,[role=alert],[aria-live=polite]').some(el =>
+      /(?:创建|提交)成功|已(?:提交|创建)/u.test(label(el)));
+    const button = unique(buttons(document, action === 'publish' ? '创建并发布' : '创建'));
+    const ready = titlePresent && skuPresent && !busy && !accepted && !modals.length;
+    const reviewOnly = Boolean(reviewSummary && !directError && !fieldErrors.length && !invalidField);
+    const retryable = Boolean(reviewOnly && sku && ready && button);
+    if ((action === 'retry-create' && retryable || ['create', 'publish'].includes(action) &&
+        ready && !error && !invalidField) && button) {
       button.click();
       return { stage: 'clicked' };
     }
-    return { stage: 'form', error: error || (modals.length ? label(modals[0]).slice(0, 160) : undefined) };
+    const unavailable = ['create', 'publish', 'retry-create'].includes(action) && !button && 'Shopee 提交按钮尚不可用。';
+    return { stage: 'form', busy, accepted, reviewOnly, retryable,
+      error: error || (modals.length ? label(modals[0]).slice(0, 160) : unavailable || undefined) };
   }
   if (/^\/portal\/product\/(?:mtsku\/list|list(?:\/all)?)\/?$/u.test(path)) {
     const global = path.includes('/mtsku/');
@@ -298,7 +315,10 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
     const result = (status, details, extra = {}) => ({
       ...replayReceipt, ...extra, status, ...(globalItemId && { globalItemId }), ...(details && { details }),
     });
-    const readTab = async () => target((await tabs.get(tabId))?.url, shopId);
+    const readTab = async (requireComplete = false) => {
+      const tab = await tabs.get(tabId);
+      return !requireComplete || tab?.status === 'complete' && !tab.pendingUrl ? target(tab?.url, shopId) : null;
+    };
     const reached = async pathname => {
       const tab = await tabs.get(tabId);
       if (!tab?.url) return false;
@@ -306,16 +326,20 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
       return url.origin === ORIGIN && url.pathname === pathname &&
         (!url.searchParams.has('cnsc_shop_id') || Boolean(target(url, shopId)));
     };
-    const operate = async (action, route) => {
+    const operate = async (action, route, binding) => {
       signal?.throwIfAborted();
-      const url = await readTab();
-      if (!url || !route(url.pathname)) return { stage: 'page-changed' };
+      const url = await readTab(Boolean(binding));
+      if (!url || !route(url.pathname) || binding && url.href !== binding.url) return { stage: 'page-changed' };
       try {
         const [reply] = await scripting.executeScript({
-          target: { tabId, frameIds: [0] }, world: 'MAIN', func: sellerSubmitPage,
+          target: binding ? { tabId, documentIds: [binding.documentId] } : { tabId, frameIds: [0] },
+          world: 'MAIN', func: sellerSubmitPage,
           args: [{ action, expectedUrl: url.href, sku, title }],
         });
-        return reply?.result ?? { stage: 'loading' };
+        if (binding && reply?.documentId !== binding.documentId) return { stage: 'page-changed' };
+        const state = reply?.result ?? { stage: 'loading' };
+        return action === 'create' && state.stage === 'clicked' && reply?.documentId
+          ? { ...state, binding: { url: url.href, documentId: reply.documentId } } : state;
       } catch (error) {
         if (action === 'read' && /frame.*(?:removed|not found)|document.*(?:unloaded|changed)/iu.test(error?.message ?? '')) {
           return { stage: 'loading' };
@@ -335,9 +359,53 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
     };
     const listingRoute = route => route === GLOBAL_LIST || route === SHOP_LIST || route === '/portal/product/list';
     const publishRoute = route => route.startsWith(PUBLISH);
+    const creationRoute = route => route === NEW;
     const persist = (stage, extra = {}) => storage.set({ [key]: {
       stage, ...(globalItemId && { globalItemId }), updatedAt: Date.now(), ...extra,
     } });
+    const checkCreateForm = async (review) => {
+      const form = await call('flow_page_state', { tabId, category: replayReceipt.category });
+      const validation = form?.validation?.some(message =>
+        !review || clean(message).replace(/[。！!]$/u, '') !== review.error);
+      if (!form?.categoryReady || form.category !== replayReceipt.category || form.modal ||
+          review && form.url !== review.binding.url || form.missingRequired > 0 || validation ||
+          clean(form.fields?.title?.value) !== title || sku && clean(form.fields?.sku?.value) !== sku ||
+          input.description != null && clean(form.fields?.description?.value) !== clean(input.description) ||
+          input.imagePath && (!form.image?.coverReady || form.image.readyCount !== form.image.count ||
+            replayReceipt.coverUploaded && form.image.count !== 1 + (replayReceipt.galleryUploaded ?? 0))) {
+        return '创建前核对未通过，请检查必填项、图片及货号。';
+      }
+      if (!salesAndShippingMatch(form, input, replayReceipt.skuRows)) {
+        return '创建前发现规格、价格、库存或运费字段已变化，请核对。';
+      }
+      return null;
+    };
+    const waitForCreateOutcome = async (binding, allowRetry = true) => {
+      let candidate;
+      let sawAmbiguousState = false;
+      let lastError;
+      const outcome = await until(async () => {
+        if (await reached(GLOBAL_LIST)) return { stage: 'list' };
+        const current = await operate('read', creationRoute, binding);
+        if (current.stage !== 'form' || current.accepted) sawAmbiguousState = true;
+        if (current.accepted) lastError = null;
+        else if (current.error) lastError = { stage: 'form', error: current.error };
+        if (current.stage !== 'form' || current.busy || current.accepted || !current.error) {
+          candidate = null;
+          return null;
+        }
+        if (!binding || !current.reviewOnly || sawAmbiguousState) return lastError;
+        if (!current.retryable) {
+          candidate = null;
+          return null;
+        }
+        // Retry needs an idle validation summary that remains unchanged in the original document.
+        if (candidate?.error !== current.error) candidate = { at: Date.now(), error: current.error };
+        return Date.now() - candidate.at >= CREATE_RETRY_SETTLE_MS
+          ? { ...lastError, ...(allowRetry && { binding }) } : null;
+      }, 30000);
+      return outcome ?? lastError;
+    };
     const lookup = async (stage, { applySearch = true, timeout = 19000 } = {}) => {
       let search = applySearch ? 'prepare-search' : null;
       const wakeAt = Date.now() + 4500;
@@ -395,30 +463,25 @@ export async function submitShopeeListing({ tabId, shopId, input, mode, replayRe
       }
       if (preflight) return null;
       if (!globalItemId) {
-        const form = await call('flow_page_state', { tabId, category: replayReceipt.category });
-        if (!form.categoryReady || form.category !== replayReceipt.category || form.modal ||
-            form.missingRequired > 0 || form.validation?.length || clean(form.fields.title?.value) !== title ||
-            sku && clean(form.fields.sku?.value) !== sku ||
-            input.imagePath && (!form.image.coverReady || form.image.readyCount !== form.image.count)) {
-          return result('needs-review', '创建前核对未通过，请检查必填项、图片及货号。');
-        }
-        if (!salesAndShippingMatch(form, input, replayReceipt.skuRows)) {
-          return result('needs-review', '创建前发现规格、价格、库存或运费字段已变化，请核对。');
-        }
+        const formError = await checkCreateForm();
+        if (formError) return result('needs-review', formError);
         onStep?.({ step: 'submit-create' });
         await persist('creating');
         clicked = true;
-        const click = await operate(mode, route => route === NEW);
+        const click = await operate(mode, creationRoute);
         if (click.stage !== 'clicked') {
           await storage.remove(key);
           return result('needs-review', click.error || 'Shopee 创建按钮未确认。');
         }
         if (mode === 'create') {
-          const outcome = await until(async () => {
-            if (await reached(GLOBAL_LIST)) return { stage: 'list' };
-            const current = await operate('read', route => route === NEW);
-            return current.stage === 'form' && current.error ? current : null;
-          });
+          let outcome = await waitForCreateOutcome(click.binding);
+          if (outcome?.binding) {
+            const retryError = await checkCreateForm(outcome);
+            if (retryError) return result('submission-unknown', [outcome.error, retryError].join(' · '));
+            const retry = await operate('retry-create', creationRoute, outcome.binding);
+            // Always keep the original creating receipt while confirmation is uncertain.
+            if (retry.stage === 'clicked') outcome = await waitForCreateOutcome(outcome.binding, false);
+          }
           if (outcome?.stage === 'form') return result('submission-unknown', outcome.error);
           if (outcome?.stage === 'list' && !(await readTab())) await tabs.update(tabId, { url: globalListUrl(shopId) });
           const found = outcome?.stage === 'list' && await lookup('global-item', sku ? { applySearch: false, timeout: 3000 } : undefined);

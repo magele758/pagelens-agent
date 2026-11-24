@@ -9,6 +9,7 @@ const STATUS = new Map([
   ["pending", "待执行"],
   ["preparing", "正在解析尺码图"],
   ["opening", "正在打开表单"],
+  ["reopening", "正在重新打开表单"],
   ["running", "正在填写"],
   ["submitting", "正在提交"],
   ["verified", "已填写并核对"],

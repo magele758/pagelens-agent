@@ -41,6 +41,43 @@ test('the create control targets its own form and never clicks the publish contr
   assert.deepEqual(clicks, ['创建']);
 });
 
+test('a second create needs an isolated Shopee review summary and an idle action', t => {
+  const { document, run } = dom(t, formPath, `
+    <div class="edit-row"><div class="edit-label">* 商品名称</div><input value="测试商品"></div>
+    <div class="edit-row"><div class="edit-label">全球商品货号</div><input value="TEST-01"></div>
+    <button id="create">创建</button><button>创建并发布</button>
+    <div role="alert">1个错误需调整。</div>
+    <div class="eds-input__error" hidden>此栏位不可空白</div>
+    <div class="eds-message--success" hidden>创建成功</div>
+    <div id="transient"></div>`);
+  const clickTargets = [];
+  for (const button of document.querySelectorAll('button')) button.onclick = () => clickTargets.push(button.textContent);
+  const create = document.querySelector('#create');
+  const inlineError = document.querySelector('.eds-input__error');
+  const success = document.querySelector('.eds-message--success');
+  const transient = document.querySelector('#transient');
+  assert.equal(run('create').stage, 'form');
+  assert.equal(run('read').retryable, true);
+  assert.equal(run('retry-create', { sku: 'OTHER' }).stage, 'form');
+  assert.equal(run('retry-create', { sku: '' }).stage, 'form');
+  create.setAttribute('aria-busy', 'true');
+  assert.equal(run('retry-create').stage, 'form');
+  create.removeAttribute('aria-busy');
+  inlineError.hidden = false;
+  assert.match(run('read').error, /此栏位不可空白/);
+  assert.equal(run('retry-create').stage, 'form');
+  inlineError.hidden = true;
+  success.hidden = false;
+  assert.equal(run('retry-create').stage, 'form');
+  success.hidden = true;
+  transient.textContent = '请求超时';
+  assert.match(run('read').error, /请求超时/u);
+  assert.equal(run('retry-create').stage, 'form');
+  transient.remove();
+  assert.equal(run('retry-create').stage, 'clicked');
+  assert.deepEqual(clickTargets, ['创建']);
+});
+
 test('reads the precise global SKU instead of a similar row', t => {
   const { run } = dom(t, globalPath, `<table>
     <tr><td>全球商品货号: TEST-010 商品ID: 555</td></tr>
@@ -171,6 +208,81 @@ test('includes Shopee validation raised after the create control was clicked', a
   assert.equal(result.status, 'submission-unknown');
   assert.equal(result.details, error);
   assert.deepEqual(steps, ['create', 'read']);
+});
+
+function fakeCreateRetry({ confirm = true, drift = false, replaceDocument = false } = {}) {
+  const { context } = fake();
+  const submissionInput = { ...input, weight: 0.32, description: '描述' };
+  const summary = '1个错误需调整';
+  let pathname = formPath;
+  let reads = 0;
+  let confirmations = 0;
+  const actions = [];
+  const formDocument = 'original-document';
+  const calls = {
+    tabs: { ...context.tabs, get: async () => ({ url: url(pathname), status: 'complete' }) },
+    async call() {
+      const form = await context.call();
+      const weight = reads++ && drift ? '' : '0.32';
+      return { ...form, url: url(formPath), validation: reads > 1 ? [summary] : [],
+        fields: { ...form.fields, weight: { value: weight }, description: { value: submissionInput.description } } };
+    },
+    scripting: { async executeScript({ target, args: [{ action }] }) {
+      actions.push(action);
+      if (action === 'create') {
+        assert.deepEqual(target, { tabId: 12, frameIds: [0] });
+        return [{ documentId: formDocument, result: { stage: 'clicked' } }];
+      }
+      if (action === 'retry-create') {
+        assert.deepEqual(target, { tabId: 12, documentIds: [formDocument] });
+        if (confirm) pathname = globalPath;
+        return [{ documentId: formDocument, result: { stage: 'clicked' } }];
+      }
+      assert.equal(action, 'read');
+      if (pathname === globalPath) return [{ result: { stage: 'global-item', itemId: '456' } }];
+      assert.deepEqual(target, { tabId: 12, documentIds: [formDocument] });
+      return [{ documentId: replaceDocument && confirmations++ === 0 ? 'replacement' : formDocument,
+        result: { stage: 'form', error: summary, reviewOnly: true, retryable: true } }];
+    } },
+  };
+  return { actions, get reads() { return reads; },
+    run: () => submitShopeeListing({ ...context, ...calls, input: submissionInput, replayReceipt }) };
+}
+
+test('retries a settled Shopee form rejection once and verifies the product ID', async () => {
+  const scenario = fakeCreateRetry();
+  const receipt = await scenario.run();
+  assert.equal(receipt.globalItemId, '456');
+  assert.equal(receipt.status, 'created');
+  assert.equal(scenario.reads, 2);
+  assert.equal(scenario.actions.filter(action => action === 'create').length, 1);
+  assert.equal(scenario.actions.filter(action => action === 'retry-create').length, 1);
+});
+
+test('leaves a second still-rejected create pending without a third click', async () => {
+  const scenario = fakeCreateRetry({ confirm: false });
+  const receipt = await scenario.run();
+  assert.equal(receipt.status, 'submission-unknown');
+  assert.equal(receipt.details, '1个错误需调整');
+  assert.equal(scenario.actions.filter(action => action === 'retry-create').length, 1);
+  assert.equal(scenario.reads, 2);
+});
+
+test('suppresses create retries when the shipping form drifted before verification', async () => {
+  const scenario = fakeCreateRetry({ drift: true });
+  const receipt = await scenario.run();
+  assert.equal(receipt.status, 'submission-unknown');
+  assert.match(receipt.details, /运费字段已变化/u);
+  assert.equal(scenario.actions.filter(action => action === 'retry-create').length, 0);
+  assert.equal(scenario.reads, 2);
+});
+
+test('suppresses create retries when the verification document changed', async () => {
+  const scenario = fakeCreateRetry({ replaceDocument: true });
+  const receipt = await scenario.run();
+  assert.equal(receipt.status, 'submission-unknown');
+  assert.equal(scenario.actions.filter(action => action === 'retry-create').length, 0);
+  assert.equal(scenario.reads, 1);
 });
 
 const keyFor = sku => `pl.shopee.submission.v1.${shopId}.${sku}`;

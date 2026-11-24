@@ -4,8 +4,11 @@ import { checkShopeeSubmission, prepareShopeeCreationCheck, reconcileShopeeCreat
 import { createPtcToolCaller } from "./tool-adapter.js";
 
 const READY =
-  '.product-basic-info .edit-row :is(textarea,[contenteditable="true"]):not([disabled],[readonly])';
-const TAB_READY_TIMEOUT = 18000;
+  '.product-basic-info:has(.edit-row input:is([type="text"],:not([type])):not([disabled],[readonly])) ' +
+  '.edit-row :is(textarea,[contenteditable="true"]):not([disabled],[readonly])';
+const TAB_READY_TIMEOUT = 45000;
+const FORM_READY_TIMEOUT = 30000;
+const EARLY_FORM_ERRORS = new Set(["control-changed", "control-missing", "field-missing", "field-kind-changed", "readback-mismatch"]);
 export const DEFAULT_CONCURRENCY = 5;
 export const MAX_CONCURRENCY = 10;
 
@@ -25,13 +28,37 @@ async function waitForTab(tabs, tabId, flowId, shopId, signal) {
   while (Date.now() < deadline) {
     signal.throwIfAborted();
     const tab = await tabs.get(tabId);
-    if (tab.status === "complete" && tab.url && tab.url !== "about:blank") {
+    if (tab?.status === "complete" && tab.url && tab.url !== "about:blank") {
       if (matchesFlowTarget(flowId, tab.url, shopId)) return tab;
       throw new Error("标签没有停在当前店铺的新增商品页，请检查 Shopee 登录。");
     }
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
-  throw new Error("Shopee 新增商品页加载超时。");
+  return null;
+}
+
+function canTryNewForm(receipt) {
+  return receipt.code === "batch-page-timeout" || receipt.code === "batch-form-timeout" ||
+    ["bind-page", "basic"].includes(receipt.step) && EARLY_FORM_ERRORS.has(receipt.code);
+}
+
+async function isUntouchedForm({ tabs, tabId, expectedUrl, windowId, call, beforeFilling, signal }) {
+  const withinTarget = tab => tab?.windowId === windowId &&
+    (!tab.pendingUrl || tab.pendingUrl === expectedUrl) &&
+    (tab.url === expectedUrl || tab.pendingUrl === expectedUrl && (!tab.url || tab.url === "about:blank"));
+  const tab = await tabs.get(tabId).catch(() => null);
+  if (!withinTarget(tab)) return false;
+  if (beforeFilling && tab.status === "loading" && tab.url !== expectedUrl) return true;
+  const state = await call("flow_page_state", { tabId }).catch(() => null);
+  signal.throwIfAborted();
+  if (state?.url !== expectedUrl || !state.fields || state.modal || state.category || state.image?.cover ||
+      state.image?.readyCount > 0 || state.variant?.options?.length || state.variant?.rows?.length ||
+      Number(state.fields.quantity?.value) > 0 ||
+      ["title", "description", "sku", "price", "weight", "width", "length", "height"]
+        .some(key => String(state.fields[key]?.value ?? "").trim())) return false;
+  const emptyImages = state.image?.count === 0;
+  const stillLoading = beforeFilling && !state.fields.title && !state.fields.description && state.image?.count == null;
+  return (emptyImages || stillLoading) && withinTarget(await tabs.get(tabId).catch(() => null));
 }
 
 async function closeWorkerTab(tabs, tabId) {
@@ -93,44 +120,68 @@ export async function runProductBatch({
       const prepared = needsChart ? await prepareInput(product, signal) : input;
       signal.throwIfAborted();
       if (needsChart && prepared?.sizeChart == null) throw new Error("尺码图解析未返回数据。");
-      onJob(index, { phase: "opening" });
-      const created = await tabs.create({ windowId: source.windowId, url: url.href, active: false });
-      if (!Number.isInteger(created?.id)) throw new Error("Chrome 没有返回已创建标签的编号。");
-      tabId = created.id;
-      onJob(index, { tabId });
-      const tab = await waitForTab(tabs, tabId, flow.id, shopId, signal);
-      receipt = await checkPrevious?.({ tabId, shopId, input: prepared, mode, signal, tabs, inventory });
-      if (!receipt) {
-        const confirmUpload = ({ tabId: requestedTab, paths }) => uploadApproved &&
-          requestedTab === tabId && paths?.length === 1 && approvedPaths.has(paths[0]);
-        const call = createCall({
-          tabId, url: tab.url, signal, confirmUpload, allowFreshVariantReset: true,
+      const productInput = {
+        ...prepared, shopId, completeMissingSizeChart: Boolean(prepared.sizeChart && uploadApproved),
+        completeMissingAttributes: Boolean(createAttributeAdvisor),
+        resetUnownedDraftVariants: true,
+      };
+      let call;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        onJob(index, { phase: attempt ? "reopening" : "opening", step: "", tool: "", tabId: null });
+        const created = await tabs.create({ windowId: source.windowId, url: url.href, active: false });
+        if (!Number.isInteger(created?.id)) throw new Error("Chrome 没有返回已创建标签的编号。");
+        tabId = created.id;
+        onJob(index, { tabId });
+        const tab = await waitForTab(tabs, tabId, flow.id, shopId, signal);
+        receipt = tab ? await checkPrevious?.({ tabId, shopId, input: prepared, mode, signal, tabs, inventory })
+          : { status: "needs-review", step: "bind-page", code: "batch-page-timeout" };
+        const workerTabId = tabId;
+        const buildCall = () => createCall({
+          tabId: workerTabId, url: tab?.url ?? url.href, signal, allowFreshVariantReset: true,
+          confirmUpload: ({ tabId: requestedTab, paths }) => uploadApproved &&
+            requestedTab === workerTabId && paths?.length === 1 && approvedPaths.has(paths[0]),
           adviseAttributes: createAttributeAdvisor?.(product, signal),
           completeChart: prepared.sizeChart && uploadApproved && completeChart
             ? requirements => completeChart(product, requirements)
             : undefined,
         });
-        const ready = await call("wait_for", { tabId, selector: READY, timeoutMs: 12000 });
-        signal.throwIfAborted();
-        if (ready?.ok !== true) throw new Error(ready?.error || "没有读到 Shopee 新增商品表单。");
-        const productInput = {
-          ...prepared, shopId, completeMissingSizeChart: Boolean(prepared.sizeChart && uploadApproved),
-          completeMissingAttributes: Boolean(createAttributeAdvisor),
-          resetUnownedDraftVariants: true,
-        };
-        receipt = await replay({
-          flowId: flow.id, tabId, input: productInput, signal, call,
-          onStep: ({ step, tool }) => onJob(index, { phase: "running", step, tool }),
-        });
-        if (receipt?.status === "verified") {
+        let beforeFilling = true;
+        if (!receipt) {
+          call = buildCall();
+          const ready = await call("wait_for", { tabId, selector: READY, timeoutMs: FORM_READY_TIMEOUT });
           signal.throwIfAborted();
-          onJob(index, { phase: "submitting" });
-          submissionStarted = true;
-          receipt = await submit({
-            tabId, shopId, input: productInput, mode, replayReceipt: receipt, signal, call,
-            onStep: ({ step, tool }) => onJob(index, { phase: "submitting", step, tool }),
-          });
+          if (ready?.ok === true) {
+            beforeFilling = false;
+            receipt = await replay({
+              flowId: flow.id, tabId, input: productInput, signal, call,
+              onStep: ({ step, tool }) => onJob(index, { phase: "running", step, tool }),
+            });
+          } else {
+            const timedOut = ready?.error === "等待超时";
+            receipt = { status: "needs-review", step: "bind-page",
+              code: timedOut ? "batch-form-timeout" : ready?.code || "batch-product-error",
+              details: timedOut ? undefined : ready?.error || "没有读到 Shopee 新增商品表单。" };
+          }
         }
+        if (attempt || !receipt || !canTryNewForm(receipt)) break;
+        if (!await isUntouchedForm({ tabs, tabId, expectedUrl: url.href, windowId: source.windowId,
+          call: tab ? call : buildCall(), beforeFilling, signal })) break;
+        signal.throwIfAborted();
+        if (!await closeWorkerTab(tabs, tabId)) {
+          receipt = { ...receipt, tabCleanupFailed: true };
+          break;
+        }
+        tabId = null;
+        signal.throwIfAborted();
+      }
+      if (receipt?.status === "verified") {
+        signal.throwIfAborted();
+        onJob(index, { phase: "submitting" });
+        submissionStarted = true;
+        receipt = await submit({
+          tabId, shopId, input: productInput, mode, replayReceipt: receipt, signal, call,
+          onStep: ({ step, tool }) => onJob(index, { phase: "submitting", step, tool }),
+        });
       }
       if (!receipt?.status || receipt.status === "verified") throw new Error("工作流未返回可核对的商品结果。");
     } catch (error) {

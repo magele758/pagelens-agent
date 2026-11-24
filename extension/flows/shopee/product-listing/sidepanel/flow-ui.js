@@ -54,6 +54,8 @@ const REASONS = new Map([
   ["upload-denied", "此主图尚未获同意上传。"],
   ["flow-busy", "此标签已有流程正在运行。"],
   ["batch-product-error", "无法完成该商品。"],
+  ["batch-page-timeout", "Shopee 新增商品页加载超时。"],
+  ["batch-form-timeout", "Shopee 新增商品表单加载超时。"],
   ["batch-tabs-not-closed", "有工作标签未关闭。"],
   ["batch-submit-unknown", "提交结果待核实。"],
 ]);
