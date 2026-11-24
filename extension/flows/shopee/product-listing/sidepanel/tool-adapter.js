@@ -22,7 +22,7 @@ function fail(code, error) {
 }
 
 export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChart = completeSizeChartInput,
-  adviseAttributes, url: expectedUrl } = {}) {
+  adviseAttributes, allowFreshVariantReset = false, url: expectedUrl } = {}) {
   let url = expectedUrl;
   let documentId;
   const cdp = getCdp();
@@ -135,6 +135,9 @@ export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChar
         return { ok: true };
       }
       case "flow_control_click":
+        if (args.action === "variant-reset" && !allowFreshVariantReset) {
+          return fail("tool-not-allowed", "仅允许清除当前批次新打开表单的预带规格。");
+        }
         signal?.throwIfAborted();
         return exec(clickListingControl, [args, url], "MAIN");
       case "flow_variant_write":

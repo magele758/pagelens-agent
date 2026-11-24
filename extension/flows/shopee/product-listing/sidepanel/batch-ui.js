@@ -9,7 +9,13 @@ const STATUS = new Map([
   ["preparing", "正在解析尺码图"],
   ["opening", "正在打开表单"],
   ["running", "正在填写"],
+  ["submitting", "正在提交"],
   ["verified", "已填写并核对"],
+  ["created", "已创建"],
+  ["published", "已提交上架"],
+  ["skipped", "已跳过"],
+  ["deferred", "待处理"],
+  ["submission-unknown", "提交结果待核实"],
   ["needs-review", "待处理"],
   ["cancelled", "已停止"],
 ]);
@@ -30,7 +36,9 @@ export function bindPtcBatch({
   const scan = $("ptc-load-directory");
   const manualDirectory = $("ptc-manual-directory");
   const manualLoad = $("ptc-load-manual-directory");
-  const start = $("ptc-batch-start");
+  const create = $("ptc-batch-start");
+  const publish = $("ptc-batch-publish");
+  const concurrencyInput = $("ptc-batch-concurrency");
   const stop = $("ptc-batch-stop");
   const consent = $("ptc-batch-upload-consent");
   const consentRow = $("ptc-batch-consent-row");
@@ -72,9 +80,10 @@ export function bindPtcBatch({
     scan.disabled = busy || isBlocked();
     manualLoad.disabled = scan.disabled || !manualDirectory.value.trim();
     manualDirectory.disabled = busy;
-    start.disabled = busy || isBlocked() || !selectedRoot || !products.length || !tab?.id ||
+    create.disabled = publish.disabled = busy || isBlocked() || !selectedRoot || !products.length || !tab?.id ||
       Boolean(tab.url && !shopId) ||
-      actions.length > 0 && !consent.checked;
+      actions.length > 0 && !consent.checked || !concurrencyInput.validity.valid;
+    concurrencyInput.disabled = busy;
     consent.disabled = busy;
     consentRow.hidden = !selectedRoot || !actions.length;
     consentText.textContent = actions.length ? `同意${actions.join("，并")}` : "";
@@ -101,7 +110,15 @@ export function bindPtcBatch({
     job.node.dataset.state = job.phase;
     const label = STATUS.get(job.phase) || "";
     job.progress.textContent = [label, !job.receipt && stepLabel(job.step)].filter(Boolean).join(" · ");
-    job.details.textContent = job.receipt?.status === "needs-review" ? errorText(job.receipt) : "";
+    const status = job.receipt?.status;
+    const hasIssue = status === "needs-review" || status === "deferred" || status === "submission-unknown";
+    const id = job.receipt?.globalItemId;
+    job.details.textContent = [
+      id && `全球商品 ID ${id}`,
+      hasIssue && errorText(job.receipt),
+      status === "skipped" && job.receipt.code && errorText(job.receipt),
+      job.receipt?.tabCleanupFailed && "此商品的标签未能自动关闭。",
+    ].filter(Boolean).join("\n");
     job.details.hidden = !job.details.textContent;
     job.inspect.hidden = !showLinks || !job.tabId;
     job.review.hidden = !showLinks || !job.tabId || !onReview || job.phase !== "needs-review";
@@ -126,8 +143,12 @@ export function bindPtcBatch({
     async function showTab(askAgent) {
       try {
         const tab = await chrome.tabs.get(job.tabId);
-        if (!matchesFlowTarget(flow.id, tab?.url, lastShop)) {
-          setStatus("needs-review", "该标签已离开本次任务的 Shopee 表单。");
+        const onForm = matchesFlowTarget(flow.id, tab?.url, lastShop);
+        const url = new URL(tab?.url);
+        const sameShop = url.origin === flow.origin && url.searchParams.getAll("cnsc_shop_id").length === 1 &&
+          url.searchParams.get("cnsc_shop_id") === lastShop;
+        if ((askAgent && !onForm) || !sameShop) {
+          setStatus("needs-review", "该标签已离开本次任务的 Shopee 店铺。");
           return;
         }
         await chrome.tabs.update(job.tabId, { active: true });
@@ -193,6 +214,7 @@ export function bindPtcBatch({
   });
 
   consent.addEventListener("change", updateControls);
+  concurrencyInput.addEventListener("input", updateControls);
   stop.addEventListener("click", () => {
     if (!run) return;
     run.abort();
@@ -202,7 +224,10 @@ export function bindPtcBatch({
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (start.disabled) return;
+    if (![create, publish].includes(event.submitter) || event.submitter.disabled) return;
+    const mode = event.submitter === publish ? "publish" : "create";
+    const concurrency = concurrencyInput.valueAsNumber;
+    if (!concurrencyInput.validity.valid || !Number.isInteger(concurrency)) return;
     const { tab: sourceTab, shopId: originalShop } = getTarget();
     const uploadApproved = consent.checked;
     const modelApproved = ai.checked;
@@ -215,7 +240,9 @@ export function bindPtcBatch({
       Object.assign(job, { phase: "pending", tabId: null, receipt: null, step: "", tool: "" });
       paintJob(job);
     }
-    setStatus("running", `正在填写 ${products.length} 个商品…`);
+    const runLabel = mode === "publish" ? "创建并上架" : "创建商品";
+    let settled = 0;
+    setStatus("running", `${runLabel} · 0/${products.length} 已处理 · ${concurrency} 并发`);
     onChange();
     try {
       const access = await ensureOptionalAccess({ url: flow.origin, tabId: sourceTab.id, userGesture: true, force: true });
@@ -228,23 +255,31 @@ export function bindPtcBatch({
       const shopId = new URL(current.url).searchParams.get("cnsc_shop_id");
       lastShop = shopId;
       await startBatch({
-        flow, shopId, sourceTab, products, uploadApproved, signal: controller.signal,
+        flow, shopId, sourceTab, products, uploadApproved, mode, concurrency, signal: controller.signal,
         prepareInput: (product, signal) => prepareSizeChartInput(product, { root, signal }),
         completeChart: (product, requirements) => completeDirectorySizeChartInput(product, { ...requirements, root }),
         createAttributeAdvisor: modelApproved ? (product, signal) => directoryAttributeAdvice(product, { root, signal }) : undefined,
         onJob(index, event) {
           const job = jobs[index];
           Object.assign(job, event);
-          if (event.receipt) job.tool = "";
+          if (event.receipt) {
+            job.tool = "";
+            settled++;
+            if (!controller.signal.aborted) {
+              setStatus("running", `${runLabel} · ${settled}/${jobs.length} 已处理 · ${concurrency} 并发`);
+            }
+          }
           paintJob(job);
         },
       });
-      const done = jobs.filter((job) => job.phase === "verified").length;
-      const blocked = jobs.filter((job) => job.phase === "needs-review").length;
+      const successfulPhase = mode === "publish" ? "published" : "created";
+      const done = jobs.filter((job) => job.phase === successfulPhase).length;
+      const blocked = jobs.filter((job) => ["needs-review", "deferred", "submission-unknown"].includes(job.phase)).length;
       const stopped = jobs.filter((job) => job.phase === "cancelled").length;
+      const skipped = jobs.filter((job) => job.phase === "skipped").length;
       const summary = [
-        `已填写并核对 ${done}/${jobs.length}`, blocked ? `待处理 ${blocked}` : "",
-        stopped ? `已停止 ${stopped}` : "",
+        `${STATUS.get(successfulPhase)} ${done}/${jobs.length}`, blocked ? `待处理 ${blocked}` : "",
+        stopped ? `已停止 ${stopped}` : "", skipped ? `已跳过 ${skipped}` : "",
       ].filter(Boolean).join(" · ");
       setStatus(blocked ? "needs-review" : stopped ? "cancelled" : "verified", summary);
     } catch (error) {

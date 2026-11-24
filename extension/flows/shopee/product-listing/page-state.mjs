@@ -201,6 +201,7 @@ export function readPage(category) {
     return clean(node?.textContent) === label ? selectorOf(node) : null;
   }
   out.variant.enable = button('.variation-add-button button.primary-dash-button', '开启商品规格');
+  out.variant.reset = selectorOf(only(shown('.variation-edit-item .variation-delete-btn', sales)));
   out.variant.options = options;
   const leftBody = one('.variation-model-table-fixed-left .variation-model-table-body', sales);
   const middleBody = one('.variation-model-table-middle-scroll .variation-model-table-body', sales);
@@ -482,6 +483,15 @@ export function clickListingControl({ action, selector, category, label, text, v
       if (label !== '开启商品规格' || text !== label || clean(target.textContent) !== label ||
           !target.matches('.product-sales-info .variation-add-button button.primary-dash-button[type=button]')) return denied();
       break;
+    case 'variant-reset': {
+      const sales = only(shown('.product-sales-info'));
+      const rows = shown('.product-basic-info .edit-row').filter(row =>
+        clean(row.querySelector(':scope > .edit-label')?.textContent).replace(/^[*＊]\s*/u, '') === '商品名称');
+      const title = clean(only(rows)?.querySelector('input[type=text],input:not([type])')?.value);
+      if (label !== '清除新表单预带规格' || !title || title !== clean(value) || !sales ||
+          only([...sales.querySelectorAll('.variation-edit-item .variation-delete-btn')].filter(visible)) !== target) return denied();
+      break;
+    }
     default:
       return denied();
   }

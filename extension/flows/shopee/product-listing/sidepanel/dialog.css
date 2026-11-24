@@ -25,6 +25,15 @@
 #ptc-flow-dialog .ptc-target { margin: 8px 0 14px; color: var(--muted); }
 .ptc-consent { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
 .ptc-consent input { accent-color: var(--accent); }
+.ptc-concurrency { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.ptc-concurrency input {
+  inline-size: 4.5rem;
+  min-block-size: 32px;
+  padding: 4px 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
 .ptc-actions { margin-top: 13px; }
 #ptc-flow-dialog .ptc-status { margin: 12px 0 6px; color: var(--muted); overflow-wrap: anywhere; }
 #ptc-flow-dialog .ptc-status[data-state="running"] { color: var(--accent); }
@@ -47,5 +56,5 @@
 .ptc-batch-job .ptc-batch-details { color: var(--ink); white-space: pre-wrap; }
 .ptc-batch-job .ptc-actions { margin-top: 5px; }
 .ptc-batch-job[data-state=running] .ptc-batch-progress { color: var(--accent); }
-.ptc-batch-job[data-state=verified] .ptc-batch-progress { color: var(--ok); }
-.ptc-batch-job[data-state=needs-review] .ptc-batch-progress { color: var(--danger); }
+.ptc-batch-job:is([data-state=created], [data-state=published]) .ptc-batch-progress { color: var(--ok); }
+.ptc-batch-job:is([data-state=needs-review], [data-state=submission-unknown]) .ptc-batch-progress { color: var(--danger); }

@@ -44,8 +44,10 @@ test("product view requires consent for an explicit size chart even without uplo
     await nextTurn();
     assert.equal(byId("ptc-input"), null);
     assert.equal(byId("ptc-directory-path"), null);
-    assert.equal(byId("ptc-batch-start").textContent, "开始上品");
+    assert.equal(byId("ptc-batch-start").textContent, "创建商品");
+    assert.equal(byId("ptc-batch-publish").textContent, "创建并上架");
     assert.equal(byId("ptc-batch-start").disabled, true);
+    assert.equal(byId("ptc-batch-publish").disabled, true);
     byId("ptc-load-directory").click();
     await nextTurn();
     assert.equal(byId("ptc-batch-consent-row").hidden, false);
@@ -61,12 +63,82 @@ test("product view requires consent for an explicit size chart even without uplo
     consent.checked = true;
     consent.dispatchEvent(new window.Event("change"));
     assert.equal(byId("ptc-batch-start").disabled, false);
+    assert.equal(byId("ptc-batch-publish").disabled, false);
     byId("ptc-batch-ai-consent").checked = true;
     tab = { ...tab, url: shopUrl.replace("1901697826", "1234") };
     activatedListeners[0]();
     await nextTurn();
     assert.equal(consent.checked, false);
     assert.equal(byId("ptc-batch-ai-consent").checked, false);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.chrome = originalChrome;
+    window.close();
+  }
+});
+
+test("starts the selected write mode with a bounded concurrency and shows verified receipt IDs", async () => {
+  const { window } = new JSDOM("<!doctype html><body></body>");
+  const { document } = window;
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const tab = { id: 12, windowId: 1, url: shopUrl };
+  const starts = [];
+  globalThis.document = document;
+  globalThis.chrome = {
+    permissions: { contains: async () => true },
+    tabs: {
+      query: async () => [tab],
+      onActivated: { addListener() {} },
+      onUpdated: { addListener() {} },
+    },
+    runtime: { getURL: path => "chrome-extension://test/" + path, onMessage: { addListener() {} } },
+  };
+  try {
+    const open = bindPtcFlow({
+      getTargetTab: async () => tab,
+      chooseDirectory: async () => ({
+        root: "/Products", directoryName: "Products",
+        products: [{ title: "Shirt", folder: "shirt", input: {} }], issues: [],
+      }),
+      startBatch: async ({ mode, concurrency, onJob }) => {
+        starts.push({ mode, concurrency });
+        const status = mode === "create" ? "created" : "published";
+        onJob(0, { phase: status, tabId: null, receipt: { status, globalItemId: "654321" } });
+      },
+    });
+    const byId = id => document.getElementById(id);
+    const dialog = byId("ptc-flow-dialog");
+    dialog.showModal ??= () => { dialog.open = true; };
+    open();
+    await nextTurn();
+    const concurrency = byId("ptc-batch-concurrency");
+    const create = byId("ptc-batch-start");
+    const publish = byId("ptc-batch-publish");
+    assert.equal(concurrency.valueAsNumber, 5);
+    byId("ptc-load-directory").click();
+    await nextTurn();
+    concurrency.value = "11";
+    concurrency.dispatchEvent(new window.Event("input"));
+    assert.equal(create.disabled, true);
+    assert.equal(publish.disabled, true);
+    publish.click();
+    assert.deepEqual(starts, []);
+    concurrency.value = "5";
+    concurrency.dispatchEvent(new window.Event("input"));
+    create.click();
+    await nextTurn();
+    assert.deepEqual(starts, [{ mode: "create", concurrency: 5 }]);
+    assert.match(byId("ptc-batch-status").textContent, /已创建 1\/1/u);
+    assert.match(byId("ptc-batch-jobs").textContent, /全球商品 ID 654321/u);
+    assert.equal(byId("ptc-batch-jobs").querySelector("button").hidden, true);
+
+    concurrency.value = "10";
+    concurrency.dispatchEvent(new window.Event("input"));
+    publish.click();
+    await nextTurn();
+    assert.deepEqual(starts, [{ mode: "create", concurrency: 5 }, { mode: "publish", concurrency: 10 }]);
+    assert.match(byId("ptc-batch-status").textContent, /已提交上架 1\/1/u);
   } finally {
     globalThis.document = originalDocument;
     globalThis.chrome = originalChrome;
