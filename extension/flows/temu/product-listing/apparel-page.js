@@ -1,5 +1,5 @@
 /** The apparel editor renders SKC colors separately from its size selector. */
-export async function temuApparelPage({ href, kind, key, value, alternate, allowOpened = false }) {
+export async function temuApparelPage({ href, kind, key, value, alternate, allowOpened = false, recoverOpened = false }) {
   const onPage = () => window === window.top && location.origin === "https://agentseller.temu.com" &&
     location.pathname === "/goods/edit" && location.href === href;
   const visible = node => Boolean(node?.isConnected && node.getClientRects().length &&
@@ -74,6 +74,22 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
     if (!wrapper || !input || input.disabled || input.closest('[aria-disabled="true"],[data-disabled="true"]')) return null;
     return { holder, input, wrapper, trigger: input.closest(triggerSelector) };
   };
+  const colorMenuIds = anchor => [anchor.input, anchor.trigger, anchor.wrapper].flatMap(node =>
+    clean(node?.getAttribute("aria-controls") || node?.getAttribute("aria-owns")).split(/\s+/u)).filter(Boolean);
+  const ownsColorMenu = (anchor, menu, ids = colorMenuIds(anchor)) =>
+    anchor.holder.contains(menu) || ids.some(id => menu.id === id || document.getElementById(id)?.contains(menu));
+  const openedColorMenu = (anchor, trustedMenu) => {
+    if (!anchor?.wrapper.matches(colorComponent)) return null;
+    const active = document.activeElement;
+    const candidates = nativeMenus();
+    const owning = candidates.filter(menu => ownsColorMenu(anchor, menu));
+    if (owning.length === 1) return owning[0];
+    if (owning.length > 1) return null;
+    const [only] = candidates;
+    if (candidates.length === 1 && (anchor.wrapper.contains(active) ||
+        only === trustedMenu && only.contains(active))) return only;
+    return null;
+  };
 
   if (kind === "dismiss-size-tip") return dismissSizeTip();
   if (!onPage() || blocked()) return fail("PAGE_CHANGED", "Temu 服装规格页已切换或有弹窗。");
@@ -109,20 +125,33 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
   return fail("SPEC_VALUES_NOT_RENDERED", "添加后没有出现新的服装颜色行。");
 
   async function colorTarget() {
-    const anchor = findAnchor();
+    let anchor = findAnchor();
     const resting = current => current?.wrapper.matches(colorComponent) && !selectedColor(current.holder) &&
       current.input.placeholder === emptyColor && !clean(current.input.value);
     const menuOpen = () => standardMenus().length || nativeMenus().length;
-    if (menuOpen()) return fail("MENU_STILL_OPEN", "存在下拉选项打开，请关闭后再选择颜色。");
+    const menuFailure = () => fail("MENU_STILL_OPEN", "存在下拉选项打开，请关闭后再选择颜色。");
+    if (menuOpen() && !recoverOpened) return menuFailure();
     if (!resting(anchor)) return fail("SPEC_CONTROL_MISSING", "当前颜色行没有可安全点按的空白输入框。");
+    if (menuOpen()) {
+      if (openedColorMenu(anchor)) return { ok: true, opened: true };
+      const native = nativeMenus();
+      await closeStaleMenu(anchor, native.length === 1 && native[0]);
+      if (!onPage() || blocked()) return fail("PAGE_CHANGED", "准备点按服装颜色时页面已切换。");
+      anchor = findAnchor();
+      if (!resting(anchor)) return fail("SPEC_CONTROL_MISSING", "当前颜色行的输入框已变化。");
+      if (openedColorMenu(anchor)) return { ok: true, opened: true };
+      if (menuOpen()) return menuFailure();
+    }
     anchor.input.scrollIntoView?.({ block: "center", inline: "nearest" });
     let previousPoint;
     const deadline = Date.now() + 600;
     do {
       if (!onPage() || blocked()) return fail("PAGE_CHANGED", "准备点按服装颜色时页面已切换。");
-      if (menuOpen()) return fail("MENU_STILL_OPEN", "存在下拉选项打开，请关闭后再选择颜色。");
       const current = findAnchor();
       if (!resting(current)) return fail("SPEC_CONTROL_MISSING", "当前颜色行的输入框已变化。");
+      // Scrolling can bring an already-mounted portal into the viewport.
+      if (recoverOpened && openedColorMenu(current)) return { ok: true, opened: true };
+      if (menuOpen()) return menuFailure();
       const rect = current.input.getBoundingClientRect();
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;
@@ -134,6 +163,51 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       await new Promise(resolve => setTimeout(resolve, 40));
     } while (Date.now() < deadline);
     return fail("SPEC_CONTROL_MISSING", "颜色输入框被遮挡或仍在视口外。");
+  }
+
+  async function closeStaleMenu(anchor, nativeMenu) {
+    const current = () => {
+      const menus = [...new Set([...standardMenus(), ...nativeMenus()])];
+      return menus.filter(menu => !menus.some(other => other !== menu && other.contains(menu)));
+    };
+    const menus = current();
+    if (menus.length !== 1) return;
+    const [menu] = menus;
+    const native = nativeMenu && (menu === nativeMenu || menu.contains(nativeMenu));
+    if (!native && !(menu.closest('[data-testid="beast-core-portal"],[class*="ST_dropdown_"]') &&
+        menu.querySelector('[role="option"],[data-testid="beast-core-select-option"]'))) return;
+    const safe = () => {
+      if (!onPage() || blocked()) return false;
+      const visible = current();
+      return visible.length === 1 && visible[0] === menu;
+    };
+    const settled = async (timeout) => {
+      const deadline = Date.now() + timeout;
+      do {
+        if (!onPage() || blocked()) return false;
+        if (!current().length) return true;
+        if (!safe()) return false;
+        await new Promise(resolve => setTimeout(resolve, 45));
+      } while (Date.now() < deadline);
+      return false;
+    };
+    const active = document.activeElement;
+    if (safe() && (menu.contains(active) || anchor.wrapper.contains(active))) {
+      active.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      if (safe()) active.blur();
+    }
+    if (await settled(180) || !safe()) return;
+    const headers = [...root.querySelectorAll('[class*="STP_stepsItemTitle_"]')].filter(node =>
+      visible(node) && !node.childElementCount && clean(node.textContent) === "基本信息" &&
+      !menu.contains(node) && !node.closest('a,button,input,label,[role="button"],[role="link"],[tabindex]'));
+    const outside = headers.length === 1 ? headers[0] : document.body;
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      if (!safe()) break;
+      const EventType = type.startsWith("pointer") ? globalThis.PointerEvent || MouseEvent : MouseEvent;
+      outside.dispatchEvent(new EventType(type, { bubbles: true, composed: true, cancelable: true, button: 0, pointerType: "mouse" }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    await settled(420);
   }
 
   async function setColor() {
@@ -186,28 +260,26 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       const nativePopover = wrapper.matches(colorComponent);
       const menus = () => (nativePopover ? nativeMenus() : standardMenus()).filter(menu =>
         (target()?.contains(menu) || menu.closest('[data-testid="beast-core-portal"],[class*="ST_dropdown_"]')));
-      let trustedMenu;
+      let trustedMenu = openedColorMenu(findAnchor());
+      const continuing = allowOpened || Boolean(trustedMenu);
       const related = () => {
         const anchor = findAnchor();
+        if (continuing) {
+          const owned = openedColorMenu(anchor, trustedMenu);
+          if (owned) trustedMenu = owned;
+          return owned;
+        }
         const visibleMenus = menus();
         if (!anchor || visibleMenus.length !== 1) return null;
-        const ids = [anchor.input, anchor.trigger, anchor.wrapper].flatMap(node =>
-          clean(node?.getAttribute("aria-controls") || node?.getAttribute("aria-owns")).split(/\s+/u)).filter(Boolean);
+        const ids = colorMenuIds(anchor);
         const [menu] = visibleMenus;
-        const owned = anchor.holder.contains(menu) || ids.some(id => menu.id === id || document.getElementById(id)?.contains(menu));
-        if (allowOpened) {
-          if (!nativePopover || standardMenus().some(other => other !== menu && !menu.contains(other) && !other.contains(menu))) return null;
-          const active = document.activeElement;
-          if (!anchor.wrapper.contains(active) && !((owned || trustedMenu === menu) && menu.contains(active))) return null;
-          trustedMenu = menu;
-          return menu;
-        }
+        const owned = ownsColorMenu(anchor, menu, ids);
         // The color-specific portal was absent before opening this single pinned row.
         return owned || nativePopover || !ids.length &&
           (anchor.holder.contains(document.activeElement) || menu.contains(document.activeElement)) ? menu : null;
       };
       let menu;
-      if (allowOpened) {
+      if (continuing) {
         menu = await waitFor(related, 1250);
         if (!menu && menus().length) return fail("MENU_STILL_OPEN", "无法确认已打开的颜色菜单属于当前行。");
       } else {
@@ -246,6 +318,20 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
           return false;
         }
         return null;
+      }
+      async function chooseFamily(label) {
+        if (!nativePopover || !/^(?:白色|红色|黑色|花色|黄色|灰色|蓝色|绿色|透明|紫色|棕色)$/u.test(label)) return null;
+        const chooser = related();
+        const families = [...chooser?.querySelectorAll('[class*="colour-spec-select_groupItem__"]') || []]
+          .filter(node => visible(node) && clean(node.textContent) === `${label}系` &&
+            !node.matches('[aria-disabled="true"],[data-disabled="true"],[disabled],a[href]') && !node.querySelector('a[href]'));
+        if (families.length !== 1 || !onPage() || blocked()) return null;
+        families[0].click();
+        const pick = await waitFor(() => {
+          const result = exactChoice();
+          return result === null ? null : { result };
+        }, 650);
+        return pick?.result ?? null;
       }
       async function search(label, timeout) {
         const currentMenu = related();
@@ -296,7 +382,11 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
         }
         return { ok: true, value: pick.value };
       }
-      let pick = alternateLabel ? await search(alternateLabel, 1000) : null;
+      let pick = exactChoice();
+      if (pick) return finish(pick);
+      if (pick !== false) pick = await chooseFamily(alternateLabel || wanted);
+      if (pick) return finish(pick);
+      if (pick !== false && alternateLabel) pick = await search(alternateLabel, 1000);
       if (pick) return finish(pick);
       if (pick !== false) pick = await search(value, 1450);
       if (pick) return finish(pick);

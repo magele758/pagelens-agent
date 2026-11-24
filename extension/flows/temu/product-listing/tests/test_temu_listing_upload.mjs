@@ -17,11 +17,12 @@ const fit = "/products/shirt/shared/fit.jpg";
 const detail = "/products/shirt/details/front.jpg";
 const filename = path => path.split("/").at(-1).replace(/\.jpg$/u, "");
 
-async function listingFixture({ uploadError, writeError, permitted = true, automaticSelection = false } = {}) {
+async function listingFixture({ uploadError, writeError, permitted = true, automaticSelection = false, pendingFile } = {}) {
   let url = category;
   let documentId = "category-document";
   let selectedFile;
   let selected = [];
+  let hiddenCard;
   const events = [];
   const approvals = [];
   const actualUploads = [];
@@ -53,7 +54,7 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
       const { kind, key, filenames, previous, expected, name, baseline, added } = request;
       events.push(["media", kind, request]);
       assert.equal(request.href, editor);
-      const knownMedia = [...assets.values()].filter(card => filenames.includes(card.filename));
+      const knownMedia = [...assets.values()].filter(card => card !== hiddenCard && filenames.includes(card.filename));
       const snapshot = () => ({ ok: true, count: selected.length, available: 10 - selected.length,
         ordered: key.startsWith("productSkcList["), selector: "#picker input[type=file]", knownMedia });
       switch (kind) {
@@ -64,6 +65,7 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
         case "open":
           assert.equal(request.trustedHover, key === "decoration-images");
           selected = [];
+          hiddenCard = undefined;
           result = snapshot();
           break;
         case "inspect":
@@ -79,8 +81,19 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
           const identity = `material-${actualUploads.length}`;
           const card = { filename: name, identity, src: `https://cdn.invalid/${identity}.jpg` };
           assets.set(selectedFile, card);
+          if (selectedFile === pendingFile) {
+            hiddenCard = card;
+            result = { ok: false, code: "UPLOAD_PENDING" };
+            break;
+          }
           if (automaticSelection) selected.push(card);
           result = { ok: true, card };
+          break;
+        }
+        case "find-new": {
+          assert.equal(selected.length, baseline);
+          const matches = knownMedia.filter(card => card.filename === name && !previous.some(prior => prior.identity === card.identity));
+          result = matches.length === 1 ? { ok: true, card: matches[0] } : { ok: false, code: "UPLOAD_PENDING" };
           break;
         }
         case "select-new":
@@ -147,6 +160,17 @@ async function listingFixture({ uploadError, writeError, permitted = true, autom
   assert.equal(result.code, "DETAIL_IMAGE_REQUIRED");
   assert.deepEqual(events, []);
   assert.deepEqual(approvals, []);
+}
+
+{
+  const { call, events, actualUploads, slots, assets } = await listingFixture({ pendingFile: fabric });
+  assert.equal((await call("temu_upload", { role: "variant", key: redGallery, paths: [red, fabric, fit] })).status, "verified");
+  assert.deepEqual(actualUploads, [red, fabric, fit]);
+  assert.deepEqual(slots.get(redGallery), [red, fabric, fit].map(path => assets.get(path)));
+  assert.deepEqual(events.filter(([type]) => type === "media").map(([, kind]) => kind)
+    .filter(kind => /^(open|cancel|find-new|select-new|confirm)$/u.test(kind)), [
+    "open", "select-new", "cancel", "open", "find-new", "select-new", "select-new", "select-new", "confirm",
+  ]);
 }
 
 {

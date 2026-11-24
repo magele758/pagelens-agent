@@ -91,6 +91,10 @@
   font: inherit;
 }
 .temu-directory-fallback button { flex: none; }
+#temu-batch-results:not([hidden]) { display: grid; gap: 8px; padding: 0; list-style: none; }
+#temu-batch-results > li { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+#temu-batch-results details { margin: 6px 0; font-size: .9em; }
+#temu-batch-results button { margin-top: 6px; }
 .temu-hint { margin: 4px 0 0; color: var(--muted); font-size: .9em; overflow-wrap: anywhere; }
 .temu-hint:empty { display: none; }
 .temu-select-trigger {

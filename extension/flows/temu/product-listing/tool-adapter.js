@@ -15,6 +15,7 @@ import { temuStockPage } from "./stock-page.js";
 const SITE = "https://agentseller.temu.com";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failure = (code, message) => ({ ok: false, code, message });
+const productTitle = value => String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
 const imagePath = path => typeof path === "string" && /^(?:\/|[A-Za-z]:[\\/]).+\.(?:jpe?g|png|webp)$/iu.test(path) &&
   !isSensitiveUploadPath(path);
 
@@ -29,9 +30,60 @@ export function isTemuDraftEditor(href) {
   }
 }
 
-/** A tool caller serves one trial begun on the new-product category page. */
+/** Read a previously opened editor without enabling any writes. */
+export async function readTemuResumeCandidate({
+  tabId, href, categoryPath, documentId, signal, api = globalThis.chrome,
+} = {}) {
+  const changed = () => failure("PAGE_CHANGED", "待续填的 Temu 页面已关闭或切换。");
+  const consistent = async () => {
+    signal?.throwIfAborted();
+    const tab = await api.tabs.get(tabId);
+    signal?.throwIfAborted();
+    return tab?.id === tabId && tab.url === href && !tab.pendingUrl;
+  };
+  if (!Number.isSafeInteger(tabId) || tabId < 1 || !isTemuDraftEditor(href)) return changed();
+  try {
+    if (!await consistent()) return changed();
+    let pinned = documentId;
+    async function read(func, request) {
+      signal?.throwIfAborted();
+      const target = pinned ? { tabId, documentIds: [pinned] } : { tabId, frameIds: [0] };
+      const [reply] = await api.scripting.executeScript({ target, func, args: [request] });
+      signal?.throwIfAborted();
+      if (!reply?.documentId || reply.frameId !== 0 || pinned && pinned !== reply.documentId ||
+          !await consistent()) return changed();
+      pinned = reply.documentId;
+      return reply.result || changed();
+    }
+    const state = await read(temuEditorPage, { kind: "inspect", href, categoryPath });
+    if (!state.ok) return state;
+    const titles = state.fields?.filter(field => field.key === "productName");
+    const title = titles?.length === 1 ? productTitle(titles[0].value) : "";
+    if (!title || state.truncated || !Array.isArray(state.uploads)) {
+      return failure("RESUME_UNVERIFIED", "未能核对待续填的服装商品名称或表单。");
+    }
+    const occupied = () => failure("RESUME_OCCUPIED", "此商品已填写规格或图片，请在 Temu 检查，避免重复添加。");
+    const enteredSku = state.fields.some(field => /^(?:skuCode|siteSupplierPriceMap\.[\w-]+)$/u.test(field.skuMember || "") &&
+      productTitle(field.value));
+    if (enteredSku || state.skuRows?.some(row => row.labels?.length) ||
+        state.uploads.some(target => target.markers || target.selectedFiles)) return occupied();
+    const colors = await read(temuApparelPage, { kind: "inspect", href });
+    if (!colors.ok) return colors;
+    if (!colors.rows?.length) return failure("RESUME_UNVERIFIED", "未能核对待续填的颜色行。");
+    if (colors.rows.some(row => productTitle(row.value))) return occupied();
+    const sizes = await read(temuApparelPage, { kind: "inspect-sizes", href });
+    if (!sizes.ok && sizes.code !== "SPEC_CONTROL_MISSING") return sizes;
+    if (sizes.selectedSizes?.length) return occupied();
+    return { ok: true, title, documentId: pinned };
+  } catch (error) {
+    signal?.throwIfAborted();
+    return changed();
+  }
+}
+
+/** A tool caller starts on the category page or verifies a known draft before resuming. */
 export function createTemuListingToolCaller({
-  tabId, url, signal, confirmUpload, api = globalThis.chrome, cdp = getCdp(),
+  tabId, url, signal, confirmUpload, resume, api = globalThis.chrome, cdp = getCdp(),
   optionCache = createTemuOptionCache({ storage: api?.storage?.local }),
 } = {}) {
   let href = url;
@@ -42,7 +94,7 @@ export function createTemuListingToolCaller({
   let merchantId;
   let observedOptionScope;
   let observedDropdownShape;
-  let stage = "category";
+  let stage = resume ? "resume" : "category";
   let siteAndCategorySet = false;
   let busy = false;
   const probedFields = new Set();
@@ -53,7 +105,7 @@ export function createTemuListingToolCaller({
 
   const getConsistentTab = async () => {
     const tab = await currentTab();
-    if (!tab || tab.url !== href || (stage === "editor" ? !isTemuDraftEditor(tab.url) : !isTemuCategoryPage(tab.url))) {
+    if (!tab || tab.url !== href || (stage === "category" ? !isTemuCategoryPage(tab.url) : !isTemuDraftEditor(tab.url))) {
       return failure("PAGE_CHANGED", "试填标签或 Temu 登录状态已变化。");
     }
     const dialog = cdp.pendingDialog?.(tabId);
@@ -139,7 +191,8 @@ export function createTemuListingToolCaller({
     const request = { href, kind: args.kind, key: args.key, value: args.value, alternate: args.alternate };
     const first = await runInPage(temuApparelPage, request);
     if (args.kind !== "set-color" || first.code !== "COLOR_MENU_UNAVAILABLE") return first;
-    const point = await runInPage(temuApparelPage, { href, kind: "color-target", key: args.key });
+    const point = await runInPage(temuApparelPage, { href, kind: "color-target", key: args.key, recoverOpened: true });
+    if (point.ok && point.opened) return await runInPage(temuApparelPage, { ...request, allowOpened: true });
     const clicked = await pointAt(point, true);
     return clicked.ok ? await runInPage(temuApparelPage, { ...request, allowOpened: true }) : clicked;
   }
@@ -148,14 +201,16 @@ export function createTemuListingToolCaller({
     const filenames = paths.map(path => path.split(/[/\\]/u).at(-1).replace(/\.(?:jpe?g|png|webp)$/iu, ""));
     if (new Set(filenames).size !== filenames.length) return failure("UPLOAD_DENIED", "一起上传的图片需要不同的文件名。");
     const media = (kind, args) => runInPage(temuMediaPage, { href, kind, key, filenames, ...args });
-    let openedWithHover = false;
-    if (key === "decoration-images") {
-      const point = await media("detail-target");
-      const hovered = await pointAt(point);
-      if (!hovered.ok) return hovered;
-      openedWithHover = true;
+    async function openPicker() {
+      const trustedHover = key === "decoration-images";
+      if (trustedHover) {
+        const point = await media("detail-target");
+        const hovered = await pointAt(point);
+        if (!hovered.ok) return hovered;
+      }
+      return await media("open", { trustedHover });
     }
-    const picker = await media("open", { trustedHover: openedWithHover });
+    const picker = await openPicker();
     if (!picker.ok) return picker;
     let confirmed;
     try {
@@ -175,8 +230,22 @@ export function createTemuListingToolCaller({
         if (!picked?.ok) {
           const selectedFiles = await selectFiles(snapshot.selector, [path]);
           if (!selectedFiles.ok) return selectedFiles;
-          const settled = await media("settle-upload", { name: filename, previous: snapshot.knownMedia || [],
-            baseline, localFilename });
+          const previous = snapshot.knownMedia || [];
+          let settled = await media("settle-upload", { name: filename, previous, baseline, localFilename });
+          if (settled.code === "UPLOAD_PENDING") {
+            const closed = await media("cancel");
+            if (!closed.ok) return settled;
+            const reopened = await openPicker();
+            if (!reopened.ok) return reopened;
+            if (reopened.count !== picker.count) return failure("UPLOAD_UNVERIFIED", "重新打开素材中心后原有图片选择已变化。");
+            settled = await media("find-new", { name: filename, previous, baseline: picker.count });
+            if (!settled.ok) return settled;
+            for (const [slot, receipt] of receipts.entries()) {
+              const restored = await media("select-new", { filenames: [receipt.filename], baseline: picker.count + slot,
+                expected: [receipt] });
+              if (!restored.ok) return restored;
+            }
+          }
           if (!settled.ok) return settled;
           card = settled.card;
           if (!card) return failure("UPLOAD_UNVERIFIED", "未能核对新上传的素材。");
@@ -259,7 +328,30 @@ export function createTemuListingToolCaller({
     if (busy) return failure("FLOW_BUSY", "当前 Temu 商品页正执行另一步。");
     busy = true;
     try {
-      if (stage === "category") {
+      if (stage === "resume" && tool === "temu_resume") {
+        const expectedCategory = resume.categoryPath;
+        const expectedTitle = productTitle(resume.title);
+        if (resume.href !== href || args.href !== href || !isTemuDraftEditor(href) || !expectedTitle ||
+            typeof resume.site !== "string" || !resume.site.trim() ||
+            !Array.isArray(expectedCategory) || !expectedCategory.length ||
+            !expectedCategory.every(part => typeof part === "string" && part.trim())) {
+          return failure("RESUME_UNVERIFIED", "待续填商品的页面、站点或类目无法核对。");
+        }
+        const candidate = await readTemuResumeCandidate({
+          tabId, href, categoryPath: expectedCategory, documentId: resume.documentId, signal, api,
+        });
+        if (!candidate.ok) return candidate;
+        if (candidate.title !== expectedTitle) {
+          return failure("RESUME_UNVERIFIED", "页面商品名称与所选目录不一致。");
+        }
+        documentId = candidate.documentId;
+        categoryPath = expectedCategory;
+        categoryId = resume.categoryId;
+        site = resume.site;
+        stage = "editor";
+        siteAndCategorySet = true;
+        return { ok: true, href, status: "verified" };
+      } else if (stage === "category") {
         if (tool === "temu_sites") return await runInPage(temuStagePage, { kind: "sites", expectedHref: href });
         if (tool === "temu_category") {
           const selection = { expectedHref: href, siteId: args.site, category: args.categoryPath };

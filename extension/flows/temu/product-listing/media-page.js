@@ -85,6 +85,25 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     return { ok: true, selector, count, available, multiple: input.multiple, ordered: isOrdered,
       knownMedia: mediaCards(dialog).map(receipt) };
   }
+  if (kind === "find-new") {
+    if (!name || !filenames.includes(name) || count !== baseline) {
+      return fail("UPLOAD_UNVERIFIED", "恢复图片选择时文件名或已选数量与计划不一致。");
+    }
+    const existing = new Set(previous.map(card => card.identity));
+    let lastCard;
+    const found = await waitFor(() => {
+      if (picker() !== dialog || foreignModals().length || uploadLists(dialog).length || selected(dialog)?.count !== baseline) {
+        return fail("MODAL_BLOCKED", "重新核对图片时素材中心状态已变化。");
+      }
+      const matches = mediaCards(dialog).filter(card => card.filename === name && card.libraryFilename === name && !existing.has(card.identity));
+      if (matches.length > 1) return fail("UPLOAD_UNVERIFIED", "出现多张同名的新素材，无法核对这次上传的文件。");
+      const [card] = matches;
+      if (card && card.identity === lastCard?.identity && card.src === lastCard.src) return { ok: true, card: receipt(card) };
+      lastCard = card;
+      return null;
+    }, 4500);
+    return found || fail("UPLOAD_PENDING", "重新打开素材中心后，仍未核对到本次上传的图片。");
+  }
   if (kind === "select-new") {
     if (!filenames.length || filenames.length > available || new Set(filenames).size !== filenames.length || count !== baseline ||
         isOrdered && (expected.length !== filenames.length || new Set(expected.map(card => card.identity)).size !== expected.length)) {
@@ -191,6 +210,7 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
     let savedAt = 0;
     let refreshed = false;
     let closingList;
+    let uploadListClosedAt = 0;
     let lastCard;
     let duplicateDismissed = false;
     let duplicateLibraryReadyAt = 0;
@@ -242,6 +262,7 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       }
       if (extra.length) return null;
       if (closingList && isActiveUploadList(closingList)) return null;
+      if (closingList) uploadListClosedAt ||= Date.now();
       const lists = uploadLists(dialog);
       if (lists.length > 1) return fail("MODAL_BLOCKED", "素材中心出现多个上传列表，需要核对。");
       if (lists.length) {
@@ -270,7 +291,8 @@ export async function temuMediaPage({ href, kind, key, filenames = [], previous 
       const [card] = matches;
       if (card && card.identity === lastCard?.identity && card.src === lastCard?.src) return { ok: true, card: receipt(card) };
       lastCard = card;
-      if (!card && savedAt && !refreshed && Date.now() - savedAt >= 900) {
+      const readyAt = Math.max(savedAt, uploadListClosedAt);
+      if (!card && readyAt && !refreshed && Date.now() - readyAt >= 900) {
         refreshed = true;
         const refresh = unique([...dialog.querySelectorAll('button,a,[role="link"],[role="button"]')].filter(node => {
           const href = node.getAttribute("href");

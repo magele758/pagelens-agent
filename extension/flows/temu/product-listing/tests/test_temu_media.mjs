@@ -110,6 +110,12 @@ function fixture(html) {
     assert.equal(result.card.identity, name + "-new");
     assert.equal(result.card.filename, name);
     assert.equal(result.card.libraryFilename, name === "fabric" ? "fabric-9" : name);
+    if (name === "red-main") {
+      const recovered = await media({ kind: "find-new", name, previous: before.knownMedia, baseline: 0 });
+      assert.equal(recovered.card.identity, "red-main-new");
+      const wrongBaseline = await media({ kind: "find-new", name, previous: before.knownMedia, baseline: 1 });
+      assert.equal(wrongBaseline.code, "UPLOAD_UNVERIFIED");
+    }
     const portal = mask.querySelector('[data-testid="beast-core-portal"]');
     if (name === "fit") assert.equal(portal.style.pointerEvents, "none");
     else assert.equal(portal, null);
