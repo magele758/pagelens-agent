@@ -1,6 +1,7 @@
 import { operateShopeeSizeChart } from "../page-size-chart.mjs";
 import { completeSizeChartInput } from "./product-directory.js";
 import { clickCategoryRecommendation, clickListingControl, operateShopeeCategory, readPage, writeListingVariant } from "../page-state.mjs";
+import { withShopeeTabFocus } from "../submit-listing.mjs";
 import { createCdpTools, dialogNote, withDialogGuard } from "../../../../lib/agent/cdp-tools.js";
 import { queryDom } from "../../../../lib/agent/page-fns.js";
 import { matchIrreversible } from "../../../../lib/agent/trust/irreversible.js";
@@ -64,15 +65,22 @@ export function createPtcToolCaller({ tabId, signal, confirmUpload, completeChar
         }
       }
       case "flow_page_state":
-        if (args.verifySummary === true) await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-        return exec(readPage, [args.category]);
+        if (args.verifySummary !== true) return exec(readPage, [args.category]);
+        return withShopeeTabFocus(chrome.tabs, tabId, async () => {
+          const changed = await readTab();
+          if (changed) return changed;
+          await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+          return exec(readPage, [args.category]);
+        }, signal);
       case "flow_size_chart_state":
         return exec(operateShopeeSizeChart, [{ category: args.category }, url]);
       case "flow_size_chart_action": {
         const result = await exec(operateShopeeSizeChart, [args, url], "MAIN");
         if (result?.ok && ["save", "dismiss"].includes(args.action)) {
           // Chrome may postpone the modal-close animation until the tab is visible.
-          await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+          await withShopeeTabFocus(chrome.tabs, tabId, async () => {
+            if (!await readTab()) await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+          }, signal);
         }
         return result;
       }

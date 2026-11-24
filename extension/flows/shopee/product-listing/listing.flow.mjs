@@ -20,6 +20,12 @@ const matchedNumber = (actual, wanted) => actual != null && actual !== '' && Num
 const positive = value => /^(?:\d+\.?\d*|\.\d+)$/.test(String(value)) && Number.isFinite(Number(value)) && Number(value) > 0;
 const validImage = path => path == null || typeof path === 'string' && /^(?:\/|[A-Za-z]:[\\/]).+\.(?:png|jpe?g|webp)$/i.test(path);
 const nonemptyText = value => typeof value === 'string' && value.trim() === value && value !== '';
+const namedShippingFields = ['weight', 'width', 'length', 'height', 'shipDays'];
+const requiredIssues = current => current?.requiredIssues ?? [];
+const issueIdentity = ({ section, key, option }) => JSON.stringify([section, key, option]);
+const isValidationSummary = message => /^\s*[1-9]\d*\s*个错误需调整[。！!]?\s*$/u.test(message);
+const onlyValidationSummary = current => current.validation?.length === 1 &&
+  isValidationSummary(current.validation[0]) && !current.missingRequired && !requiredIssues(current).length;
 
 function normalizeVariants(variant) {
   if (variant == null) return [];
@@ -246,7 +252,7 @@ async function replaySizeChart({ chart, category, title, allowInference, native,
 }
 
 // call 由宿主提供，经 PageLens 现有工具包装后返回原始结果或抛出工具错误。
-export async function replayShopeeListing({ call, tabId, input, onStep = () => {}, signal }) {
+export async function replayShopeeListing({ call, tabId, input, onStep = () => {}, registerRecovery, signal }) {
   const variants = validate(input, tabId);
   const sizeChart = input.sizeChart == null ? null : normalizeSizeChart(input.sizeChart);
   const completed = [];
@@ -255,6 +261,9 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   let originalUrl;
   let state;
   let freshForm = false;
+  let observedShipDays;
+  let repairingRequired = false;
+  let recoveringSubmission = false;
   let coverUploaded = false;
   let galleryUploaded = 0;
   let skuRows;
@@ -265,7 +274,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   const uploadedOptions = new Set();
   const native = async (tool, args) => {
     signal?.throwIfAborted();
-    onStep({ step, tool });
+    if (!recoveringSubmission) onStep({ step, tool });
     const raw = await call(tool, { tabId, ...args });
     signal?.throwIfAborted();
     let response = raw;
@@ -281,7 +290,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     completed.push(step);
     step = next;
   };
-  const read = async (verifySummary = false) => {
+  const read = async (verifySummary = false, inspectRequired = false) => {
     const current = await native('flow_page_state', { category, ...(verifySummary && { verifySummary }) });
     const url = new URL(current.url);
     if (url.origin !== origin || url.pathname !== '/portal/mtsku/new' ||
@@ -294,18 +303,29 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         current.fields.sku?.value && input.sku != null && current.fields.sku.value !== input.sku)) {
       throw new Pause('page-changed', { text: '商品名称或货号已变化' });
     }
-    const validation = (inOwnedDataPass && current.categoryReady ? current.validationOutsideSalesAndShipping : undefined) ??
-      current.unscopedValidation ?? current.validation;
-    if (validation?.length) throw new Pause('page-validation', validation);
     if (!['bind-page', 'basic', 'category'].includes(step) && norm(current.category) !== category) {
       throw new Pause('different-category', { actual: current.category });
     }
     state = current;
+    const validation = (inOwnedDataPass && current.categoryReady ? current.validationOutsideSalesAndShipping : undefined) ??
+      current.unscopedValidation ?? current.validation;
+    if (!repairingRequired && !(inspectRequired && requiredIssues(current).length) &&
+        !(inOwnedDataPass && onlyValidationSummary(current)) && validation?.length) {
+      throw new Pause('page-validation', validation);
+    }
     return state;
   };
   const pause = async (ms) => {
     await new Promise((resolve) => setTimeout(resolve, ms));
     signal?.throwIfAborted();
+  };
+  const rememberShippingDefault = () => {
+    if (!freshForm || !state.categoryReady || input.shipDays != null || observedShipDays != null) return;
+    const value = state.fields.shipDays?.value;
+    if (/^[1-9]\d*$/u.test(value ?? '') &&
+        !requiredIssues(state).some(issue => issue.section === 'shipping' && issue.key === 'shipDays')) {
+      observedShipDays = value;
+    }
   };
   const readUntil = async (predicate, timeoutMs = 1600, pollMs = 100) => {
     const deadline = Date.now() + timeoutMs;
@@ -455,14 +475,15 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
   const saleMatches = (row, key, wanted) => Boolean(row &&
     (key === 'sku' ? row.sku === wanted : matchedNumber(row[key], wanted)));
   const rowMatches = (row, wanted) => salesKeys.every(key => saleMatches(row, key, wanted[key]));
-  function skuReadbackError(row, wanted) {
-    const key = salesKeys.find(key => !saleMatches(row, key, wanted[key]));
+  function skuReadbackError(row, wanted, keys = salesKeys) {
+    const key = keys.find(key => !saleMatches(row, key, wanted[key]));
     return new Pause('sku-readback', { option: wanted.option, key, actual: row?.[key] || '空', expected: String(wanted[key]) });
   }
-  async function fillSkuRow(wanted, commit) {
+  async function fillSkuRow(wanted, commit, keys = salesKeys) {
     const row = () => rowFor(wanted.option);
+    const verified = current => keys.every(key => saleMatches(rowFor(wanted.option, current), key, wanted[key]));
     for (let attempt = 0; attempt < 2; attempt++) {
-      for (const key of salesKeys) {
+      for (const key of keys) {
         if (!row()?.selectors?.[key]) await readUntil(current => Boolean(rowFor(wanted.option, current)?.selectors?.[key]), 2500);
         const current = row();
         if (!current?.selectors?.[key]) throw new Pause('sku-control-missing', { option: wanted.option, key });
@@ -475,10 +496,10 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         // Committing one cell can rebuild the SKU table and change every selector.
         await read();
       }
-      await readUntil(current => rowMatches(rowFor(wanted.option, current), wanted), 2100);
-      if (rowMatches(row(), wanted)) return;
+      await readUntil(verified, 2100);
+      if (verified(state)) return;
     }
-    throw skuReadbackError(row(), wanted);
+    throw skuReadbackError(row(), wanted, keys);
   }
   async function pickCategory(path, searchWords = []) {
     const operate = (action, args = {}) => native('flow_category_picker_action', { action, ...args });
@@ -603,6 +624,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     if (norm(state.category) !== category || !state.categoryReady) {
       throw new Pause('category-not-ready', { category, actual: state.category, recommendations: state.recommendations ?? [] });
     }
+    rememberShippingDefault();
     if (usedPicker || !input.category && allowAttributeAdvice) await native('flow_category_remember', { category });
 
     checkpoint('category-attributes');
@@ -754,6 +776,8 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     }
     async function fillSales() {
       await read();
+      // The default can appear after the initial category render. Remember it before changing SKU rows.
+      rememberShippingDefault();
       await clearCarriedVariant();
       if (!variant) {
         assertVariation();
@@ -827,7 +851,7 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       }
     }
 
-    const shipping = ['weight', 'width', 'length', 'height', 'shipDays'].filter((key) => input[key] != null);
+    const shipping = namedShippingFields.filter((key) => input[key] != null);
     function verifySalesAndShipping() {
       assertVariation();
       for (const key of shipping) expected(key, input[key], matchedNumber);
@@ -845,6 +869,58 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         if (!row.image?.present) throw new Pause('sku-image-readback', { option });
         return { option, price, quantity, sku, imageVerified: true, imageUploaded: uploadedOptions.has(option) };
       });
+    }
+    async function fillRequiredField({ section, key, option }) {
+      if (section === 'category-attributes' && attributeTargets.has(key)) {
+        const field = currentAttribute(key);
+        // Preserve a selection already made on the page, including a label with a transient error marker.
+        if (present(field.value)) return;
+        await setAttribute(key, attributeTargets.get(key), { preserve: true });
+        return;
+      }
+      if (section === 'sales' && option != null && salesKeys.includes(key)) {
+        const wanted = variants.find(item => item.option === option);
+        const row = rowFor(option);
+        if (wanted && row && (!row.sku || row.sku === wanted.sku)) await fillSkuRow(wanted, true, [key]);
+        return;
+      }
+      const desired = input[key] ?? (key === 'shipDays' ? observedShipDays : undefined);
+      const numeric = section === 'shipping' && namedShippingFields.includes(key) ||
+        section === 'sales' && !variant && (key === 'price' || key === 'quantity');
+      const text = section === 'basic' && key === 'description' || section === 'sales' && key === 'sku';
+      if (option != null || !numeric && !text || desired == null) return;
+      if (numeric && matchedNumber(state.fields[key]?.value, desired) || text && present(state.fields[key]?.value)) return;
+      await fillNamedField(key, desired, true);
+    }
+    async function repairRequiredFields({ submission = false } = {}) {
+      repairingRequired = true;
+      recoveringSubmission = submission;
+      try {
+        await read();
+        if (!state.categoryReady) return false;
+        assertVariation();
+        const targets = new Set(requiredIssues(state).map(issueIdentity));
+        if (!targets.size) return !state.missingRequired && !state.validation?.some(message => !isValidationSummary(message));
+        for (const target of targets) {
+          const current = requiredIssues(state).find(issue => issueIdentity(issue) === target);
+          if (!current) continue;
+          try { await fillRequiredField(current); }
+          catch (error) {
+            if (current.section === 'category-attributes') await deferAttribute(current.key, error);
+            else if (!movedControl.has(error.code) && !['readback-mismatch', 'sku-control-missing', 'sku-readback'].includes(error.code)) throw error;
+          }
+          await read();
+          assertVariation();
+        }
+        // Give inline validation time to clear after a corrected field commits.
+        const clear = current => !requiredIssues(current).length && !current.missingRequired &&
+          !current.validation?.some(message => !isValidationSummary(message));
+        if (!clear(state)) await readUntil(clear, 1600);
+        return clear(state);
+      } finally {
+        recoveringSubmission = false;
+        repairingRequired = false;
+      }
     }
     async function fillShipping() {
       for (const key of shipping) {
@@ -868,11 +944,18 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     const retryableVariation = new Set(['different-variant', 'variants-already-enabled', 'variant-control-changed']);
     const retryableValues = new Set(['sku-control-missing', 'sku-row-not-unique', 'sku-readback', 'field-missing', 'readback-mismatch']);
     const completedBeforeSales = completed.length;
+    let requiredRepairTried = false;
+    async function repairRequiredOnce() {
+      if (!freshForm || requiredRepairTried || !requiredIssues(state).length) return;
+      requiredRepairTried = true;
+      await repairRequiredFields();
+    }
     for (let attempt = 0; ; attempt++) {
       try {
         await fillSales();
         checkpoint('shipping');
         await fillShipping();
+        await repairRequiredOnce();
         verifySalesAndShipping();
         if (sizeChart) {
           checkpoint('size-chart');
@@ -880,11 +963,12 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
             chart: sizeChart, category, title: input.title, allowInference: input.completeMissingSizeChart === true, native, pause,
           });
         }
-        await read();
+        await read(false, true);
         assertVariation();
-        if (state.missingRequired > 0) {
-          await read(true);
-          if (state.missingRequired > 0) await readUntil(current => resetNeeded(current) || !current.missingRequired, 2500);
+        if (state.missingRequired > 0 && !requiredIssues(state).length) await read(true, true);
+        await repairRequiredOnce();
+        if (state.missingRequired > 0 && !requiredIssues(state).length) {
+          await readUntil(current => resetNeeded(current) || !current.missingRequired, 2500);
         }
         verifySalesAndShipping();
         break;
@@ -907,6 +991,13 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
     const receipt = { completed, category, coverUploaded, ...(galleryUploaded && { galleryUploaded }), skuRows,
       ...(sizeChartReceipt ? { sizeChart: sizeChartReceipt } : {}),
       elapsedMs: Date.now() - began };
+    if (requiredIssues(state).length) {
+      const issues = requiredIssues(state);
+      const { section, key, label, option, kind } = issues[0];
+      return { ...receipt, status: 'needs-review', step: section,
+        code: kind === 'invalid' ? 'page-validation' : 'required-fields-remain',
+        details: { ...(section === 'category-attributes' ? { label } : { key }), ...(option != null && { option }), issues } };
+    }
     const attributeIssues = new Map(state.attributes.filter(field => field.required && !present(field.value))
       .map(field => [field.label, { label: field.label, code: 'required-attribute-missing' }]));
     for (const [label, choice] of attributeTargets) {
@@ -915,7 +1006,8 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
         attributeIssues.set(label, { label, code: attributeFailures.get(label)?.code ?? 'attribute-readback' });
       }
     }
-    if (attributeIssues.size || state.validation?.length) {
+    // A form that passed all readbacks can proceed to the submitter's same-document check of an isolated summary.
+    if (attributeIssues.size || state.validation?.length && !(freshForm && onlyValidationSummary(state))) {
       const issues = [...attributeIssues.values()];
       const first = issues[0];
       const pendingLabels = issues.slice(1).map(issue => issue.label).join('、');
@@ -927,12 +1019,21 @@ export async function replayShopeeListing({ call, tabId, input, onStep = () => {
       return { ...receipt, status: 'needs-review', code: 'required-fields-remain',
         details: { text: `Shopee 提示仍有 ${state.missingRequired} 个必填字段为空。` } };
     }
+    if (freshForm && registerRecovery) {
+      let used = false;
+      registerRecovery(async ({ tabId: requestedTabId, binding } = {}) => {
+        if (used || requestedTabId !== tabId || binding?.url !== originalUrl) return false;
+        used = true;
+        return repairRequiredFields({ submission: true });
+      });
+    }
     return { ...receipt, status: 'verified' };
   } catch (error) {
     return {
       status: signal?.aborted ? 'cancelled' : 'needs-review', step, completed,
       code: signal?.aborted ? 'cancelled' : error.code || 'tool-error',
       details: error.details ?? error.message, elapsedMs: Date.now() - began,
+      ...(requiredIssues(state).length && { requiredIssues: requiredIssues(state) }),
       ...(skuRows ? { category, coverUploaded, skuRows } : {}),
       ...(sizeChartReceipt ? { sizeChart: sizeChartReceipt } : {}),
     };

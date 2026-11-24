@@ -11,10 +11,10 @@ export function matchesFlowTarget(flowId, url, shopId) {
   return Boolean(flow && url && flow.matchesTarget(url, shopId));
 }
 
-export async function runFlow({ flowId, tabId, input, call, onStep, signal }) {
+export async function runFlow({ flowId, tabId, input, call, onStep, signal, registerRecovery }) {
   const flow = flows.get(flowId);
   if (!flow) throw new Error("找不到工作流：" + flowId);
-  const replay = () => flow.replay({ call, tabId, input, onStep, signal });
+  const replay = () => flow.replay({ call, tabId, input, onStep, signal, registerRecovery });
   const locks = globalThis.navigator?.locks;
   if (!locks) return replay();
   return locks.request(`pagelens-flow:${tabId}`, { ifAvailable: true }, (lock) => lock
