@@ -100,6 +100,17 @@ export async function createSwRun({ task, settings, signal }) {
       runTurn: ({ messages, tools: turnTools, signal: turnSignal, onTextDelta, onReasoningDelta }) =>
         streamTurn(model, { messages, tools: turnTools, signal: turnSignal, onReasoningDelta }, onTextDelta),
     },
+    async cleanup() {
+      if (taskGroupId == null || taskGroupId < 0) return;
+      const gid = taskGroupId;
+      taskGroupId = null;
+      const query = windowId != null ? { windowId, groupId: gid } : { groupId: gid };
+      const tabs = (await chrome.tabs?.query?.(query).catch(() => [])) || [];
+      const ids = tabs.map((t) => t.id).filter((id) => Number.isInteger(id));
+      if (ids.length && typeof chrome.tabs?.ungroup === "function") {
+        await chrome.tabs.ungroup(ids).catch(() => {});
+      }
+    },
   };
 }
 

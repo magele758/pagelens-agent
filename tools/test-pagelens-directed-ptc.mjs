@@ -231,7 +231,7 @@ try {
       return JSON.parse(JSON.stringify(result));
     },
   });
-  const { pollAgentInboxOnce } = await import("../extension/lib/agent/inbox.js");
+  const { pollAgentInboxOnce, manageMxApproval } = await import("../extension/lib/agent/inbox.js");
   const enqueue = () => cli("enqueue", "--extension-id", extensionId, "--action", "ptc_inspect_mx_draft",
     "--source-id", sourceId, "--draft-id", draftId);
   const wait = (id, target = extensionId) => cli("wait", id, "--extension-id", target, "--timeout-ms", "3000");
@@ -274,6 +274,59 @@ try {
     return true;
   });
   assert.equal(pages.size, 0);
+
+  // Reproduce an idle Inbox with a persisted watch after the seller has closed the list.
+  const key = "agentMxApprovalWatch";
+  const oldWatch = { key: "publish:" + draftId, mode: "publish_draft", productId: draftId,
+    jobId: "old-receipt", nextCheckAt: 0 };
+  storage[key] = { nextPollAt: 0, watches: [oldWatch] };
+  let queries = 0;
+  tabs.query = async () => { queries++; return []; };
+  const before = [...browserCalls];
+  const nativeSellerCalls = () => responses.filter(type => type === "mx.tool").length;
+  const sellerCallsBefore = nativeSellerCalls();
+  assert.equal((await pollAgentInboxOnce()).processed, 0);
+  assert.equal(storage[key].enabled, false);
+  assert.equal(storage[key].watches[0].state, "disabled");
+  await manageMxApproval({ type: "pl.mxApproval.setEnabled", enabled: true });
+  assert.equal((await pollAgentInboxOnce()).processed, 0);
+  assert.equal(queries, 0, "opt-in cannot restart a pre-upgrade watch");
+
+  const fresh = { ...oldWatch, key: "publish:" + sourceId, productId: sourceId, jobId: "new-receipt",
+    state: "watching", startedAt: Date.now(), expiresAt: Date.now() + 86400000, nextCheckAt: 0 };
+  storage[key].watches.push(fresh);
+  let reading, release;
+  const readStarted = new Promise(resolve => { reading = resolve; });
+  tabs.query = () => {
+    queries++;
+    reading();
+    return new Promise(resolve => { release = resolve; });
+  };
+  const slowCheck = pollAgentInboxOnce();
+  await readStarted;
+  try {
+    assert.equal((await pollAgentInboxOnce()).processed, 0, "waiting for Chrome cannot hold the Inbox lock");
+  } finally {
+    release([]);
+    await slowCheck;
+  }
+  assert.equal(storage[key].watches.at(-1).lastStatus, "no_page");
+  assert.equal(queries, 1, "inspect only existing tabs");
+  settings.agentBridgeOrigins = [];
+  storage[key].nextPollAt = storage[key].watches.at(-1).nextCheckAt = 0;
+  await pollAgentInboxOnce();
+  assert.equal(storage[key].watches.at(-1).lastStatus, "access_disabled");
+  assert.equal(queries, 1, "revoking site access stops looking for seller tabs");
+  await manageMxApproval({ type: "pl.mxApproval.setEnabled", enabled: false });
+  await pollAgentInboxOnce();
+  assert.equal(queries, 1);
+  assert.deepEqual(browserCalls, before, "automatic approval checks never open, refresh or close a tab");
+  assert.equal(nativeSellerCalls(), sellerCallsBefore, "an empty Inbox cannot dispatch a seller action");
+  const { readActivity, recordJobFinished } = await import("../extension/lib/agent/inbox-activity.js");
+  const ids = ["new-approval", "new-inbox-job"];
+  await Promise.all(ids.map(id => recordJobFinished({ id }, { ok: true }, Date.now())));
+  assert.deepEqual((await readActivity()).slice(0, 2).map(entry => entry.id).sort(), ids,
+    "a concurrent job and approval must both appear in activity");
   console.log("Directed inbox, Native Host, and PTC verified the reloaded fixture draft and rejected an altered SKU");
 } finally {
   for (const { dom } of pages.values()) dom.window.close();

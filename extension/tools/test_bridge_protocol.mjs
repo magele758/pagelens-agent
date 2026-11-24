@@ -164,11 +164,69 @@ assert.equal(res.ok, true);
   assert.deepEqual(grouped.at(-1), [batch.result.tabId, ...batch.result.backgroundTabIds]);
   assert.equal(batch.result.backgroundTabIds.length, 2);
   const removed = [];
-  env.tabs.remove = async id => removed.push(id);
+  const events = [];
+  const prevRemove = env.tabs.remove;
+  const prevUngroup = env.tabs.ungroup;
+  env.tabs.ungroup = async ids => events.push(["ungroup", ids]);
+  env.tabs.remove = async id => {
+    removed.push(id);
+    events.push(["remove", id]);
+  };
   env.tabGroups.update = async () => { throw Error("Group unavailable"); };
   assert.equal((await req("open_tab", { url: "http://localhost:8080/", groupTitle: "MX draft" })).ok, false);
   assert.deepEqual(removed, [100 + created]);
+  assert.deepEqual(events.slice(0, 2), [["ungroup", [100 + created]], ["remove", 100 + created]]);
+
+  // close_tab ungroups grouped tabs before removing them so Chrome does not archive a saved tab group.
+  events.length = 0;
+  const closedGrouped = await req("close_tab", { tabId: first.result.tabId });
+  assert.equal(closedGrouped.ok, true);
+  assert.deepEqual(events, [["ungroup", first.result.tabId], ["remove", first.result.tabId]]);
+
+  // Dedicated automation windows isolate tabs by windowId without creating Chrome tab groups.
+  let winGroupCalls = 0;
+  env.tabGroups = {
+    group: async () => { winGroupCalls++; return 99; },
+    update: async () => { winGroupCalls++; },
+  };
+  const createdWinTabs = [];
+  env.windows = {
+    create: async ({ url, focused, state }) => {
+      assert.equal(focused, false);
+      assert.equal(state, "normal");
+      const id = 100 + ++created;
+      const tab = { id, url, windowId: 501, groupId: -1 };
+      createdWinTabs.push(tab);
+      TABS.set(id, tab);
+      return { id: 501, tabs: [tab] };
+    },
+    remove: async () => {},
+  };
+  const winFirst = await req("open_tab", {
+    url: "http://localhost:8080/product",
+    groupTitle: "PageLens · MX 154641",
+    backgroundUrls: ["http://localhost:8080/drafts"],
+    newWindow: true,
+  });
+  assert.equal(winFirst.ok, true);
+  assert.equal(winFirst.result.windowId, 501);
+  assert.equal(winFirst.result.groupId, undefined, "dedicated window must not create a tab group");
+  assert.equal(winFirst.result.backgroundTabIds.length, 1);
+  const winFollow = await req("open_tab", {
+    url: "http://localhost:8080/edit",
+    groupWithTab: winFirst.result.tabId,
+    newWindow: true,
+  });
+  assert.equal(winFollow.ok, true);
+  assert.equal(winFollow.result.windowId, 501);
+  assert.equal(winFollow.result.groupId, undefined);
+  assert.equal(winGroupCalls, 0, "tabGroups API must not be called for dedicated automation windows");
+
+  for (const t of createdWinTabs) TABS.delete(t.id);
   TABS.delete(first.result.tabId);
+  env.tabs.remove = prevRemove;
+  env.tabs.ungroup = prevUngroup;
+  delete env.windows;
   delete env.tabGroups;
 }
 

@@ -6,7 +6,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { createPtcExecTool } from "@mage-ai-lab/agent-loop/ptc";
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
-import { commerceScript, setDraftSkuPrice, setDraftSkuStock } from "../tools/tiktok-mx-commerce.mjs";
+import {
+  commerceScript, draftSkuEditorMode, locateSkuInput, readDraftSkuCeiling, readDraftSkuNumbers,
+  setDraftSkuPrice, setDraftSkuStock,
+} from "../tools/tiktok-mx-commerce.mjs";
 import {
   attributeCode, matchAttributeValue, readFreshDocument, saveDraftCode, sellerVerification, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
@@ -194,10 +197,21 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     if (!reply?.ok) throw Error(reply?.error || "Draft price editor did not respond");
     return reply.result;
   }
-  async function readAttributeSelections(state, stage) {
+  async function readAttributeSelections(state, stage, expectedValues = null) {
     if (!state.hasCategoryAttributes) return [];
-    const catalog = await runCode(tab, attributeCode(link));
-    if (!Array.isArray(catalog) || !catalog.length) throw Error("Category attribute controls unavailable " + stage);
+    let catalog;
+    const maxAttempts = expectedValues ? 10 : 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      catalog = await runCode(tab, attributeCode(link));
+      if (!Array.isArray(catalog) || !catalog.length) throw Error("Category attribute controls unavailable " + stage);
+      if (!expectedValues) return catalog;
+      const hydrated = catalog.every(field => {
+        const want = expectedValues[field.name];
+        return !Array.isArray(want) || !want.length || field.selected.length >= want.length;
+      });
+      if (hydrated || attempt === maxAttempts - 1) return catalog;
+      await sleep(250);
+    }
     return catalog;
   }
   await fs.mkdir(lock);
@@ -211,7 +225,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       const maxPriceMXN = caps.get(row.label);
       return { ...row, planLabel: row.label, requestedMXN: row.afterMXN, afterMXN: maxPriceMXN ?? row.afterMXN, maxPriceMXN };
     });
-    tab = await group.open(link, [], false);
+    tab = await group.open(link, [], true);
     await group.waitForUrl(tab, link);
     const before = await readFreshDocument(link, inEditor, snapshot);
     if (before.url !== link || before.captcha || before.title !== copy.title)
@@ -219,26 +233,78 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
     const prices = capInventory(bindPrices(before.salesAndShipping, requested), maxTotalStock);
     const changes = prices.filter(row => row.currentMXN !== row.afterMXN || row.stock !== row.afterStock);
     if (changes.length) await inEditor("activate_tab", {});
-    before.attributeCatalog = await readAttributeSelections(before, "before editing");
+    before.attributeCatalog = await readAttributeSelections(before, "before editing", copy.attributePlan?.values);
     let saved = before, signal = null;
     if (changes.length) {
       group.pendingForm = tab;
+      const editorMode = await runCode(tab, verification + commerceScript(draftSkuEditorMode));
+      if (editorMode !== "batch" && editorMode !== "row") throw Error("Unexpected SKU editor");
+      async function commitField(label, field, value) {
+        const selector = await runCode(tab, verification + commerceScript(locateSkuInput, label, field, value, true));
+        if (!selector) return;
+        const typed = await inEditor("trusted_type", { selector, clear: true, value: String(value) });
+        if (!typed?.ok) throw Error("Trusted SKU input failed for " + label);
+        const committed = await inEditor("press_keys", { keys: ["Tab"] });
+        if (!committed?.ok) throw Error("SKU input could not commit for " + label);
+      }
       for (const row of changes) {
         const inventory = row.stock !== row.afterStock ? { before: row.stock, after: row.afterStock } : null;
+        if (editorMode === "row") {
+          const live = await runCode(tab, verification + commerceScript(readDraftSkuNumbers, row.label));
+          if (![row.beforeMXN, row.afterMXN].includes(live.priceMXN))
+            throw Error("SKU price changed before editing " + row.label);
+          let target = row.maxPriceMXN ?? row.requestedMXN;
+          if (multiplier === 100 && live.priceMXN !== target) {
+            const ceiling = await runCode(tab, verification + commerceScript(readDraftSkuCeiling, row.label));
+            if (ceiling !== null && ceiling >= row.beforeMXN && ceiling < row.requestedMXN) {
+              row.maxPriceMXN = validateCap(row, ceiling);
+              caps.set(row.planLabel, row.maxPriceMXN);
+              target = row.maxPriceMXN;
+            } else {
+              row.maxPriceMXN = undefined;
+              caps.delete(row.planLabel);
+              target = row.requestedMXN;
+            }
+          }
+          if (live.priceMXN !== target) await commitField(row.label, "price", target);
+          row.afterMXN = row.maxPriceMXN ?? row.requestedMXN;
+          const priced = await runCode(tab, verification + commerceScript(readDraftSkuNumbers, row.label));
+          if (priced.priceMXN !== row.afterMXN) throw Error("Seller price result differs for " + row.label);
+          if (inventory) {
+            if (priced.stock !== inventory.before && priced.stock !== inventory.after)
+              throw Error("Seller stock result differs for " + row.label);
+            if (priced.stock !== inventory.after) await commitField(row.label, "stock", row.afterStock);
+          }
+          continue;
+        }
         if (row.currentMXN === row.afterMXN) {
           await runCode(tab, verification + commerceScript(setDraftSkuStock, row.label, row.stock, row.afterStock));
           continue;
         }
+        let target = row.requestedMXN, configuredCap = null;
+        if (multiplier === 100) {
+          // The ceiling hint may never render while the price settles. The
+          // price control's own configuration carries the same sale price limit.
+          const ceiling = await runCode(tab, commerceScript(readDraftSkuCeiling, row.label));
+          if (ceiling !== null && ceiling >= row.beforeMXN && ceiling < target) {
+            configuredCap = validateCap(row, ceiling);
+            row.maxPriceMXN = configuredCap;
+            caps.set(row.planLabel, configuredCap);
+            target = configuredCap;
+          }
+        }
         const result = await runCode(tab, verification +
-          commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, row.requestedMXN, multiplier === 100, inventory));
+          commerceScript(setDraftSkuPrice, row.label, row.beforeMXN, target, multiplier === 100, inventory));
         if (!result || result.priceMXN === undefined) throw Error("Seller price adjustment gave no readback for " + row.label);
         if (result.maxPriceMXN !== undefined && multiplier === 100) {
           row.maxPriceMXN = validateCap(row, result.maxPriceMXN);
           caps.set(row.planLabel, row.maxPriceMXN);
         } else {
           if (result.maxPriceMXN !== undefined) throw Error("Unexpected seller price ceiling for " + row.label);
-          row.maxPriceMXN = undefined;
-          caps.delete(row.planLabel);
+          if (configuredCap === null) {
+            row.maxPriceMXN = undefined;
+            caps.delete(row.planLabel);
+          }
         }
         row.afterMXN = row.maxPriceMXN ?? row.requestedMXN;
         if (result.priceMXN !== row.afterMXN) throw Error("Seller price result differs for " + row.label);
@@ -249,7 +315,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
       }
       const staged = await runCode(tab, snapshot);
       if (!verifyPreserved(before, staged, prices, "before saving")) throw Error("Draft prices differ before saving");
-      verifyAttributeSelections(before.attributeCatalog, await readAttributeSelections(staged, "before saving"), "before saving");
+      verifyAttributeSelections(before.attributeCatalog, await readAttributeSelections(staged, "before saving", copy.attributePlan?.values), "before saving");
       if (multiplier === 100) await writeJson(planPath, {
         ...identity, caps: [...caps].map(([label, maxPriceMXN]) => ({ label, maxPriceMXN })),
       });
@@ -263,7 +329,7 @@ export async function runMxDraftReprice({ sourceId, draftId, baselinePricesMXN, 
         if (delay) await sleep(delay);
         saved = await readFreshDocument(link, inEditor, snapshot);
         if (verifyPreserved(before, saved, prices, "after refresh")) {
-          saved.attributeCatalog = await readAttributeSelections(saved, "after refresh");
+          saved.attributeCatalog = await readAttributeSelections(saved, "after refresh", copy.attributePlan?.values);
           break;
         }
       }
