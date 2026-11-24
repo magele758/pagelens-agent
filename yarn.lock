@@ -209,18 +209,18 @@
   resolved "https://registry.npmjs.org/@exodus/bytes/-/bytes-1.16.0.tgz#954c9d9dd7eec15b966b2e8f2d883c04295b720c"
   integrity sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA==
 
-"@mage-ai-lab/agent-loop@0.1.3":
-  version "0.1.3"
-  resolved "https://registry.npmjs.org/@mage-ai-lab/agent-loop/-/agent-loop-0.1.3.tgz#b0e8da07dc17fc745b03bc2548980e17855f9530"
-  integrity sha512-dR37tLHmfI6EnOgmSx0w9et9cJIx2OhAaaWhG4qwzXH3l+jnRTdNVoTBDDcwzZx4ETCvITLIL6OVF12dLgFjWw==
+"@mage-ai-lab/agent-loop@0.2.0":
+  version "0.2.0"
+  resolved "https://registry.npmjs.org/@mage-ai-lab/agent-loop/-/agent-loop-0.2.0.tgz#8032d6c23f2daaccad9d6dcd47143946f0eafe2f"
+  integrity sha512-4jdqGq7wnCnJWTftRvkUH2laeaap7b9rtRiKQ7OInvvB8dVA9/2wY+1xrqREhz4e39hU0o69l969bFFQVQ9KCg==
   dependencies:
-    "@mage-ai-lab/api-types" "0.1.3"
+    "@mage-ai-lab/api-types" "0.2.0"
     jsonrepair "^3.12.0"
 
-"@mage-ai-lab/api-types@0.1.3":
-  version "0.1.3"
-  resolved "https://registry.npmjs.org/@mage-ai-lab/api-types/-/api-types-0.1.3.tgz#93e093659402324dfff93db89c4948829a0cab54"
-  integrity sha512-bDvGVYKNd06AN+wVA8T902mBkqffUEP5V4aozfmT2tvmLE/nZDCC+FDY7MYREmyCUATaq7gBYTu/I59UTOzlvg==
+"@mage-ai-lab/api-types@0.2.0":
+  version "0.2.0"
+  resolved "https://registry.npmjs.org/@mage-ai-lab/api-types/-/api-types-0.2.0.tgz#aeb7058c3d1b707603855569ff2f44b283fba460"
+  integrity sha512-/KgTG2xGcZoLJwDd6imxOuVz2bZqWKkm+vdsw06m5KBE1LphgeA0f3naJlOdGUtbn8GrMsT8I1jSS+JCuaaeYQ==
 
 bidi-js@^1.0.3:
   version "1.1.0"

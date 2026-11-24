@@ -13,7 +13,7 @@
     "test:quick": "node scripts/bundle-agent-loop.mjs && node scripts/run-tests.mjs --quick"
   },
   "dependencies": {
-    "@mage-ai-lab/agent-loop": "0.1.3"
+    "@mage-ai-lab/agent-loop": "0.2.0"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
