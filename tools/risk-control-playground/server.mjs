@@ -2,13 +2,14 @@
 /**
  * Local static server for the PageLens Risk Control Playground.
  * Usage:
- *   node tools/risk-control-playground/server.mjs [--port 4173]
+ *   node tools/risk-control-playground/server.mjs [--port 18473]
  */
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+export const DEFAULT_PORT = 18473;
 const ROOT_DIR = fileURLToPath(new URL('./', import.meta.url));
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -83,20 +84,29 @@ function parsePort(argv) {
   const flagIndex = argv.indexOf('--port');
   if (flagIndex !== -1 && argv[flagIndex + 1]) {
     const n = Number(argv[flagIndex + 1]);
-    if (Number.isInteger(n) && n >= 0 && n <= 65535) return n;
+    if (Number.isInteger(n) && n >= 0 && n <= 65535) return { port: n, explicit: true };
   }
   const envPort = Number(process.env.PORT);
-  if (Number.isInteger(envPort) && envPort >= 0 && envPort <= 65535) return envPort;
-  return 4173;
+  if (Number.isInteger(envPort) && envPort >= 0 && envPort <= 65535) return { port: envPort, explicit: true };
+  return { port: DEFAULT_PORT, explicit: false };
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const port = parsePort(process.argv.slice(2));
+  const { port, explicit } = parsePort(process.argv.slice(2));
   const server = createPlaygroundServer();
-  server.listen(port, '127.0.0.1', () => {
+  const announce = () => {
     const addr = server.address();
     const actualPort = typeof addr === 'object' && addr ? addr.port : port;
     console.log(`Risk Control Playground running at http://127.0.0.1:${actualPort}/`);
+  };
+  server.on('error', err => {
+    if (!explicit && err && err.code === 'EADDRINUSE') {
+      server.listen(0, '127.0.0.1', announce);
+      return;
+    }
+    console.error(err);
+    process.exitCode = 1;
   });
+  server.listen(port, '127.0.0.1', announce);
 }
