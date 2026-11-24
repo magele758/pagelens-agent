@@ -41,6 +41,7 @@ import {
   runJs,
   scrollPage,
 } from "./page-fns.js";
+import { solveRiskControlPlayground } from "./risk-control-solver.js";
 import { actOnRef, scrollContainerOf, scrollViewport, snapshotControls } from "./page-snapshot.js";
 import { cdpAvailable, getCdp } from "../cdp.js";
 import { cdpScreenshot, createCdpTools, withDialogGuard } from "./cdp-tools.js";
@@ -1454,6 +1455,30 @@ export function createAgentTools(ctx) {
         return `已动态挂载工具集：${list.join(", ") || "无"}。请在下一轮继续执行任务。`;
       },
     },
+    {
+      name: "solve_risk_control",
+      description: "自动完成本地 PageLens 风控沙盒（data-rc-playground=pagelens）上的可见挑战与已打开的弹窗。只作用于该测试页，不处理真实网站验证码。",
+      parameters: obj(
+        {
+          tabId: tabIdProp(),
+          mode: {
+            type: "string",
+            enum: ["visible", "full"],
+            description: "visible 只解未通过的内联组件和已打开的弹窗；full 再解算术码、勾选升级滑块，以及每种阻塞弹窗（含 429）",
+          },
+          only: {
+            type: "array",
+            items: { type: "string" },
+            description: "只解这些组件 id 或弹窗 kind；省略则按 mode 全解",
+          },
+        },
+      ),
+      async execute(args) {
+        const tabId = await resolveTabId(ctx, args);
+        await attachTabToTask(ctx, tabId);
+        return toToolText(await injectMain(tabId, solveRiskControlPlayground, [{ mode: args.mode, only: args.only }]));
+      },
+    },
   ];
   if (isJevActive(ctx.settings)) tools.push(...createJevTools());
   const resolveForGuard = (args) => resolveTabId(ctx, args);
@@ -1673,6 +1698,7 @@ export const TOOL_DOMAINS = {
     "upload_file",
     "handle_dialog",
     "run_js",
+    "solve_risk_control",
   ],
   browser_mgmt: [
     "list_task_windows", "read_window_inbox", "send_window_message", "delegate_window_task",
@@ -1814,7 +1840,7 @@ export function resolveActiveTools({
 
   // DOM 页面交互意图
   if (
-    /点击|填写|输入|按键|滚动|选择|登录|提交|按钮|控件|下拉|粘贴|复制|剪贴|悬停|拖|上传|对话框|弹窗|右键|双击|快捷键|组合键|整页|长图|click|fill|submit|input|button|scroll|paste|copy|clipboard|hover|drag|upload|dialog|shortcut/i.test(
+    /点击|填写|输入|按键|滚动|选择|登录|提交|按钮|控件|下拉|粘贴|复制|剪贴|悬停|拖|上传|对话框|弹窗|右键|双击|快捷键|组合键|整页|长图|click|fill|submit|input|button|scroll|paste|copy|clipboard|hover|drag|upload|dialog|shortcut|风控|验证码|拼图|playground/i.test(
       text,
     )
   ) {
