@@ -1,5 +1,6 @@
 import {
   NATIVE_HOST_NAME,
+  chooseNativeProductDirectory,
   describeNativeError,
   execNativeShell,
   formatExecResult,
@@ -72,5 +73,33 @@ chrome.runtime.sendNativeMessage = async () => {
 };
 const miss = await pingNativeHost();
 assert(miss.ok === false && /未安装/.test(miss.error), "ping missing");
+
+let connectionCount = 0;
+let disconnectCount = 0;
+let respond;
+let disconnected;
+chrome.runtime.connectNative = name => {
+  assert(name === NATIVE_HOST_NAME, "connect to PageLens host");
+  connectionCount++;
+  return {
+    onMessage: { addListener: fn => { respond = fn; } },
+    onDisconnect: { addListener: fn => { disconnected = fn; } },
+    postMessage: message => assert(message.op === "chooseProductDirectory" && Object.keys(message).length === 1, "fixed picker request"),
+    disconnect: () => { disconnectCount++; },
+  };
+};
+const selected = chooseNativeProductDirectory();
+assert(selected === chooseNativeProductDirectory(), "keep a single native picker open");
+await new Promise(setImmediate);
+respond({ ok: true, cancelled: true });
+assert((await selected).cancelled && connectionCount === 1 && disconnectCount === 1, "settle and close the picker port");
+
+const missingPicker = chooseNativeProductDirectory();
+await new Promise(setImmediate);
+chrome.runtime.lastError = { message: "Specified native messaging host not found." };
+disconnected();
+const pickerFailure = await missingPicker;
+delete chrome.runtime.lastError;
+assert(pickerFailure.ok === false && /未安装/.test(pickerFailure.error) && connectionCount === 2, "picker can retry and explains installation errors");
 
 console.log("PASS native-host client");

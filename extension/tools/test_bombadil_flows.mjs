@@ -87,8 +87,8 @@ for (const width of [400, 900]) {
     await until(() => product.open, 'open Shopee product listing');
     // Give the first click's asynchronous dispatch the same task boundary as a subsequent browser click.
     await delay(0);
-    assert.equal(document.getElementById('ptc-start').disabled, true, 'fixture is outside Shopee listing');
-    click('ptc-mode-directory');
+    assert.equal(document.getElementById('ptc-batch-start').disabled, true, 'fixture is outside Shopee listing');
+    assert.equal(document.getElementById('ptc-input'), null);
     assert.equal(document.getElementById('ptc-batch-pane').hidden, false);
     click('ptc-back');
     assert.ok(workflow.open);
@@ -98,6 +98,13 @@ for (const width of [400, 900]) {
     assert.equal(document.getElementById('shopee-marketing-title').textContent, '活动数据');
     assert.equal(document.getElementById('shopee-marketing-read').disabled, true, 'fixture is outside Shopee');
     click('shopee-marketing-back');
+    assert.ok(workflow.open);
+    workflow.querySelector('#workflow-platform button[data-platform="shein"]').click();
+    workflowAction('shein-product-listing');
+    await until(() => document.getElementById('shein-listing-dialog').open, 'open SHEIN product listing');
+    await delay(0);
+    assert.equal(document.getElementById('shein-listing-run').disabled, true, 'fixture is outside SHEIN seller site');
+    click('shein-listing-back');
     assert.ok(workflow.open);
     workflow.querySelector('#workflow-platform button[data-platform="tiktok-shop"]').click();
     assert.equal(workflow.querySelector('#workflow-platform [aria-pressed="true"]').dataset.platform, 'tiktok-shop');
@@ -164,7 +171,8 @@ for (const width of [400, 900]) {
     await until(() => !shortcuts.hidden && shortcuts.querySelector('[data-workflow="product-capture"]'), 'Amazon detail shortcut');
     assert.deepEqual([...shortcuts.querySelectorAll('[data-workflow]')].map(button => button.dataset.workflow), ['product-capture']);
     activate(21);
-    await until(() => shortcuts.hidden, 'hide unsupported Temu seller shortcuts');
+    await until(() => shortcuts.querySelector('[data-workflow="temu-product-listing"]'), 'show Temu seller listing shortcut');
+    assert.equal(shortcuts.querySelector('[data-workflow="product-capture"]'), null, 'keep seller and retail entries separate');
     activate(22);
     await until(() => shortcuts.querySelector('[data-workflow="identify-tab"]'), 'show address permission action');
     shortcuts.querySelector('[data-workflow="identify-tab"]').click();

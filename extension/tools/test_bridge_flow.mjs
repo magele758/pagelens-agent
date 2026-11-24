@@ -20,7 +20,7 @@ async function setup({ scopes = ["page:read", "page:act", "upload"], origins = [
     url, modal: null, validation: [], category: input.category, categoryReady: true,
     attributes: [], options: [], optionSearch: null,
     fields: Object.fromEntries(["title", "description", "price", "quantity", "weight"].map((key) => [key, { selector: "#" + key, value: "" }])),
-    image: { count: 0, cover: false, selector: "#cover" },
+    image: { count: 0, cover: false, readyCount: 0, coverReady: false, selector: "#cover" },
     variant: { enable: null, apply: null, options: [], rows: [] },
   };
   const bridge = createBridge({
@@ -53,7 +53,7 @@ async function setup({ scopes = ["page:read", "page:act", "upload"], origins = [
         if (method === "Runtime.callFunctionOn") return { result: { value: true } };
         if (method === "DOM.setFileInputFiles") {
           files.push(...args.files);
-          Object.assign(state.image, { cover: true, count: 1 });
+          Object.assign(state.image, { cover: true, count: 1, readyCount: 1, coverReady: true });
         }
         return {};
       },

@@ -8,7 +8,8 @@ const MAX_CONCURRENT = 2;
 
 export function imagePathsFor(input) {
   const variants = Array.isArray(input?.variant?.options) ? input.variant.options : [input?.variant];
-  return [...new Set([input?.imagePath, ...variants.map((item) => item?.imagePath)]
+  return [...new Set([input?.imagePath, ...(Array.isArray(input?.galleryImages) ? input.galleryImages : []),
+    ...variants.map((item) => item?.imagePath)]
     .filter((path) => typeof path === "string" && path.trim()))];
 }
 
@@ -28,7 +29,7 @@ async function waitForTab(tabs, tabId, flowId, shopId, signal) {
 
 export async function runProductBatch({
   flow, shopId, sourceTab, products, uploadApproved, signal, onJob,
-  prepareInput, completeChart, tabs = chrome.tabs, replay = runFlow, createCall = createPtcToolCaller,
+  prepareInput, completeChart, createAttributeAdvisor, tabs = chrome.tabs, replay = runFlow, createCall = createPtcToolCaller,
 }) {
   const source = await tabs.get(sourceTab.id);
   if (source.id !== sourceTab.id || source.windowId !== sourceTab.windowId ||
@@ -69,6 +70,7 @@ export async function runProductBatch({
         requestedTab === tabId && paths?.length === 1 && approvedPaths.has(paths[0]);
       const call = createCall({
         tabId, url: tab.url, signal, confirmUpload,
+        adviseAttributes: createAttributeAdvisor?.(product, signal),
         completeChart: prepared.sizeChart && uploadApproved && completeChart
           ? requirements => completeChart(product, requirements)
           : undefined,
@@ -79,6 +81,7 @@ export async function runProductBatch({
       receipt = await replay({
         flowId: flow.id, tabId, input: {
           ...prepared, shopId, completeMissingSizeChart: Boolean(prepared.sizeChart && uploadApproved),
+          completeMissingAttributes: Boolean(createAttributeAdvisor),
         }, signal, call,
         onStep: ({ step, tool }) => onJob(index, { phase: "running", step, tool }),
       });

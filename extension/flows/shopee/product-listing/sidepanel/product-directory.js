@@ -1,5 +1,7 @@
 import { loadSettings } from "../../../../lib/storage.js";
+import { requireOptionalFeature } from "../../../../lib/optional-permissions.js";
 import { parseSizeChartImage, resolveSizeChartModel } from "../../../../lib/size-chart.mjs";
+import { createListingAdvisor } from "../../../shared/listing/listing-advisor.js";
 
 const absolute = /^(?:\/|[A-Za-z]:[\\/])/u;
 
@@ -29,6 +31,24 @@ export async function loadProductDirectory(path, { send = readFromHost } = {}) {
     throw new Error("请输入商品目录的绝对路径。");
   }
   const loaded = await send({ op: "fs", action: "loadProductDirectory", path: path.trim() }, { interactive: false });
+  return validateProductDirectory(loaded);
+}
+
+export async function chooseShopeeProductDirectory({
+  authorize = requireOptionalFeature, choose = () => chrome.runtime.sendMessage({ type: "pl.ptc.chooseDirectory" }),
+} = {}) {
+  const denied = await authorize("nativeMessaging", { userGesture: true });
+  if (denied) throw new Error(denied);
+  const selected = await choose();
+  if (selected?.ok === true && selected.cancelled) return null;
+  const loaded = validateProductDirectory(selected);
+  if (typeof selected.directoryName !== "string" || !selected.directoryName.trim()) {
+    throw new Error("本机助手未返回商品目录名称。");
+  }
+  return { ...loaded, directoryName: selected.directoryName };
+}
+
+export function validateProductDirectory(loaded) {
   if (loaded?.ok !== true) throw new Error(loaded?.error || "无法从本机读取商品目录。");
   const { root, products, issues = [] } = loaded;
   if (!isAbsolutePath(root) || !Array.isArray(products) || !Array.isArray(issues)) {
@@ -41,7 +61,8 @@ export async function loadProductDirectory(path, { send = readFromHost } = {}) {
       throw new Error("本机助手返回的商品数据格式无效。");
     }
     const variants = Array.isArray(input.variant?.options) ? input.variant.options : [input.variant];
-    const images = [input.imagePath, ...variants.map((row) => row?.imagePath), input.sizeChartImagePath];
+    const images = [input.imagePath, ...(Array.isArray(input.galleryImages) ? input.galleryImages : []),
+      ...variants.map((row) => row?.imagePath), input.sizeChartImagePath];
     if (images.some((image) => image != null && !withinFolder(image, root, folder))) {
       throw new Error(`「${folder}」的图片超出了此商品目录。`);
     }
@@ -49,7 +70,7 @@ export async function loadProductDirectory(path, { send = readFromHost } = {}) {
   return { root, products, issues };
 }
 
-async function readProductImage({ root, folder, path, asset, signal, send = readChartChunk }) {
+export async function readProductImage({ root, folder, path, asset, signal, send = readChartChunk }) {
   const label = asset === "main" ? "商品主图" : "尺码图";
   if (!isAbsolutePath(root) || typeof folder !== "string" || !folder ||
       /^\.{1,2}$/u.test(folder) || /[/\\\0]/u.test(folder) || !withinFolder(path, root, folder)) {
@@ -80,6 +101,29 @@ async function readProductImage({ root, folder, path, asset, signal, send = read
 
 export function readSizeChartImage(args) {
   return readProductImage({ ...args, asset: "sizeChart" });
+}
+
+export function directoryAttributeAdvice(product, {
+  root, signal, readImage = readProductImage, getSettings = loadSettings, createAdvisor = createListingAdvisor,
+} = {}) {
+  let advisor;
+  async function prepare() {
+    const { folder, input } = product;
+    const settings = await getSettings();
+    const referenceImages = [];
+    if (input.imagePath) {
+      const image = await readImage({ root, folder, path: input.imagePath, asset: "main", signal });
+      const blob = await (await fetch(image, { signal })).blob();
+      referenceImages.push({ role: "main", file: blob });
+    }
+    return createAdvisor({ settings, product: input, referenceImages, signal, categoryPlatform: "Shopee" });
+  }
+  const getAdvisor = () => (advisor ??= prepare());
+  const fields = async list => (await getAdvisor()).fields(list);
+  fields.chooseCategory = async info => (await getAdvisor()).chooseCategory(info);
+  fields.chooseCachedCategory = async info => (await getAdvisor()).chooseCachedCategory(info);
+  fields.categoryKeywords = async info => (await getAdvisor()).categoryKeywords(info);
+  return fields;
 }
 
 export async function completeDirectorySizeChartInput(product, {

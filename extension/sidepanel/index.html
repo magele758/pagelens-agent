@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="settings.css" />
   <link rel="stylesheet" href="workflow-catalog.css" />
   <link rel="stylesheet" href="product-capture.css" />
+  <link rel="stylesheet" href="../flows/shein/product-listing/sidepanel/listing-panel.css" />
+  <link rel="stylesheet" href="temu-listing.css" />
   <link rel="stylesheet" href="../flows/shopee/marketing-panel.css" />
   <link rel="stylesheet" href="../vendor/katex/katex.min.css" />
 </head>
@@ -39,6 +41,8 @@
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
     <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor"/><circle cx="15" cy="17" r="2" fill="currentColor"/></symbol>
     <symbol id="i-audio" viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="12" width="4" height="8" rx="2"/><rect x="17" y="12" width="4" height="8" rx="2"/></symbol>
     <symbol id="i-puzzle" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6m-3-3v6"/></symbol>
@@ -942,6 +946,48 @@
     <ul class="workflow-feature-list" id="workflow-feature-list" aria-label="可执行功能"></ul>
     <p id="workflow-feature-empty" role="status" hidden></p>
     <p id="workflow-catalog-status" role="status"></p>
+  </dialog>
+  <dialog id="shein-listing-dialog" aria-labelledby="shein-listing-title">
+    <header class="shein-listing-heading">
+      <button type="button" id="shein-listing-back" class="icon-btn" aria-label="返回工作流">
+        <svg class="ico" aria-hidden="true"><use href="#i-back"/></svg>
+      </button>
+      <h2 id="shein-listing-title"><img alt="" width="18" height="18" src="../flows/icons/shein.png" />SHEIN 商品上架</h2>
+      <button type="button" id="shein-listing-close" class="icon-btn" aria-label="关闭商品上架">×</button>
+    </header>
+    <p id="shein-listing-target" class="ptc-target" hidden></p>
+    <a id="shein-listing-link" href="https://sellerhub.shein.com/#/spmp/commdities/list" target="_blank" rel="noopener" hidden>打开 SHEIN 商品列表</a>
+    <fieldset id="shein-listing-source" class="shein-listing-source">
+      <legend>商品资料</legend>
+      <button type="button" class="secondary" id="shein-listing-pick">选择商品目录</button>
+      <p id="shein-listing-directory-status" class="shein-listing-hint" hidden></p>
+      <label class="shein-listing-product" id="shein-listing-product-row" hidden>
+        目录中的商品
+        <select id="shein-listing-product"></select>
+      </label>
+      <label class="shein-listing-product" id="shein-listing-default-sku-row" hidden>
+        当前类目仅支持一个 SKU，请选择要填写的 SKU
+        <select id="shein-listing-default-sku"></select>
+      </label>
+      <p class="shein-listing-hint" id="shein-listing-default-sku-upload" hidden>已保留上传选项。继续时会上传所选 SKU 的图片。</p>
+      <label class="shein-listing-product" for="shein-listing-description">
+        商品描述（选填）
+        <textarea id="shein-listing-description" rows="3" maxlength="1800" placeholder="例如，350 毫升白色陶瓷马克杯"></textarea>
+      </label>
+      <label class="shein-listing-upload" id="shein-listing-upload-row" hidden>
+        <input type="checkbox" id="shein-listing-upload" />上传所选商品图片到 SHEIN
+      </label>
+      <label class="shein-listing-upload">
+        <input type="checkbox" id="shein-listing-ai" />允许已配置的 AI 分析商品资料和图片
+      </label>
+    </fieldset>
+    <p id="shein-listing-category" class="shein-listing-category" hidden></p>
+    <div class="shein-listing-actions">
+      <button type="button" class="primary" id="shein-listing-run" disabled>开始上品</button>
+      <button type="button" class="secondary" id="shein-listing-stop" hidden>停止</button>
+    </div>
+    <p id="shein-listing-status" class="ptc-status" role="status" aria-atomic="true"></p>
+    <ul id="shein-listing-results" class="shein-listing-results" aria-label="待处理的问题" hidden></ul>
   </dialog>
   <dialog id="product-capture-dialog" aria-labelledby="product-capture-title">
     <header class="ptc-heading">

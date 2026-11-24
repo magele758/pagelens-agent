@@ -56,7 +56,11 @@ import { applyUiTheme, bindThemeEditor } from "./theme.js";
 import { delegatePanel, trustPanel } from "./trust-runtime.js";
 import { bindWorkflowCatalog } from "./workflow-catalog.js";
 import { bindWorkflowShortcuts } from "./workflow-shortcuts.js";
+import { bindTemuListingPanel } from "./temu-listing-panel.js";
+import { bindTemuSellerOperationsPanel } from "../flows/temu/seller-operations/panel.js";
 import { bindProductCapturePanel } from "./product-capture-panel.js";
+import { bindSheinListingPanel } from "../flows/shein/product-listing/sidepanel/listing-panel.js";
+import { replaySheinListing } from "../flows/shein/product-listing/runtime.js";
 import { bindShopeeMarketingPanel } from "../flows/shopee/marketing-panel.js";
 import { bindPtcFlow } from "../flows/shopee/product-listing/sidepanel/flow-ui.js";
 import { skillCommandText } from "../lib/slash.js";
@@ -205,7 +209,16 @@ function wire() {
     },
   });
   const captureActions = bindProductCapturePanel({ getTargetTab: pickTargetTab, downloadText });
-  const workflowHandlers = { openProductListing, openMarketing, openTiktokDraft, ...captureActions };
+  const temuPanel = { getTargetTab: pickTargetTab, getSettings: () => state.settings, isAgentBusy: () => state.busy, downloadText, onBack };
+  const openTemuListing = bindTemuListingPanel(temuPanel);
+  const openTemuOperations = bindTemuSellerOperationsPanel(temuPanel);
+  const openSheinListing = bindSheinListingPanel({
+    getTargetTab: pickTargetTab,
+    isAgentBusy: () => state.busy,
+    onBack,
+    replay: request => replaySheinListing({ ...request, settings: state.settings }),
+  });
+  const workflowHandlers = { openProductListing, openSheinListing, openMarketing, openTiktokDraft, openTemuListing, openTemuOperations, ...captureActions };
   openCatalog = bindWorkflowCatalog(workflowHandlers);
   bindWorkflowShortcuts({ getTargetTab: pickTargetTab, handlers: workflowHandlers, onTabAccess: refreshTab });
   try {

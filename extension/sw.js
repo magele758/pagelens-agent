@@ -14,7 +14,7 @@ import { AGENT_TASK_EVENTS, onAgentTaskEvent } from "./lib/agent/delegate.js";
 import { installWindowMail } from "./lib/window-mail.js";
 import { installDelegate } from "./lib/agent/delegate-sw.js";
 import { installAgentGateway } from "./lib/bridge/gateway.js";
-import { nativeSend } from "./lib/native-host.js";
+import { chooseNativeProductDirectory, nativeSend } from "./lib/native-host.js";
 
 applyOptionalLocalSettings().catch(() => {});
 installWindowMail(installDelegate());
@@ -61,6 +61,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     manageMxApproval(msg)
       .then(state => sendResponse({ ok: true, state }))
       .catch(error => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
+  if (msg?.type === "pl.ptc.chooseDirectory") {
+    if (_sender?.id !== chrome.runtime.id || _sender?.url !== chrome.runtime.getURL("sidepanel/index.html")) return false;
+    chooseNativeProductDirectory().then(sendResponse, error => sendResponse({ ok: false, error: error.message }));
     return true;
   }
   if (msg?.type === "pl.ptc.readDirectory" || msg?.type === "pl.ptc.readSizeChartChunk") {
