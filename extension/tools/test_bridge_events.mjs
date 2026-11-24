@@ -210,6 +210,7 @@ const { token: readTok, record: reader } = await createTokenRecord({ name: "read
 // ---- leases (unit) ----
 {
   const grouped = [];
+  const ungrouped = [];
   const leases = createTabLeases({
     now: () => 100,
     groups: {
@@ -218,6 +219,7 @@ const { token: readTok, record: reader } = await createTokenRecord({ name: "read
         return groupId ?? 7;
       },
       update: async (groupId, props) => grouped.push(["title", groupId, props.title]),
+      ungroup: async (tabIds) => ungrouped.push(tabIds),
     },
   });
   const A = { sessionId: "A", agentId: "x", agentName: "cursor" };
@@ -235,8 +237,10 @@ const { token: readTok, record: reader } = await createTokenRecord({ name: "read
   assert.deepEqual(grouped, [[[3, 4], null], ["title", 7, "Agent: cursor"], [[5], 7]], "one tab group per session, titled once");
   assert.deepEqual(leases.owned("A"), [1, 3, 4, 5]);
   assert.ok(leases.release(1, "A"));
+  assert.deepEqual(ungrouped, [], "releasing a claim-only tab does not touch unrelated groups");
   leases.dropTab(3);
   assert.deepEqual(leases.releaseSession("A"), [4, 5]);
+  assert.deepEqual(ungrouped, [[4, 5]], "releaseSession dissolves the session's generated tab group");
   assert.equal(leases.size(), 0);
 }
 

@@ -1,10 +1,12 @@
 export function isMxSellerManageReturn(value) {
   if (typeof value !== "string" || !value) return false;
-  const page = new URL(value);
+  let page;
+  try { page = new URL(value); } catch { return false; }
   const tab = page.searchParams.get("tab");
   return page.origin === "https://seller.tiktokshopglobalselling.com" && !page.username && !page.password &&
-    page.pathname === "/product/manage" && page.searchParams.get("shop_region") === "MX" &&
-    (tab === null || tab === "draft");
+    page.searchParams.get("shop_region") === "MX" &&
+    ((page.pathname === "/product/manage" && (tab === null || tab === "draft")) ||
+      page.pathname === "/product/listing");
 }
 
 export function normDraftTitle(value) {
@@ -70,7 +72,7 @@ async function readDraftList(title, draftId, waitForMatch) {
   const started = Date.now();
   let previous = null;
   let stable = 0;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 100; i++) {
     const verification = sellerVerification();
     if (verification) throw Error("Seller verification on draft list: " + verification);
     const text = document.body?.innerText || "";
@@ -91,10 +93,10 @@ async function readDraftList(title, draftId, waitForMatch) {
     previous = signature;
     if (ready && stable >= 1) {
       const matches = selectDraftRows(records, title, draftId);
-      if (!waitForMatch || matches.length || Date.now() - started >= 2000)
+      if (!waitForMatch || matches.length || Date.now() - started >= 400)
         return { matches, ids: records.map(row => draftIdOf(row.text)) };
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error("Draft list not ready or seller login required");
 }

@@ -1,6 +1,6 @@
 import { NATIVE_HOST_NAME } from "../../lib/native-host.js";
 import { isMxSellerManageReturn, runMxDraftJob, runMxDraftRead } from "./tiktok-mx-editor.mjs";
-import { mxManageUrl, mxSellerRequest, mxSellerUrlAllowed } from "./tiktok-mx-seller-request.mjs";
+import { SELLER_LOGIN_ERROR, isSellerLoginUrl, mxManageUrl, mxSellerRequest, mxSellerUrlAllowed } from "./tiktok-mx-seller-request.mjs";
 
 const tools = new Set(["open_tab", "list_tabs", "close_tab", "run_js", "reload_tab", "activate_tab",
   "wait_for", "upload_file", "trusted_type", "press_keys", "navigate_tab"]);
@@ -39,6 +39,13 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
   const repairUrl = draftId && `${seller}/product/edit-draft/${draftId}?shop_region=MX`;
   const allowedDestination = value => repairUrl ? value === repairUrl : allowedDraftUrl(value, sourceId);
   const owned = new Set();
+  async function assertNotSellerLogin() {
+    for (const id of owned) {
+      let u;
+      try { u = await tabUrl(id); } catch { continue; }
+      if (isSellerLoginUrl(u)) throw Error(SELLER_LOGIN_ERROR);
+    }
+  }
   async function dispatch(tool, args) {
     if (!tools.has(tool) || (repairUrl && tool === "upload_file")) throw Error("Unexpected draft tool " + tool);
     if (tool === "navigate_tab" && !allowedDestination(args.url)) throw Error("Unexpected draft destination");
@@ -49,16 +56,26 @@ export function createDraftTransport(sourceId, call, tabUrl, { draftId } = {}) {
     } else if (tool !== "list_tabs" && !owned.has(args.tabId)) throw Error("Tab outside draft task");
     else if (tool !== "list_tabs" && (repairUrl || tool !== "close_tab")) {
       const currentUrl = await tabUrl(args.tabId);
-      const reopening = tool === "navigate_tab" && isMxSellerManageReturn(currentUrl) &&
-        /^\/product\/edit-draft\/\d+$/.test(new URL(args.url).pathname);
-      const cleanup = repairUrl && tool === "close_tab" && isMxSellerManageReturn(currentUrl);
-      if (!reopening && !cleanup && !allowedDestination(currentUrl)) throw Error("Task tab navigated outside draft workflow");
+      if (tool !== "close_tab" && isSellerLoginUrl(currentUrl)) throw Error(SELLER_LOGIN_ERROR);
+      const reopening = isMxSellerManageReturn(currentUrl) &&
+        (tool === "activate_tab" || (tool === "navigate_tab" && /^\/product\/edit-draft\/\d+$/.test(new URL(args.url).pathname)));
+      const cleanup = repairUrl && tool === "close_tab" && (isMxSellerManageReturn(currentUrl) || isSellerLoginUrl(currentUrl));
+      const transientError = !repairUrl && ["activate_tab", "reload_tab", "navigate_tab"].includes(tool) &&
+        (currentUrl === "about:blank" || String(currentUrl || "").startsWith("chrome-error://"));
+      if (!reopening && !cleanup && !transientError && !allowedDestination(currentUrl))
+        throw Error("Task tab navigated outside draft workflow");
     }
-    const reply = await call(tool, args);
+    const effectiveArgs = tool === "open_tab" && (args?.groupTitle != null || args?.groupWithTab != null)
+      ? { ...args, newWindow: true }
+      : args;
+    const reply = await call(tool, effectiveArgs);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") for (const id of [reply.result.tabId, ...(reply.result.backgroundTabIds || [])]) owned.add(id);
-    if (tool === "list_tabs") return { ...reply, result: reply.result.filter(t => owned.has(t.id) &&
-      (!repairUrl || t.url === repairUrl || isMxSellerManageReturn(t.url))) };
+    if (tool === "list_tabs") {
+      await assertNotSellerLogin();
+      return { ...reply, result: reply.result.filter(t => owned.has(t.id) &&
+        (!repairUrl || t.url === repairUrl || isMxSellerManageReturn(t.url))) };
+    }
     if (tool === "close_tab") owned.delete(args.tabId);
     return reply;
   }
@@ -95,18 +112,30 @@ export function createMxSellerTransport(parameters, call, tabUrl) {
         }
         throw error;
       }
-      if (!allowed(currentUrl)) throw Error("Task tab navigated outside the TikTok MX seller scope");
+      if (tool !== "close_tab" && isSellerLoginUrl(currentUrl)) throw Error(SELLER_LOGIN_ERROR);
+      if (!(tool === "close_tab" && isSellerLoginUrl(currentUrl)) && !allowed(currentUrl))
+        throw Error("Task tab navigated outside the TikTok MX seller scope");
       if (delistHover && (currentUrl !== mxManageUrl + "&tab=active" ||
           !/^button\[data-pagelens-mx-delist="[a-f0-9-]{36}"\]$/i.test(args.selector) ||
           Object.keys(args).some(key => !["tabId", "selector"].includes(key))))
         throw Error("Expected the marked product dropdown on the active MX seller list");
       if (tool === "navigate_tab" && !allowed(args.url, true)) throw Error("Unexpected TikTok MX seller destination");
     }
-    const reply = await call(tool, args);
+    const effectiveArgs = tool === "open_tab" && (args?.groupTitle != null || args?.groupWithTab != null)
+      ? { ...args, newWindow: true }
+      : args;
+    const reply = await call(tool, effectiveArgs);
     if (!reply.ok) throw Error(reply.error?.message || JSON.stringify(reply.error));
     if (tool === "open_tab") owned.add(reply.result.tabId);
     if (tool === "close_tab") owned.delete(args.tabId);
-    if (tool === "list_tabs") return reply.result.filter(tab => owned.has(tab.id) && allowed(tab.url));
+    if (tool === "list_tabs") {
+      for (const id of owned) {
+        let u;
+        try { u = await tabUrl(id); } catch { continue; }
+        if (isSellerLoginUrl(u)) throw Error(SELLER_LOGIN_ERROR);
+      }
+      return reply.result.filter(tab => owned.has(tab.id) && allowed(tab.url));
+    }
     return reply.result;
   };
 }
@@ -128,7 +157,21 @@ export async function runNativeDraft(job, bridge) {
   if (sellerAction && job.token != null) throw Error("TikTok MX seller action does not accept a token");
   const opening = sellerAction ? { type: "mx.seller", request: mxSellerRequest(job.request) } : draftOpening(job, action);
   let step = 0;
-  const call = (tool, args) => bridge.call({ id: job.id + "." + ++step, tool, args });
+  let failedMsg = "";
+  const ownedEver = new Set();
+  const ownedWindows = new Set();
+  const call = async (tool, args) => {
+    const reply = await bridge.call({ id: job.id + "." + ++step, tool, args });
+    if (reply?.ok && tool === "open_tab") {
+      for (const id of [reply.result?.tabId, ...(reply.result?.backgroundTabIds || [])]) {
+        if (Number.isInteger(id)) ownedEver.add(id);
+      }
+      if (args?.newWindow === true && args?.groupWithTab == null && Number.isInteger(reply.result?.windowId)) {
+        ownedWindows.add(reply.result.windowId);
+      }
+    }
+    return reply;
+  };
   const tabUrl = async id => { const t = await chrome.tabs.get(id); return t.url || t.pendingUrl; };
   const execute = sellerAction
     ? createMxSellerTransport(opening.request, call, tabUrl)
@@ -138,13 +181,14 @@ export async function runNativeDraft(job, bridge) {
   let timer;
   try {
     return await new Promise((resolve, reject) => {
-      timer = setTimeout(() => reject(Error(task + " timed out; reconcile its receipt before retrying")), 300000);
-      port.onDisconnect.addListener(() => reject(Error(chrome.runtime.lastError?.message ||
+      const fail = err => { failedMsg = String(err?.message || err || ""); reject(err); };
+      timer = setTimeout(() => fail(Error(task + " timed out; reconcile its receipt before retrying")), 300000);
+      port.onDisconnect.addListener(() => fail(Error(chrome.runtime.lastError?.message ||
         (sellerAction ? "TikTok MX seller action host disconnected" : "Draft host disconnected"))));
       port.onMessage.addListener(msg => {
         if (msg.type === "mx.done") {
           if (msg.ok) resolve(msg.result);
-          else reject(Error(msg.error));
+          else fail(Error(msg.error));
         } else if (msg.type === "mx.tool") {
           execute(msg.job).then(result => port.postMessage({ type: "mx.tool_result", seq: msg.seq, ok: true, result }),
             e => port.postMessage({ type: "mx.tool_result", seq: msg.seq, ok: false, error: e.message })).catch(() => {});
@@ -152,5 +196,27 @@ export async function runNativeDraft(job, bridge) {
       });
       port.postMessage(opening);
     });
-  } finally { clearTimeout(timer); port.disconnect(); }
+  } finally {
+    clearTimeout(timer);
+    port.disconnect();
+    if (!/verification|captcha|验证/i.test(failedMsg)) {
+      for (const winId of ownedWindows) {
+        try {
+          const win = await chrome.windows?.get?.(winId, { populate: true });
+          const tabs = win?.tabs || [];
+          const onlyAutomation = tabs.every(t => {
+            const u = String(t.url || t.pendingUrl || "");
+            return ownedEver.has(t.id) || !u || u === "about:blank" || u.startsWith("chrome://newtab");
+          });
+          if (win && onlyAutomation) {
+            const groupedIds = tabs.filter(t => t.groupId != null && t.groupId >= 0).map(t => t.id);
+            if (groupedIds.length && typeof chrome.tabs?.ungroup === "function") {
+              await chrome.tabs.ungroup(groupedIds).catch(() => {});
+            }
+            await chrome.windows.remove(winId).catch(() => {});
+          }
+        } catch {}
+      }
+    }
+  }
 }

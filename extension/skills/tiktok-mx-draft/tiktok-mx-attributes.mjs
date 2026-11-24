@@ -46,7 +46,7 @@ export async function sellerAttributes(expectedUrl, plan = null) {
     const options = () => [...(portal()?.querySelectorAll('[role="option"]') || [])]
       .filter(e => e.getClientRects().length && e.getAttribute("aria-disabled") !== "true");
     const wait = async (ready, error) => {
-      for (let i = 0; i < 20 && !ready(); i++) await pause(100);
+      for (let i = 0; i < 50 && !ready(); i++) await pause(40);
       if (!ready()) throw Error(error + name);
     };
     const waitForClosed = () => wait(() => {
@@ -71,10 +71,13 @@ export async function sellerAttributes(expectedUrl, plan = null) {
         if (matches.length !== 1) throw Error("Attribute option changed: " + name);
         if (matches[0].getAttribute("aria-selected") !== "true") {
           matches[0].click();
-          await pause(150);
+          await pause(60);
         }
       }
       await open();
+      if (!plan && box()?.classList.contains("core-select-multiple") && box()?.querySelector(".core-tag")) {
+        for (let i = 0; i < 12 && !options().some(e => e.getAttribute("aria-selected") === "true"); i++) await pause(50);
+      }
       const choices = options();
       result.push({ name, multiple: box().classList.contains("core-select-multiple"), options: choices.map(e => e.innerText.trim()),
         selected: choices.filter(e => e.getAttribute("aria-selected") === "true").map(e => e.innerText.trim()) });

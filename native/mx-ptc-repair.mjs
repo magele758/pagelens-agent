@@ -7,7 +7,7 @@ import { repairDraftRequest } from "../extension/skills/tiktok-mx-draft/tiktok-m
 import { DraftTabs } from "../tools/tiktok-mx-tabs.mjs";
 import {
   attributeCode, matchAttributeValue, readFreshDocument, repairCategoryOptionsCode,
-  repairCategorySearchCode, saveDraftCode, sellerVerification, snapshotCode,
+  repairCategorySearchCode, saveDraftCode, sellerVerification, shopAllowedCategoriesCode, snapshotCode,
 } from "../tools/tiktok-mx-editor.mjs";
 import { chooseAttributes, chooseCategory } from "../tools/tiktok-mx-ptc.mjs";
 import { registeredListing } from "./mx-ptc-inspect.mjs";
@@ -110,15 +110,31 @@ export async function repairHostedDraft(parameters, request, planners = {}) {
       if (!terms.length) throw Error("A category search term is required");
       const paths = new Map();
       async function search(term) {
-        const { selector } = await browser(repairCategorySearchCode(link));
-        const reply = await inEditor("trusted_type", { selector, value: term, clear: true });
-        if (!reply?.ok) throw Error(reply?.error || "Seller category search failed");
-        return (await browser("await new Promise(resolve=>setTimeout(resolve,250));\n" + repairCategoryOptionsCode(link))).choices;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await browser(repairCategorySearchCode(link));
+          const reply = await inEditor("trusted_type", { value: term });
+          if (!reply?.ok) throw Error(reply?.error || "Seller category search failed");
+          try {
+            return (await browser("await new Promise(resolve=>setTimeout(resolve,100));\n" + repairCategoryOptionsCode(link))).choices;
+          } catch (error) {
+            if (attempt === 1 || !/Search the current draft category before reading choices/.test(error.message)) throw error;
+          }
+        }
       }
       for (const term of terms)
         for (const label of await search(term)) if (!paths.has(label)) paths.set(label, term);
       candidates = [...paths.keys()];
-      const { choice } = await (planners.chooseCategory ?? chooseCategory)(source, candidates);
+      let flexible = false;
+      if (!candidates.length) {
+        const scope = await browser(shopAllowedCategoriesCode(link)).catch(() => ({ leaves: [] }));
+        for (const label of scope?.leaves || []) {
+          const leafTerm = label.split(/\s+[>/-]\s+/).at(-1);
+          paths.set(label, leafTerm);
+        }
+        candidates = [...paths.keys()];
+        flexible = Boolean(candidates.length);
+      }
+      const { choice } = await (planners.chooseCategory ?? chooseCategory)(source, candidates, undefined, { flexibleScope: flexible });
       const term = paths.get(choice.label);
       if (!term) throw Error("PTC selected a category outside the enabled seller results");
       expectedCategory = choice.label;
