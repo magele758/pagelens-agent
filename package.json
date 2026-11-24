@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "bundle:agent-loop": "node scripts/bundle-agent-loop.mjs",
+    "playground:risk-control": "node tools/risk-control-playground/server.mjs",
     "test": "node scripts/bundle-agent-loop.mjs && node scripts/run-tests.mjs",
     "test:bombadil:smoke": "node scripts/bundle-agent-loop.mjs && node scripts/run-tests.mjs test_settings_navigation test_bombadil_flows",
     "test:bombadil": "node scripts/bombadil/run.mjs",

@@ -1,40 +1,6 @@
 import { draftTitleOf, normDraftTitle, sellerVerification } from "../tools/tiktok-mx-editor.mjs";
+import { sellerProductRows } from "../extension/skills/tiktok-mx-draft/seller-product-list.mjs";
 import { mxManageUrl } from "../extension/skills/tiktok-mx-draft/tiktok-mx-seller-request.mjs";
-
-// Identify a product using its ID in the product column and the state in the
-// separate status column. A matching title or SKU is insufficient.
-function sellerProductRow(productId) {
-  const text = element => element?.innerText?.trim() || "";
-  const visible = element => Boolean(element?.getClientRects().length);
-  const byText = (parent, selector, label) => [...parent.querySelectorAll(selector)]
-    .filter(element => visible(element) && text(element) === label);
-  const statusLabels = {
-    "在售": "active", "审核中": "under_review", "已下架": "inactive", "草稿": "draft",
-    "已删除": "deleted", "需要关注": "attention", "审核未通过": "attention",
-  };
-  const tables = [...document.querySelectorAll("table,[role=table]")].filter(visible);
-  const records = [];
-  for (const table of tables) {
-    const headers = [...table.querySelectorAll("th,[role=columnheader]")];
-    const productColumn = headers.findIndex(header => text(header) === "商品");
-    const statusColumn = headers.findIndex(header => text(header) === "状态");
-    if (productColumn < 0 || statusColumn < 0) continue;
-    for (const row of table.querySelectorAll("tbody tr,[role=row]")) {
-      if (!visible(row)) continue;
-      const cells = [...row.querySelectorAll("td,[role=cell]")];
-      const product = text(cells[productColumn]);
-      const matches = [...product.matchAll(/^(?:(?:商品|产品)\s*)?ID\s*[:：]\s*(\d{12,22})\s*$/gim)];
-      if (matches.length !== 1 || matches[0][1] !== productId) continue;
-      const phrase = text(cells[statusColumn]);
-      const label = Object.keys(statusLabels).find(value => phrase === value || phrase.startsWith(value + "\n") || phrase.startsWith(value + " "));
-      records.push({ row, product, productId, status: statusLabels[label] || "unrecognized", statusLabel: phrase,
-        directDelist: byText(row, 'button,[role=button]', "下架"),
-      });
-    }
-  }
-  if (records.length > 1) throw Error("More than one visible seller row has this exact product ID");
-  return records[0];
-}
 
 function describeSellerProduct({ row, product, productId, status, statusLabel }) {
   const editButtons = [...row.querySelectorAll("button:has(svg.arco-icon-edit)")].filter(button =>
@@ -64,7 +30,7 @@ async function runDelistAction(address, productId, operation, marker) {
   const modalSelector = 'div[role="dialog"][' + confirmationAttribute + '="' + marker + '"]';
   const guard = () => {
     if (location.href !== address || sellerVerification()) throw Error("Seller active list changed or verification is required");
-    const row = sellerProductRow(productId);
+    const row = sellerProductRows(productId).match;
     if (!row || row.status !== "active") throw Error("Could not verify the exact product as active");
     return row;
   };
@@ -145,7 +111,7 @@ export function sellerListCode(url, productId, operation = "read", marker) {
   if (["prepare_delist", "click_delist", "confirm_delist"].includes(operation)) {
     if (url !== mxManageUrl + "&tab=active" || typeof marker !== "string" || !/^[a-f0-9-]{36}$/i.test(marker))
       throw Error("Expected the active MX seller list and a delist marker");
-    const helpers = [sellerVerification, sellerProductRow].map(fn => fn.toString()).join("\n");
+    const helpers = [sellerVerification, sellerProductRows].map(fn => fn.toString()).join("\n");
     return helpers + "\nreturn await (" + runDelistAction.toString() + ")(" +
       [url, productId, operation, marker].map(value => JSON.stringify(value)).join(",") + ");";
   }
@@ -160,7 +126,7 @@ export function sellerListCode(url, productId, operation = "read", marker) {
       const busy = [...document.querySelectorAll('[aria-busy=true],[role=progressbar]')].some(node => node.getClientRects().length);
       const loaded = !busy && content.includes("商品管理") &&
         (content.includes("暂无商品") || document.querySelector("tbody tr,[role=row] [role=cell]"));
-      const row = loaded ? sellerProductRow(id) : null;
+      const row = loaded ? sellerProductRows(id).match : null;
       const current = row?.statusLabel || (loaded ? "absent" : null);
       if (current && current === previous) {
         if (!row) return { productId: id, status: "not_found", url: address };
@@ -185,7 +151,7 @@ export function sellerListCode(url, productId, operation = "read", marker) {
     }
     throw Error("Seller product management did not finish loading");
   };
-  const helpers = [normDraftTitle, draftTitleOf, sellerVerification, sellerProductRow, describeSellerProduct]
+  const helpers = [normDraftTitle, draftTitleOf, sellerVerification, sellerProductRows, describeSellerProduct]
     .map(fn => fn.toString()).join("\n");
   return helpers + "\nreturn await (" + run.toString() + ")(" +
     [url, productId, operation].map(x => JSON.stringify(x)).join(",") + ");";
@@ -205,22 +171,67 @@ export function editorSubmitCode(url, labels) {
     if (controls.length !== 1 || controls[0].disabled || controls[0].getAttribute("aria-disabled") === "true")
       throw Error("Seller submit control is missing, disabled or ambiguous");
     const previous = new Set(feedback().map(normalize));
+    const hadSuccess = /商品提交成功|更新成功|发布成功/.test(document.body?.innerText || "");
     controls[0].click();
-    for (let attempt = 0; attempt < 24; attempt++) {
+    for (let attempt = 0; attempt < 45; attempt++) {
       if (sellerVerification()) return { verificationRequired: true };
       const dialog = dialogs().map(normalize).join(" ").slice(0, 350);
       if (dialog) return { dialog };
       const messages = feedback().map(normalize).filter(message => message && !previous.has(message));
-      if (messages.length || location.href !== address) {
-        const productLinks = feedback().filter(element => /提交成功|发布成功/.test(normalize(element)))
+      const pageSuccess = !hadSuccess && /商品提交成功|更新成功|发布成功/.test(document.body?.innerText || "");
+      if (messages.length || location.href !== address || pageSuccess) {
+        const productLinks = [...feedback().filter(element => /提交成功|发布成功/.test(normalize(element))),
+          ...(pageSuccess ? [document.body] : [])]
           .flatMap(element => [...element.querySelectorAll("a[href]")])
           .map(link => link.href);
-        return { messages, url: location.href, productLinks };
+        return { messages: messages.length ? messages : (pageSuccess ? ["商品提交成功"] : []), url: location.href, productLinks };
       }
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
     return { messages: [], url: location.href };
   };
   return sellerVerification.toString() + "\nreturn await (" + run.toString() + ")(" +
     JSON.stringify(url) + "," + JSON.stringify(labels) + ");";
+}
+
+// A seller advisory dialog (for example the at-least-5-images suggestion)
+// offers 返回编辑 / 提交. Confirm the advisory once so the submission
+// proceeds; every other dialog shape stays unresolved for the caller.
+export function editorAdvisoryConfirmCode(url) {
+  const run = async address => {
+    const visible = el => Boolean(el?.getClientRects().length);
+    const normalize = el => (el.innerText || el.textContent).trim().replace(/\s+/g, " ");
+    const enabled = el => !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    const dialogs = () => [...document.querySelectorAll('[role="dialog"],[aria-modal=true]')].filter(visible);
+    const feedback = () => [...document.querySelectorAll('[class*=message-content],[role=alert]')].filter(visible);
+    if (location.href !== address || sellerVerification()) throw Error("Seller editor changed or verification is required");
+    const open = dialogs();
+    if (open.length !== 1) throw Error("Expected exactly one seller dialog to confirm");
+    const text = normalize(open[0]);
+    const controls = [...open[0].querySelectorAll("button")].filter(visible)
+      .map(element => ({ element, label: normalize(element) })).filter(({ label }) => label);
+    const labels = controls.map(({ label }) => label);
+    const back = labels.includes("返回编辑");
+    const submit = controls.find(({ label }) => label === "提交")?.element;
+    if (!/建议/.test(text) || labels.length !== 2 || !back || !submit || !enabled(submit))
+      throw Error("The seller dialog is not a confirmable advisory");
+    const previous = new Set(feedback().map(normalize));
+    submit.click();
+    for (let attempt = 0; attempt < 24; attempt++) {
+      if (sellerVerification()) return { verificationRequired: true, advisoryConfirmed: true };
+      const dialog = dialogs().map(normalize).join(" ").slice(0, 350);
+      if (dialog && dialog !== text) return { dialog, advisoryConfirmed: true };
+      const messages = feedback().map(normalize).filter(message => message && !previous.has(message));
+      if (messages.length || location.href !== address) {
+        const productLinks = feedback().filter(element => /提交成功|发布成功/.test(normalize(element)))
+          .flatMap(element => [...element.querySelectorAll("a[href]")])
+          .map(link => link.href);
+        return { messages, url: location.href, productLinks, advisoryConfirmed: true };
+      }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    return { messages: [], url: location.href, advisoryConfirmed: true };
+  };
+  return sellerVerification.toString() + "\nreturn await (" + run.toString() + ")(" +
+    JSON.stringify(url) + ");";
 }
