@@ -1,11 +1,11 @@
-import { chooseTemuProductDirectory, createTemuSuggestionFilter, normalizeTemuListingInput, suggestTemuFields } from "../flows/temu/product-listing/input.js";
+import { chooseTemuProductDirectory, createTemuSuggestionFilter, loadTemuProductDirectory, normalizeTemuListingInput, suggestTemuFields } from "../flows/temu/product-listing/input.js";
 import { replayTemuListing } from "../flows/temu/product-listing/listing.flow.mjs";
 import { isTemuCategoryPage } from "../flows/temu/product-listing/stage1.js";
 import { createTemuListingToolCaller } from "../flows/temu/product-listing/tool-adapter.js";
 import { loadTemuCategoryChildren, loadTemuOrigins, resolveTemuOrigin, searchTemuCategories } from "../flows/temu/product-listing/taxonomy.js";
 import { suggestTemuCategory } from "../flows/temu/product-listing/category-suggestion.js";
 import { openTemuWorkflowTab } from "../flows/temu/workflow-tab.js";
-import { requireHostUrl } from "../lib/optional-permissions.js";
+import { requireHostUrl, requireOptionalFeature } from "../lib/optional-permissions.js";
 import { bindTemuListingSelect } from "./temu-listing-select.js";
 import { prepareSizeChartInput, readProductImage } from "../flows/shopee/product-listing/sidepanel/product-directory.js";
 import { suggestTemuSizeChart } from "../flows/temu/product-listing/size-chart-suggestion.js";
@@ -39,7 +39,7 @@ function field(id, label, { search, trail = false, hidden = false } = {}) {
 
 export function bindTemuListingPanel({
   getTargetTab, getSettings, isAgentBusy, onBack,
-  chooseDirectory = chooseTemuProductDirectory, suggestCategory = suggestTemuCategory,
+  chooseDirectory = chooseTemuProductDirectory, readDirectory = loadTemuProductDirectory, suggestCategory = suggestTemuCategory,
   fetchImpl = fetch, openTab = openTemuWorkflowTab, replay = replayTemuListing,
 }) {
   const dialog = document.createElement("dialog");
@@ -59,6 +59,13 @@ export function bindTemuListingPanel({
             ${icon("folder")}<span>选择商品目录</span>
           </button>
           <p id="temu-directory-summary" class="temu-hint" role="status">可选单个商品目录或包含多个商品的文件夹。</p>
+          <details class="temu-directory-fallback">
+            <summary>目录选择器不可用时</summary>
+            <div>
+              <input id="temu-directory-path" aria-label="本地商品目录" placeholder="粘贴本地商品目录路径" />
+              <button class="temu-listing-action" type="button" data-action="read-directory">读取目录</button>
+            </div>
+          </details>
         </div>
         ${field("product-item", "目录中的商品", { search: "搜索商品", hidden: true })}
         ${field("listing-site", "经营站点", { search: "搜索站点" })}
@@ -76,6 +83,7 @@ export function bindTemuListingPanel({
         <label class="temu-listing-check"><input id="temu-listing-ai" type="checkbox" />允许将商品资料和图片发送给已配置的模型，用于匹配类目和补齐表单</label>
       </fieldset>
       <div id="temu-listing-message" role="status" aria-live="polite"></div>
+      <p id="temu-listing-result-detail" class="temu-hint" hidden></p>
       <ul id="temu-listing-issues"></ul>
     </div>
     <footer class="temu-listing-footer">
@@ -87,6 +95,7 @@ export function bindTemuListingPanel({
   const find = id => dialog.querySelector(`#temu-${id}`);
   const action = name => dialog.querySelector(`[data-action="${name}"]`);
   const message = find("listing-message");
+  const resultDetail = find("listing-result-detail");
   const issues = find("listing-issues");
   const source = dialog.querySelector("fieldset");
   const directorySummary = find("directory-summary");
@@ -344,21 +353,23 @@ export function bindTemuListingPanel({
     void recommend();
   }
 
-  action("choose").addEventListener("click", async () => {
+  async function loadDirectory(read) {
     if (directoryRequest || run) return;
     const pending = { open: true };
     directoryRequest = pending;
     action("choose").disabled = true;
+    action("read-directory").disabled = true;
     action("run").disabled = true;
-    action("choose").querySelector("span").textContent = "正在选择目录…";
+    tell("正在读取商品目录…");
     try {
-      const result = await chooseDirectory();
+      const result = await read();
       if (!result || !pending.open || !dialog.open) return;
       products = result.products;
       directoryRoot = result.root;
       productIndex = 0;
       find("product-item").hidden = products.length < 2;
-      directorySummary.textContent = products.length === 1 ? products[0].title : `${result.directoryName} · ${products.length} 件商品`;
+      const name = result.directoryName || result.root?.split(/[/\\]/u).filter(Boolean).at(-1) || "本地目录";
+      directorySummary.textContent = products.length === 1 ? products[0].title : `${name} · ${products.length} 件商品`;
       upload.checked = false;
       issues.replaceChildren();
       if (products.length) {
@@ -379,9 +390,22 @@ export function bindTemuListingPanel({
     } finally {
       directoryRequest = undefined;
       action("choose").disabled = false;
+      action("read-directory").disabled = false;
       syncRunButton();
       action("choose").querySelector("span").textContent = products.length ? "更换商品目录" : "选择商品目录";
+      if (message.textContent === "正在读取商品目录…") tell("");
     }
+  }
+
+  action("choose").addEventListener("click", () => void loadDirectory(chooseDirectory));
+  action("read-directory").addEventListener("click", () => {
+    const path = find("directory-path").value.trim();
+    if (!path) return tell("请输入商品目录的绝对路径。", true);
+    void loadDirectory(async () => {
+      const denied = await requireOptionalFeature("nativeMessaging", { userGesture: true });
+      if (denied) throw new Error(denied);
+      return readDirectory(path);
+    });
   });
 
   notes.addEventListener("input", () => {
@@ -406,6 +430,7 @@ export function bindTemuListingPanel({
     source.disabled = action("run").disabled = true;
     action("stop").hidden = false;
     issues.replaceChildren();
+    resultDetail.hidden = true;
     try {
       const input = sourceInput();
       if (!chosenCategory) throw new Error("请选择完整的商品类目。");
@@ -460,6 +485,11 @@ export function bindTemuListingPanel({
       });
       tell(result.status === "cancelled" ? "上品已停止。" : result.status === "needs-review"
         ? "请处理下方待核对事项。" : "商品资料已填写，请在 Temu 核对并发布。", result.status === "needs-review");
+      const schemaHint = { cold: "已读取类目表单", warm: "已复用类目表单缓存", changed: "已更新类目表单缓存" }[result.schemaCache?.status];
+      const details = [schemaHint, result.sizeChart &&
+        `${result.sizeChart.created ? "已创建并关联" : "已关联"}尺码表「${result.sizeChart.name}」`].filter(Boolean);
+      resultDetail.textContent = details.join(" · ");
+      resultDetail.hidden = details.length === 0;
       renderIssues([...result.issues.map(({ label, message }) => `${label}：${message}`), ...result.missing.map(({ label }) => `待填：${label}`)]);
     } catch (error) {
       tell(signal.aborted ? "上品已停止。" : error.message || "暂时无法完成 Temu 上品。", !signal.aborted);

@@ -77,6 +77,20 @@
 .temu-listing-dialog [hidden] { display: none; }
 
 .temu-directory-button { width: 100%; justify-content: flex-start; background: var(--bg); }
+.temu-directory-fallback { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.temu-directory-fallback summary { cursor: pointer; }
+.temu-directory-fallback > div { display: flex; gap: 6px; margin-top: 6px; }
+.temu-directory-fallback input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
+.temu-directory-fallback button { flex: none; }
 .temu-hint { margin: 4px 0 0; color: var(--muted); font-size: .9em; overflow-wrap: anywhere; }
 .temu-hint:empty { display: none; }
 .temu-select-trigger {

@@ -15,6 +15,8 @@ const standardColors = new Map([
 const standardColor = label => standardColors.get(keyOf(label.replace(/^[a-z]\s+-\s+/iu, "")));
 const stockMembers = new Set(["stock", "quantity"]);
 const categoryAttribute = /^productProperties\[\d+\]$/u;
+const repairableKinds = new Set(["select", "text", "checkbox", "radio"]);
+const changedOption = new Set(["OPTION_MISSING", "OPTION_AMBIGUOUS"]);
 const validationOf = state => Array.isArray(state.validation) ? state.validation :
   (state.issues || []).map(message => ({ message }));
 
@@ -35,6 +37,8 @@ function recoveryValue(field, raw) {
 
 function verifiesRecovery(field, wanted, actual) {
   if (!hasValue(actual)) return false;
+  if (field.kind === "text" && field.skuMember && !/skuCode|\.url$/u.test(field.skuMember) &&
+      Number.isFinite(Number(wanted)) && Number.isFinite(Number(actual))) return Number(wanted) === Number(actual);
   const observed = (Array.isArray(actual) ? actual : [actual]).map(keyOf);
   const expected = Array.isArray(wanted) ? wanted : [wanted];
   const unmatched = new Set(observed);
@@ -104,6 +108,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   const items = [];
   const issues = [];
   const attempted = new Set();
+  const repairedValues = new Map();
   const colorLabels = new Map();
   const popupStock = new Set();
   let step = "validate";
@@ -112,6 +117,8 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   let verificationComplete = false;
   let verifiedSkuCount;
   let lastState;
+  let schemaCache;
+  let sizeChartReceipt;
   let apparelHandledSizeChart = false;
   const run = (tool, args) => {
     signal?.throwIfAborted();
@@ -127,7 +134,8 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   });
   const result = (status, code) => ({
     status, step, ...(code && { code }), ...(draftUrl && { draftUrl }), items, issues, missing, verificationComplete, verifiedSkuCount,
-    elapsedMs: Date.now() - start, fieldCount: lastState?.fields.length || 0,
+    elapsedMs: Date.now() - start, fieldCount: lastState?.fields.length || 0, ...(schemaCache && { schemaCache }),
+    ...(sizeChartReceipt && { sizeChart: sizeChartReceipt }),
   });
   const stop = (label, failure) => {
     const problem = asIssue(label, failure);
@@ -165,7 +173,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const hints = requested.map(item => (field.options || []).find(option => keyOf(option.value) === keyOf(item)));
     const args = { value, ...(hints.length === 1 && hints[0]?.label && { query: hints[0].label }) };
     let outcome = field.locator ? await select(args) : await run("temu_write", { key: field.key, value });
-    if (!recovery && field.locator && outcome?.code === "OPTION_MISSING" && !outcome.changed) {
+    if (!recovery && field.locator && changedOption.has(outcome?.code) && !outcome.changed) {
       const current = await run("temu_field_options", { key: field.key, forceLive: true });
       if (!current?.ok && fatal.has(current?.code)) outcome = current;
       if (current?.ok) {
@@ -249,8 +257,14 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
   }
   async function applySizeChart(sizes) {
     const label = "尺码表模板";
+    const attach = async (kind, value) => {
+      const outcome = await run("temu_apparel", { kind, value });
+      record(label, outcome);
+      if (outcome?.ok && outcome.name) sizeChartReceipt = { name: outcome.name, created: Boolean(outcome.created) };
+      return outcome;
+    };
     if (input.sizeChartTemplate) {
-      record(label, await run("temu_apparel", { kind: "select-size-chart", value: input.sizeChartTemplate }));
+      await attach("select-size-chart", input.sizeChartTemplate);
       return;
     }
     let sizeChart = input.sizeChart;
@@ -270,8 +284,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
         const suggested = await suggestSizeChart({ ...input, sizeChart, sizes }, { sizes, signal });
         if (!suggested?.ok) { record(label, suggested); return; }
         const chart = suggested.chart;
-        const outcome = await run("temu_apparel", { kind: "create-size-chart", value: chart });
-        record(label, outcome);
+        const outcome = await attach("create-size-chart", chart);
         if (outcome?.ok && suggested.estimatedCells?.length) {
           issues.push(asIssue(label, { code: "SIZE_CHART_ESTIMATED",
             message: `有 ${suggested.estimatedCells.length} 个尺码单元格使用 AI 参考值，请核对后再创建商品。` }));
@@ -301,7 +314,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     const prepared = prepareTemuSizeChart({ ...input, sizes, sizeChart });
     if (!prepared.ok) { record(label, prepared); return; }
     report("size-chart", "添加并核对商品尺码表");
-    record(label, await run("temu_apparel", { kind: "create-size-chart", value: prepared.chart }));
+    await attach("create-size-chart", prepared.chart);
   }
   async function applyService(fields) {
     for (const field of fields.filter(isTemuServiceField)) {
@@ -450,20 +463,25 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     return undefined;
   }
 
-  async function recoverAttributes(state) {
+  async function recoverFields(state, round) {
     const invalid = new Set(validationOf(state).filter(issue => issue.key && issue.kind !== "upload").map(issue => issue.key));
+    const failed = new Set(issues.flatMap(issue => issue.key ? [issue.key] : []));
     const canSuggest = shouldSuggestField ?? createTemuSuggestionFilter(input);
-    const candidates = state.fields.filter(field => categoryAttribute.test(field.key) && !field.skuMember &&
-      ["select", "text", "checkbox", "radio"].includes(field.kind) && !isTemuServiceField(field) &&
-      state.fields.filter(other => other.key === field.key).length === 1 &&
-      (invalid.has(field.key) || field.required && !hasValue(field.value)) &&
-      (hasValue(explicitValue(field)) ||
-        typeof suggestFields === "function" && canSuggest(field))).slice(0, 10);
+    const keyCounts = new Map();
+    for (const { key } of state.fields) keyCounts.set(key, (keyCounts.get(key) || 0) + 1);
+    const candidates = state.fields.flatMap(field => {
+      if (!repairableKinds.has(field.kind) || keyCounts.get(field.key) !== 1 || isTemuServiceField(field) ||
+          field.key === "productOriginCode" || !invalid.has(field.key) &&
+          (hasValue(field.value) || !field.required && !failed.has(field.key))) return [];
+      const direct = explicitValue(field);
+      const maySuggest = !field.skuMember && categoryAttribute.test(field.key) && typeof suggestFields === "function" && canSuggest(field);
+      return hasValue(direct) || maySuggest ? [{ field, direct, maySuggest }] : [];
+    }).slice(0, 30);
     if (!candidates.length) return state;
-    report("repair", "补齐 Temu 当前类目遗漏的属性");
+    report("repair", `第 ${round} 轮复核并补填 Temu 表单`);
     const pending = [];
     const plan = [];
-    for (const field of candidates) {
+    for (const { field, direct, maySuggest } of candidates) {
       let live = { ...field, options: field.options || [] };
       if (field.locator) {
         const observed = await run("temu_field_options", { key: field.key, forceLive: true });
@@ -473,10 +491,13 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
         }
         live = { ...live, options: observed.options || [] };
       }
-      const direct = explicitValue(field);
       const value = recoveryValue(live, direct);
       if (hasValue(value)) plan.push({ field: live, value });
-      else if (!hasValue(direct) && typeof suggestFields === "function") {
+      else if (hasValue(direct) && field.locator) {
+        // The live control may know a safe alias or exact combined option that
+        // the generic type check cannot resolve (for example, a two-season label).
+        plan.push({ field: live, value: direct });
+      } else if (maySuggest) {
         pending.push({ ...live, required: true, value: "" });
       }
     }
@@ -492,12 +513,20 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
         issues.push(asIssue("类目资料补齐", { code: "SUGGEST_FAILED", message: error?.message }));
       }
     }
-    if (!plan.length) return state;
-
     const successful = [];
+    let wrote = false;
     for (const { field, value } of plan) {
-      if ((await applyField(field, value, { recovery: true }))?.ok) successful.push({ field, value, receipt: items.at(-1) });
+      const signature = JSON.stringify([value, field.value]);
+      if (repairedValues.get(field.key) === signature ||
+          repairedValues.has(field.key) && verifiesRecovery(field, value, field.value)) continue;
+      const outcome = await applyField(field, value, { recovery: true });
+      wrote = true;
+      if (outcome?.ok) {
+        repairedValues.set(field.key, signature);
+        successful.push({ field, value, receipt: items.at(-1) });
+      }
     }
+    if (!wrote) return state;
     const after = await readEditor();
     if (!after?.ok) return after;
     const remaining = new Set(validationOf(after).map(issue => issue.key));
@@ -529,7 +558,8 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     }
 
     report("category", "选择经营站点和商品分类");
-    const moved = await run("temu_category", { site: sites[0], categoryPath: input.categoryPath });
+    const moved = await run("temu_category", { site: sites[0], categoryPath: input.categoryPath,
+      ...(input.categoryId && { categoryId: input.categoryId }) });
     if (!moved?.ok) return stop("经营站点与商品分类", moved);
     draftUrl = moved.href;
     record("经营站点与商品分类", moved);
@@ -546,6 +576,7 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       }
     }
     if (!first?.ok) return stop("商品表单", first);
+    schemaCache = first.schemaCache;
     const country = input.origin?.country || (typeof input.origin === "string" ? input.origin.trim() : "");
     if (country) {
       const countryNames = /^(CN|中国|China|中国大陆)$/iu.test(country) ? [country, "中国", "中国大陆", "China", "中国（大陆）"] : [country];
@@ -688,8 +719,12 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
     report("verify", "复核试填表单");
     let final = await readEditor();
     if (!final?.ok) return stop("试填回读", final);
-    final = await recoverAttributes(final);
-    if (!final?.ok) return stop("试填回读", final);
+    for (let round = 2; round <= 3; round++) {
+      const verified = await recoverFields(final, round);
+      if (!verified?.ok) return stop("试填回读", verified);
+      if (verified === final) break;
+      final = verified;
+    }
     if (step !== "verify") report("verify", "复核试填表单");
     const skuFields = final.fields.filter(field => field.skuMember && field.skuGroup);
     const matched = matchedSkuGroups(final, sources, colorLabels);

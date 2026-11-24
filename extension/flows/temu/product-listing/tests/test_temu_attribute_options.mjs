@@ -290,6 +290,104 @@ test("keeps similar bilingual fiber rows distinct and accepts an exact rendered 
   assert.deepEqual(selected, [first.dataset.value, second.dataset.value]);
 });
 
+test("requires a live combined option for a pair of seasons and never uses a generic short sleeve for a cap sleeve", async t => {
+  const href = "https://agentseller.temu.com/goods/edit?productDraftId=exact-style";
+  const dom = new JSDOM(`<main id="page_container_id">
+    <div id="productProperties[51]"><label>季节Season</label>
+      <div class="ST_outerWrapper_test"><div class="ST_head_test"><input aria-controls="seasons" readonly>
+      <span class="ST_selectValueSingle_test"></span></div></div></div>
+    <div id="productProperties[28]"><label>袖型 Sleeve Type</label>
+      <div class="ST_outerWrapper_test"><div class="ST_head_test"><input aria-controls="sleeves" readonly>
+      <span class="ST_selectValueSingle_test"></span></div></div></div>
+    </main><div class="ST_dropdown_test" hidden><div role="listbox" id="seasons">
+      <div role="option" data-value="spring">春季 Spring</div>
+      <div role="option" data-value="summer">夏季 Summer</div>
+      <div role="option" data-value="combined">春夏季Spring/Summer</div>
+    </div></div><div class="ST_dropdown_test" hidden><div role="listbox" id="sleeves">
+      <div role="option" data-value="short">短袖 Short Sleeve</div>
+      <div role="option" data-value="cap">帽袖 Cap Sleeve</div>
+    </div></div>`, { url: href, runScripts: "outside-only" });
+  t.after(() => dom.window.close());
+  const { window } = dom;
+  window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const { document } = window;
+  const clicks = [];
+  for (const input of document.querySelectorAll("main input")) {
+    const menu = document.getElementById(input.getAttribute("aria-controls"));
+    for (const event of ["focus", "click"]) input.addEventListener(event, () => { menu.parentElement.hidden = false; });
+    input.addEventListener("keydown", event => { if (event.key === "Escape") menu.parentElement.hidden = true; });
+    menu.addEventListener("click", event => {
+      clicks.push(event.target.dataset.value);
+      input.nextElementSibling.textContent = event.target.textContent;
+      menu.parentElement.hidden = true;
+    });
+  }
+  const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
+  const [season, sleeve] = (await run({ kind: "inspect" })).fields;
+  assert.equal((await run({ kind: "select", field: season, value: ["夏季", "春季"] })).status, "filled");
+  assert.equal((await run({ kind: "select", field: sleeve, value: "短帽袖" })).status, "filled");
+  assert.deepEqual(clicks, ["combined", "cap"]);
+  document.querySelector('[data-value="combined"]').remove();
+  document.querySelector('[data-value="cap"]').remove();
+  assert.equal((await run({ kind: "select", field: season, value: ["Spring", "Summer"] })).code, "OPTION_MISSING");
+  assert.equal((await run({ kind: "select", field: sleeve, value: "短帽袖" })).code, "OPTION_MISSING");
+  assert.deepEqual(clicks, ["combined", "cap"]);
+});
+
+test("reacquires the same dropdown after scrolling past an obstruction and stops for a modal", async t => {
+  const href = "https://agentseller.temu.com/goods/edit?productDraftId=obstructed";
+  const dom = new JSDOM(`<header>Sticky toolbar</header><main id="page_container_id"><div id="productProperties[24]">
+    <label>门襟类型Placket Type</label><div class="ST_outerWrapper_test"><div class="ST_head_test">
+    <input aria-controls="plackets" readonly><span class="ST_selectValueSingle_test"></span></div></div>
+    </div></main><div class="ST_dropdown_test" hidden><div role="listbox" id="plackets">
+    <div role="option" data-value="pullovers">套头衫Pullovers</div></div></div>
+    <div role="alertdialog" hidden>意外弹窗</div>`, { url: href, runScripts: "outside-only" });
+  t.after(() => dom.window.close());
+  const { window } = dom;
+  window.HTMLElement.prototype.getClientRects = function () { return [{}]; };
+  const { document } = window;
+  const menu = document.getElementById("plackets");
+  const header = document.querySelector("header");
+  const modal = document.querySelector('[role="alertdialog"]');
+  let scrolls = 0;
+  let opens = 0;
+  let clicks = 0;
+  const box = top => ({ left: 0, right: 100, width: 100, top, bottom: top + 20, height: 20 });
+  function obstruct() {
+    const head = document.querySelector(".ST_head_test");
+    head.getBoundingClientRect = () => box(0);
+    return head;
+  }
+  document.elementFromPoint = (_, y) => y < 35 ? header : document.querySelector("main input");
+  const initial = obstruct();
+  const activate = input => input.addEventListener("focus", () => {
+    opens++;
+    menu.parentElement.hidden = false;
+  });
+  activate(initial.querySelector("input"));
+  initial.scrollIntoView = options => {
+    assert.equal(options.block, "center");
+    scrolls++;
+    const replacement = initial.cloneNode(true);
+    replacement.getBoundingClientRect = () => box(240);
+    activate(replacement.querySelector("input"));
+    initial.replaceWith(replacement);
+  };
+  menu.addEventListener("click", () => {
+    clicks++;
+    document.querySelector(".ST_selectValueSingle_test").textContent = "套头衫";
+    menu.parentElement.hidden = true;
+  });
+  const run = request => window.eval(`(${temuControls.toString()})(${JSON.stringify({ ...request, scope: { href } })})`);
+  const [field] = (await run({ kind: "inspect" })).fields;
+  assert.equal((await run({ kind: "select", field, value: "套头" })).status, "filled");
+  assert.deepEqual([scrolls, opens, clicks], [1, 1, 1]);
+  assert.equal(initial.isConnected, false);
+  obstruct().scrollIntoView = () => { modal.hidden = false; };
+  assert.equal((await run({ kind: "select", field, value: "套头" })).code, "MODAL_BLOCKED");
+  assert.deepEqual([opens, clicks], [1, 1]);
+});
+
 test("waits for the active menu and option to finish opening before clicking and verifies a delayed write", async t => {
   const href = "https://agentseller.temu.com/goods/edit?productDraftId=animated";
   const dom = new JSDOM(`<main id="page_container_id"><div id="productProperties[24]">
@@ -376,7 +474,7 @@ test("caches category attribute observations only within a site and exact catego
   };
   let time = 100;
   const cache = createTemuOptionCache({ storage, now: () => time });
-  const field = { key: "productProperties[22]", label: "材质 Material" };
+  const field = { key: "productProperties[22]", label: "材质 Material", kind: "select" };
   const scope = { site: "US", categoryPath: ["Clothing", "Shirts"] };
   const options = [{ value: "polyester", label: "聚酯纤维 Polyester", aliases: ["Polyester"] }];
   const alternate = { ...field, key: "productProperties[23]" };
@@ -385,7 +483,7 @@ test("caches category attribute observations only within a site and exact catego
   assert.deepEqual(await cache.read(scope, alternate), options);
   assert.equal(await cache.read({ ...scope, site: "CA" }, field), undefined);
   assert.equal(await cache.read({ ...scope, categoryPath: ["Fashion", "Shirts"] }, field), undefined);
-  const template = { key: "freightTemplateId", label: "运费模板" };
+  const template = { key: "freightTemplateId", label: "运费模板", kind: "select" };
   await cache.write(scope, template, options);
   await cache.write(scope, field, []);
   assert.equal(await cache.read(scope, template), undefined);

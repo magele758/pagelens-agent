@@ -412,14 +412,60 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       activeTitle = editors.get(activeEditor);
       return activeEditor;
     };
-    const switcher = () => {
-      const matches = modals().filter(node => {
-        const message = clean(node.textContent).replace(/\s+/gu, "");
-        return message.includes("确认切换填写方式?") && message.includes("切换后将清空原填写的尺码和参数信息") &&
-          button(node, "确认") && button(node, "取消");
-      });
-      return matches.find(node => matches.every(other => other === node || other.contains(node))) || null;
-    };
+    // Size-chart confirmations can render as plain portal siblings of the drawer.
+    function promptFromText(fragment, matches) {
+      if (!document.body.textContent.includes(fragment)) return null;
+      const candidates = new Set();
+      const textNodes = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      while (textNodes.nextNode()) {
+        if (!textNodes.currentNode.nodeValue.includes(fragment)) continue;
+        const label = textNodes.currentNode.parentElement;
+        if (!visiblePopup(label) || label.closest('a,button,[role="button"]')) continue;
+        for (let area = label, depth = 0; area && depth < 6 && area !== root && area !== document.body;
+          area = area.parentElement, depth++) {
+          if (activeEditor && area.contains(activeEditor)) break;
+          if (matches(area)) {
+            candidates.add(area);
+            break;
+          }
+        }
+      }
+      return candidates.size === 1 ? [...candidates][0] : null;
+    }
+    let switchPrompt;
+    function switcher(discover = false) {
+      const matchesPrompt = node => {
+        const text = clean(node?.textContent).replace(/\s+/gu, "");
+        return text.startsWith("确认切换填写方式?切换后将清空原填写的尺码和参数信息") &&
+          visiblePopup(node) && button(node, "确认") && button(node, "取消");
+      };
+      if (matchesPrompt(switchPrompt)) return switchPrompt;
+      if (!discover) return null;
+      switchPrompt = promptFromText("确认切换填写方式", matchesPrompt);
+      return switchPrompt;
+    }
+    const warningText = "请确认无误后再提交";
+    const warningTitle = /存在(\d{1,3})个异常,请确认无误后再提交/u;
+    function chartWarning() {
+      const headingCount = area => Number(clean(area.textContent).replace(/\s+/gu, "").match(warningTitle)?.[1]);
+      const pane = promptFromText(warningText, area => visiblePopup(area) && headingCount(area) > 0 &&
+        button(area, "再检查一下") && button(area, /^没问题,\s*继续提交$/u));
+      return pane && { pane, count: headingCount(pane) };
+    }
+    function chartWarningRows(pane) {
+      const headers = ["尺码参数", "尺码", "异常原因"];
+      const tables = [...pane.querySelectorAll('table,[role="table"],[role="grid"]')].filter(visible);
+      for (const table of tables) {
+        const rows = [...table.querySelectorAll('tr,[role="row"]')].filter(visible)
+          .map(row => [...row.children].filter(el => visible(el) &&
+            el.matches('th,td,[role="columnheader"],[role="cell"],[role="gridcell"]'))
+            .map(cell => clean(cell.textContent)));
+        const header = rows.findIndex(cells => cells.length === headers.length && headers.every((text, index) => cells[index] === text));
+        if (header >= 0) return rows.slice(header + 1).filter(cells => cells.length === headers.length && cells.every(Boolean))
+          .slice(0, 20).map(([measurement, sizes, reason]) => ({ measurement, sizes, reason }));
+      }
+      return [];
+    }
     const openMenu = () => standardMenus();
     async function waitFor(check, timeout = 2400) {
       const deadline = Date.now() + timeout;
@@ -440,6 +486,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
     if (!modal) return fail("SIZE_CHART_MISSING", "未打开选择尺码表模板弹窗。");
     let verified = false;
     let created = false;
+    let keepWarningOpen = false;
     try {
       const tip = await dismissSizeTip();
       if (!tip.ok) return tip;
@@ -459,7 +506,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       verified = Boolean(await waitFor(() => !picker() && attachedChart(), 3500));
       return verified ? { ok: true, status: "verified", name, created } : fail("READBACK_MISMATCH", "模板确认后未能核对商品关联的尺码表。");
     } finally {
-      if (!verified && onPage()) {
+      if (!verified && !keepWarningOpen && onPage()) {
         for (const owned of [switcher, editor, picker]) {
           const dialog = owned();
           if (dialog) button(dialog, "取消")?.click();
@@ -517,14 +564,23 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
     }
 
     function attachedChart() {
-      const labels = [...root?.querySelectorAll("label,span,div") || []].filter(node => visible(node) && !node.childElementCount &&
-        /^\*?\s*尺码表$/u.test(clean(node.textContent)));
       const actions = 'a,button,[role="button"],[role="link"]';
+      const readAttached = area => {
+        const status = [...area.querySelectorAll('span,div,p,strong,[role="status"]')].some(node =>
+          visible(node) && clean(node.innerText || node.textContent) === "已添加");
+        if (!status) return false;
+        const names = [...area.querySelectorAll(actions)].filter(visible)
+          .map(node => clean(node.getAttribute("aria-label") || node.innerText || node.textContent));
+        return ["查看", "编辑", "删除"].every(action => names.filter(name => name === action).length === 1);
+      };
+      const areas = root.querySelectorAll('[id="productSizeTemplateIds"]');
+      if (areas.length > 1) return false;
+      if (areas.length === 1 && visible(areas[0]) && readAttached(areas[0])) return true;
+      const labels = [...root.querySelectorAll("label,span,div")].filter(node => visible(node) && !node.childElementCount &&
+        /^\*?\s*尺码表$/u.test(clean(node.textContent)));
       return labels.some(label => {
         for (let area = label.parentElement, depth = 0; area && area !== root && depth < 6; area = area.parentElement, depth++) {
-          const status = [...area.querySelectorAll("span,div")].find(node => visible(node) && !node.childElementCount &&
-            clean(node.textContent) === "已添加");
-          if (status && ["查看", "编辑", "删除"].every(action => exact(area, actions, action))) return true;
+          if (readAttached(area)) return true;
         }
         return false;
       });
@@ -559,7 +615,7 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
 
     function bodyColumns() {
       return { waist: ["腰围", "腰围全围"], hip: ["臀围", "臀围全围"], chest: ["胸围", "胸围全围"],
-        height: ["身高"], underbust: ["下胸围"], cup: ["罩杯", "杯型", "内衣罩杯"] };
+        height: ["身高", "高度"], underbust: ["下胸围"], cup: ["罩杯", "杯型", "内衣罩杯"] };
     }
 
     function measurement(raw, field) {
@@ -622,14 +678,22 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
           /模板名称/u.test(clean(node.getAttribute("aria-label") || node.placeholder)));
         return fields.length === 1 ? fields[0] : null;
       };
-      let manual = withLabel(form, "radio", ["手动录入"]);
-      if (!manual?.checked) {
-        if (!manual || !enabled(manual.node) || !active()) return fail("SIZE_CHART_CREATE_MISSING", "Temu 未提供手动录入尺码表。");
+      let manual = await waitFor(() => {
+        if (!active()) return null;
+        const current = withLabel(form, "radio", ["手动录入"]);
+        const defaultMode = withLabel(form, "radio", ["系统默认"]);
+        return current && defaultMode && current.checked !== defaultMode.checked ? current : null;
+      }, 4500);
+      if (!manual) return fail("SIZE_CHART_CREATE_MISSING", "Temu 未加载尺码表填写方式。");
+      if (!manual.checked) {
+        if (!enabled(manual.node) || !active() || switcher(true)) {
+          return fail("SIZE_CHART_CREATE_MISSING", "Temu 未提供手动录入尺码表。");
+        }
         manual.label.click();
-        await waitFor(() => switcher() || withLabel(form, "radio", ["手动录入"])?.checked);
+        await waitFor(() => switcher(true) || withLabel(form, "radio", ["手动录入"])?.checked, 4500);
         const change = switcher();
-        if (change) button(change, "确认")?.click();
-        manual = await waitFor(() => active() && withLabel(form, "radio", ["手动录入"])?.checked);
+        if (change && onPage() && editor() === form) button(change, "确认")?.click();
+        manual = await waitFor(() => active() && withLabel(form, "radio", ["手动录入"])?.checked, 4500);
         if (!manual) return fail("SIZE_CHART_CREATE_MISSING", "Temu 未切换到手动录入尺码表。");
       }
       const nameInput = findName();
@@ -713,8 +777,24 @@ export async function temuApparelPage({ href, kind, key, value, alternate, allow
       const confirm = active() && button(form, "确认");
       if (!confirm) return fail("SIZE_CHART_CREATE_MISSING", "尺码表模板确认按钮不可用。");
       confirm.click();
-      return await waitFor(() => !editor() && picker(), 5500) ? { ok: true } :
-        fail("SIZE_CHART_SAVE_UNVERIFIED", "Temu 未确认保存尺码表模板，请核对页面标出的尺码参数。");
+      const saved = await waitFor(() => chartWarning() || (!editor() && picker() && { saved: true }), 5500);
+      if (saved?.saved) return { ok: true };
+      if (saved?.pane) {
+        const warnings = chartWarningRows(saved.pane);
+        const details = warnings.map(({ measurement, sizes, reason }) => `${measurement}（${sizes}）${reason}`);
+        const result = {
+          ...fail("SIZE_CHART_VALIDATION_WARNING", [`Temu 提示 ${saved.count} 个尺码异常，请核对原始尺寸和尺码档差`, ...details].join("。") + "。"),
+          warnings,
+        };
+        const back = onPage() && editor() === form && button(saved.pane, "再检查一下");
+        keepWarningOpen = true;
+        if (back) {
+          back.click();
+          keepWarningOpen = !await waitFor(() => !visiblePopup(saved.pane), 2000);
+        }
+        return result;
+      }
+      return fail("SIZE_CHART_SAVE_UNVERIFIED", "Temu 未确认保存尺码表模板，请核对页面标出的尺码参数。");
 
       function layout(area, section) {
         const tables = [...area.querySelectorAll("table")].filter(belongs);

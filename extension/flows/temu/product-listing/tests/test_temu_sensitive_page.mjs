@@ -5,7 +5,7 @@ import { temuSensitivePage } from "../sensitive-page.js";
 const href = "https://agentseller.temu.com/goods/edit?productDraftId=42";
 const key = "productSkuMap.123_456.sensitiveAttr";
 
-function fixture({ duplicate = false, focusOpens = false, chipShows = true } = {}) {
+function fixture({ duplicate = false, focusOpens = false, chipShows = true, commitOnClose = false, displayOnly = "" } = {}) {
   const dom = new JSDOM(`
     <main id="page_container_id">
       <table>
@@ -33,6 +33,14 @@ function fixture({ duplicate = false, focusOpens = false, chipShows = true } = {
   const portal = doc.querySelector('[data-testid="beast-core-portal"]');
   const target = doc.querySelector("#target");
   const events = [];
+  const showNegative = () => {
+    if (!chipShows || !doc.querySelector("#no").checked) return;
+    target.placeholder = "";
+    const selected = doc.querySelector("#selected");
+    if (displayOnly) target.remove();
+    if (displayOnly !== "leaf") selected.className = "ST_selectValueMultipleItem_mock";
+    selected.textContent = "否";
+  };
   target.addEventListener(focusOpens ? "focus" : "click", () => {
     events.push("open");
     dom.window.setTimeout(() => { portal.hidden = false; }, 30);
@@ -41,17 +49,17 @@ function fixture({ duplicate = false, focusOpens = false, chipShows = true } = {
     events.push("no");
     dom.window.setTimeout(() => {
       doc.querySelector("#sensitive-title").textContent = "是否敏感品： 否";
-      if (!chipShows) return;
-      target.placeholder = "";
-      const selected = doc.querySelector("#selected");
-      selected.className = "ST_selectValueMultipleItem_mock";
-      selected.textContent = "否";
+      if (!commitOnClose) showNegative();
     }, 35);
   });
   doc.querySelector("#sensitive-head").addEventListener("mousedown", event => {
     assert.equal(event.target.id, "sensitive-head");
     events.push("close");
     portal.hidden = true;
+    if (commitOnClose) {
+      assert.equal(doc.querySelector("#selected").textContent, "");
+      dom.window.setTimeout(showNegative, 150);
+    }
   });
   for (const id of ["other", "yes", "component", "popover-save", "publish"]) {
     doc.querySelector("#" + id).addEventListener("click", () => events.push(id));
@@ -72,6 +80,17 @@ for (const focusOpens of [true, false]) {
   assert.equal(portal.hidden, true);
   assert.equal((await run({ value: "否" })).status, "unchanged");
   assert.deepEqual(events, ["open", "no", "close"]);
+  dom.window.close();
+}
+
+for (const displayOnly of ["", "chip", "leaf"]) {
+  const { dom, doc, events, run } = fixture({ commitOnClose: true, displayOnly });
+  assert.equal((await run({ value: "否" })).status, "verified");
+  assert.equal(doc.querySelector("#selected").textContent, "否");
+  assert.equal(Boolean(doc.querySelector("#target")), !displayOnly);
+  assert.equal(doc.querySelector("#other").value, "");
+  assert.deepEqual(events, ["open", "no", "close"]);
+  assert.equal((await run({ value: "否" })).status, "unchanged");
   dom.window.close();
 }
 
