@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { isMxSellerManageReturn } from "./tiktok-mx-editor.mjs";
+import { SELLER_LOGIN_ERROR, isSellerLoginUrl } from "../extension/skills/tiktok-mx-draft/tiktok-mx-seller-request.mjs";
 
 // Each owned tab is a working page. Dedicated automation windows isolate tabs by windowId without creating Chrome tab groups; non-windowed close_tab ungroups before removing.
 export class DraftTabs {
@@ -52,6 +53,7 @@ export class DraftTabs {
     do {
       const tab = (await this.bridge("list_tabs", {})).find(entry => entry.id === tabId);
       if (tab?.url === url) return tabId;
+      if (isSellerLoginUrl(tab?.url)) throw Error(SELLER_LOGIN_ERROR);
       await sleep(150);
     } while (Date.now() < deadline);
     throw Error("Task tab did not finish navigating");

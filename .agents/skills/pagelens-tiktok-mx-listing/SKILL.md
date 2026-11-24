@@ -14,7 +14,8 @@ Set `CLI` to the `scripts/mx-list.mjs` inside this skill directory (repo copy `.
 1. **Plugin inbox only**: Never connect directly to Chrome CDP / port 9222, never edit the `pagelens-agent` repository during listing tasks, and never fabricate success from screenshots—every step must be backed by a verified outbox receipt (`~/.pagelens/agent-outbox/<jobId>.json`).
 2. **Never touch protected product `1738630710999877196`** (shared test bread rack). `scripts/mx-list.mjs` blocks mutating actions against it.
 3. **Never bypass CAPTCHAs or verification**: If PageLens reports a slider/puzzle or seller verification (`exit code 2`), stop immediately, leave the verification window untouched, ask the user to complete verification in Chrome, and resume later with the same `--progress` file.
-4. **Confirm intent before publishing**: If the user did not explicitly state the endpoint or pricing rule, ask once before running `reprice` or `publish`:
+4. **Stop immediately if Seller Center is not logged in**: If the MX shop session has expired or redirects to a login page (`SELLER_LOGIN_REQUIRED`, `exit code 3`), stop automation immediately—do NOT retry or launch remaining waves—and ask the user to log into TikTok Seller Center MX in Chrome before resuming with the same `--progress` file.
+5. **Confirm intent before publishing**: If the user did not explicitly state the endpoint or pricing rule, ask once before running `reprice` or `publish`:
    - **Endpoint**: `draft` (save draft only), `publish` (submit for review and keep live), or `test-delist` (submit -> confirm `active` -> delist -> confirm `inactive`).
    - **Pricing**: `test` (`reprice_draft` with `--multiplier 100` or `10` + dynamic Seller Center price ceiling + `--max-total-stock 10`) vs `1x` (`--no-reprice`, publish at converted baseline price).
    - **FX rate**: JPY -> MXN rate (`--rate`, default `0.1161`).

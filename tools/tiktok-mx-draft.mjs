@@ -397,6 +397,7 @@ async function prepare(url, fresh = false, afterOpening, onFactsReady, reuseSour
       data = await js(tab, extract, id);
       break;
     } catch (error) {
+      if (/SELLER_LOGIN_REQUIRED/i.test(error?.message || "")) throw error;
       if (attempt === retryDelays.length || !/Frame with ID 0 is showing error page|Product data unavailable|PageLens page script failed|execution context was destroyed|did not finish navigating/i.test(error.message)) throw error;
       mark("sourceReload");
       await sleep(retryDelays[attempt]);

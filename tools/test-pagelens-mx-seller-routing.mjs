@@ -141,4 +141,9 @@ await assert.rejects(orderCall("trusted_type", { tabId: ownedId, value: "unreque
 await assert.rejects(orderCall("open_tab", { url: currentUrl }), /Unexpected TikTok MX seller destination/);
 currentUrl = `${seller}/order/another-path?shop_region=MX`;
 await assert.rejects(orderCall("run_js", { tabId: ownedId }), /outside the TikTok MX seller scope/);
+currentUrl = `${seller}/account/login?redirect_url=https%3A%2F%2Fseller.tiktokshopglobalselling.com%2Forder`;
+await assert.rejects(orderCall("list_tabs", {}), /SELLER_LOGIN_REQUIRED/);
+await assert.rejects(orderCall("run_js", { tabId: ownedId }), /SELLER_LOGIN_REQUIRED/);
+currentUrl = "https://accounts.tiktok.com/login";
+await assert.rejects(orderCall("list_tabs", {}), /SELLER_LOGIN_REQUIRED/);
 console.log("TikTok MX seller routing validates directed requests and scopes native tools to owned seller pages");

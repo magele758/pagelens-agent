@@ -15,6 +15,18 @@ export const mxOrderUrl = origin + "/order?shop_region=MX";
 export const mxManageUrl = origin + "/product/manage?shop_region=MX";
 export const mxDraftUrl = id => origin + "/product/edit-draft/" + id + "?shop_region=MX";
 export const mxOrderStatuses = ["all", "to_ship", "shipped", "completed", "cancelled"];
+export const SELLER_LOGIN_ERROR = "SELLER_LOGIN_REQUIRED: TikTok Seller Center is not logged in; please sign in to the MX seller shop and retry";
+
+export function isSellerLoginUrl(value) {
+  let page;
+  try { page = new URL(String(value || "")); } catch { return false; }
+  const host = page.hostname.toLowerCase();
+  const isTikTok = host === "seller.tiktokshopglobalselling.com" ||
+    /(?:^|\.)(?:tiktok|tiktokshopglobalselling|tiktokglobalshop)\.com$/i.test(host);
+  if (!isTikTok) return false;
+  if (/^accounts\./i.test(host)) return true;
+  return /^\/(?:account\/(?:login|register|sign-?in)|login|passport\/login|sso\/login)(?:\/|$)/i.test(page.pathname);
+}
 
 function fields(body, names, optional = []) {
   if (!body || typeof body !== "object" || Array.isArray(body) ||

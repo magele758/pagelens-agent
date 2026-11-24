@@ -111,6 +111,7 @@ All `ptc_mx_seller_action` jobs require `--extension-id` and strict field matchi
 
 | Symptom | Cause & Fix |
 |---|---|
+| `SELLER_LOGIN_REQUIRED` (`exit code 3`) | TikTok Seller Center MX is not logged in (redirected to `/account/login` or `accounts.tiktok.com`). Automation stops immediately without launching further waves and closes automation windows. Sign in to Seller Center MX in Chrome, then resume with the same `--progress` file. |
 | `dev_status` times out | Chrome not running, PageLens extension disabled/unloaded, file inbox toggle off in PageLens settings, or Native Host not installed (`node tools/tiktok-mx-draft.mjs install`). |
 | `Source already registered; use rerun` | Previous `ptc_create_mx_draft` failed after writing `{ id: null }` to `~/.pagelens/mx-draft-sources/<sourceId>.json`. Delete the record only when `id` is null/empty (`mx-list.mjs` does this automatically on non-CAPTCHA failures). |
 | `submission_unconfirmed` / outbox timeout on `publish_draft` | **Never blindly re-submit.** First inspect the original outbox file and run `action --mode listing_status --product-id <draftId>` to confirm whether Seller Center already received it. |
