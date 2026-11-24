@@ -9,6 +9,10 @@ const TAB_READY_TIMEOUT = 18000;
 export const DEFAULT_CONCURRENCY = 5;
 export const MAX_CONCURRENCY = 10;
 
+export function isReviewStatus(status) {
+  return status === "needs-review" || status === "deferred" || status === "submission-unknown";
+}
+
 export function imagePathsFor(input) {
   const variants = Array.isArray(input?.variant?.options) ? input.variant.options : [input?.variant];
   return [...new Set([input?.imagePath, ...(Array.isArray(input?.galleryImages) ? input.galleryImages : []),
@@ -138,15 +142,16 @@ export async function runProductBatch({
           : { status: "needs-review", code: "batch-product-error", details: error?.message || String(error) };
       }
     }
-    // Capture the outcome before disposal. Each worker releases its tab before claiming another job.
-    const closed = tabId === null || await closeWorkerTab(tabs, tabId);
-    if (closed) tabId = null;
-    else receipt = { ...receipt, tabCleanupFailed: true };
+    // A retained form is available for inspection and no longer counts as an active worker.
+    const keepForReview = tabId !== null && isReviewStatus(receipt.status);
+    const released = keepForReview || tabId === null || await closeWorkerTab(tabs, tabId);
+    if (!released) receipt = { ...receipt, tabCleanupFailed: true };
+    if (released && !keepForReview) tabId = null;
     onJob(index, { phase: receipt.status, tabId, receipt });
-    if (closed && mode === "create" && !receipt.globalItemId && receipt.status === "submission-unknown" && input.sku) {
-      uncertainCreations.push({ index, sku: input.sku, receipt });
+    if (mode === "create" && !receipt.globalItemId && receipt.status === "submission-unknown" && input.sku) {
+      uncertainCreations.push({ index, sku: input.sku, tabId, receipt });
     }
-    return closed;
+    return released;
   }
 
   await Promise.all(Array.from({ length: Math.min(products.length, concurrency) }, async () => {
@@ -168,11 +173,13 @@ export async function runProductBatch({
       list.search = new URLSearchParams({ cnsc_shop_id: shopId, page: '1', size: '48' });
       verificationTab = await tabs.create({ windowId: source.windowId, url: list.href, active: true });
       const matches = await reconcile({ tabId: verificationTab.id, shopId, tabs, signal, skus: uncertainCreations.map(job => job.sku) });
-      for (const { index, sku, receipt } of uncertainCreations) {
+      for (const { index, sku, tabId, receipt } of uncertainCreations) {
         const globalItemId = matches.get(sku);
         if (globalItemId) {
+          const closed = tabId === null || await closeWorkerTab(tabs, tabId);
           const { code, details, ...verified } = receipt;
-          onJob(index, { phase: 'created', tabId: null, receipt: { ...verified, status: 'created', globalItemId } });
+          onJob(index, { phase: 'created', tabId: closed ? null : tabId,
+            receipt: { ...verified, status: 'created', globalItemId, ...(!closed && { tabCleanupFailed: true }) } });
         }
       }
     } catch {

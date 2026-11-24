@@ -147,6 +147,68 @@ test("starts the selected write mode with a bounded concurrency and shows verifi
   }
 });
 
+test("the receipt opens the retained form from the same shop", async () => {
+  const { window } = new JSDOM("<!doctype html><body></body>");
+  const { document } = window;
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const sourceTab = { id: 12, windowId: 1, url: shopUrl };
+  const retainedTab = { ...sourceTab, id: 41 };
+  const updates = [];
+  globalThis.document = document;
+  globalThis.chrome = {
+    permissions: { contains: async () => true },
+    tabs: {
+      query: async () => [sourceTab],
+      get: async id => id === retainedTab.id ? retainedTab : sourceTab,
+      update: async (...args) => updates.push(args),
+      onActivated: { addListener() {} },
+      onUpdated: { addListener() {} },
+    },
+    runtime: { getURL: path => "chrome-extension://test/" + path, onMessage: { addListener() {} } },
+  };
+  try {
+    const open = bindPtcFlow({
+      getTargetTab: async () => sourceTab,
+      chooseDirectory: async () => ({
+        root: "/Products", directoryName: "Products",
+        products: [{ title: "Shirt", folder: "shirt", input: {} }], issues: [],
+      }),
+      startBatch: async ({ onJob }) => {
+        onJob(0, { phase: "submission-unknown", tabId: retainedTab.id,
+          receipt: { status: "submission-unknown", details: "1个错误需调整" } });
+      },
+    });
+    const byId = id => document.getElementById(id);
+    const dialog = byId("ptc-flow-dialog");
+    dialog.showModal ??= () => { dialog.open = true; };
+    open();
+    await nextTurn();
+    byId("ptc-load-directory").click();
+    await nextTurn();
+    byId("ptc-batch-start").click();
+    await nextTurn();
+
+    assert.match(byId("ptc-batch-status").textContent, /待处理 1 · 保留 1 个标签/u);
+    const inspect = byId("ptc-batch-jobs").querySelector("button");
+    assert.equal(inspect.textContent, "查看表单");
+    assert.equal(inspect.hidden, false);
+    inspect.click();
+    await nextTurn();
+    assert.deepEqual(updates, [[41, { active: true }]]);
+
+    retainedTab.url = shopUrl.replace("1901697826", "1234");
+    inspect.click();
+    await nextTurn();
+    assert.deepEqual(updates, [[41, { active: true }]]);
+    assert.match(byId("ptc-batch-status").textContent, /已离开本次任务的 Shopee 店铺/u);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.chrome = originalChrome;
+    window.close();
+  }
+});
+
 test("starts from a Shopee product list, acknowledges the click, and clears loading on failure", async () => {
   const { window } = new JSDOM("<!doctype html><body></body>");
   const { document } = window;
