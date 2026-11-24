@@ -52,6 +52,10 @@ try {
   const refusal = { ok: false, error: "TikTok MX seller action requires a directed inbox request without a token" };
   assert.deepEqual(await executeJob({ ...job, directed: true }), refusal);
   assert.deepEqual(await executeJob({ ...job, token: "forbidden" }, { directed: true }), refusal);
+  const anonymousStatus = { action, request: { mode: "listing_status", productId: draftId } };
+  assert.deepEqual(await executeJob(anonymousStatus, { directed: true }), {
+    ok: false, error: "TikTok MX tasks require a job ID",
+  });
   const bridge = { call: () => assert.fail("the mocked native port sent no tool calls") };
   await assert.rejects(runNativeDraft({ ...job, token: "forbidden" }, bridge), /does not accept a token/);
   assert.equal(await runNativeDraft({ ...job, action: ` ${action} ` }, bridge), receipt);
@@ -137,4 +141,9 @@ await assert.rejects(orderCall("trusted_type", { tabId: ownedId, value: "unreque
 await assert.rejects(orderCall("open_tab", { url: currentUrl }), /Unexpected TikTok MX seller destination/);
 currentUrl = `${seller}/order/another-path?shop_region=MX`;
 await assert.rejects(orderCall("run_js", { tabId: ownedId }), /outside the TikTok MX seller scope/);
+currentUrl = `${seller}/account/login?redirect_url=https%3A%2F%2Fseller.tiktokshopglobalselling.com%2Forder`;
+await assert.rejects(orderCall("list_tabs", {}), /SELLER_LOGIN_REQUIRED/);
+await assert.rejects(orderCall("run_js", { tabId: ownedId }), /SELLER_LOGIN_REQUIRED/);
+currentUrl = "https://accounts.tiktok.com/login";
+await assert.rejects(orderCall("list_tabs", {}), /SELLER_LOGIN_REQUIRED/);
 console.log("TikTok MX seller routing validates directed requests and scopes native tools to owned seller pages");

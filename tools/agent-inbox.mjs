@@ -157,6 +157,7 @@ function enqueue(opts) {
     job.allowInsertHtmlFallback = true;
   }
   if (opts.replace === true || opts.replace === "true") job.replace = true;
+  if (opts["follow-up"] === true || opts["follow-up"] === "true") job.followUp = true;
   const token = localOnly ? undefined : opts["token-file"]
     ? readMaybeFile(opts["token-file"]).trim() : process.env.PAGELENS_TOKEN?.trim();
   if (token) job.token = token;
@@ -195,7 +196,7 @@ function readOutbox(id) {
   return reply;
 }
 
-async function waitId(id, { timeoutMs = 60000, intervalMs = 1000 } = {}) {
+async function waitId(id, { timeoutMs = 60000, intervalMs = 150 } = {}) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const res = readOutbox(id);
