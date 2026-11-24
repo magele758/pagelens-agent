@@ -728,6 +728,10 @@ export function createAgentTools(ctx) {
       parameters: obj({ tabId: { type: "integer", description: "要关闭的标签 id" } }, ["tabId"]),
       async execute(args) {
         const tabId = await resolveTabId(ctx, args);
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        if (tab?.groupId != null && tab.groupId >= 0) {
+          await chrome.tabs.ungroup?.(tabId).catch(() => {});
+        }
         await chrome.tabs.remove(tabId);
         await ctx.onTabsMutated?.();
         return `已关闭标签 ${tabId}。`;
@@ -735,7 +739,7 @@ export function createAgentTools(ctx) {
     },
     {
       name: "close_task_group",
-      description: "关闭本轮 PageLens 任务分组里的全部标签。用户说「关掉这批」「结束任务」时用。",
+      description: "解散删除本轮 PageLens 任务分组并关闭其全部标签。用户说「关掉这批」「结束任务」时用。",
       parameters: obj({}),
       async execute() {
         const groupId = ctx.getTaskGroupId?.();

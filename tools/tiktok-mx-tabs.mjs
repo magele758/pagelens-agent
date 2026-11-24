@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { isMxSellerManageReturn } from "./tiktok-mx-editor.mjs";
 
-// Each owned tab is a working page. Chrome removes the group with its last tab.
+// Each owned tab is a working page. Dedicated automation windows isolate tabs by windowId without creating Chrome tab groups; non-windowed close_tab ungroups before removing.
 export class DraftTabs {
   constructor(product, bridge) {
     if (!/^\d{12,22}$/.test(product)) throw Error("Invalid source ID");

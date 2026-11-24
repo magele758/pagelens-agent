@@ -62,7 +62,13 @@ export function openedTabIds(toolName, result) {
 export function createTabLeases({ now = () => Date.now(), groups = null } = {}) {
   const leases = new Map();
   const groupBySession = new Map();
+  const groupedTabs = new Set();
   let colorIdx = 0;
+
+  const ungroupSafe = (tabIds) => {
+    if (!tabIds.length || typeof groups?.ungroup !== "function") return;
+    Promise.resolve(groups.ungroup(tabIds)).catch(() => {});
+  };
 
   const holderInfo = (lease) => ({ agentName: lease.agentName || "agent", since: lease.since });
 
@@ -94,18 +100,22 @@ export function createTabLeases({ now = () => Date.now(), groups = null } = {}) 
     if (!lease) return false;
     if (lease.sessionId !== sessionId) check(tabId, { sessionId });
     leases.delete(tabId);
+    if (groupedTabs.delete(tabId)) ungroupSafe([tabId]);
     return true;
   }
 
   function releaseSession(sessionId) {
     const freed = [];
+    const toUngroup = [];
     for (const [tabId, lease] of leases) {
       if (lease.sessionId === sessionId) {
         leases.delete(tabId);
         freed.push(tabId);
+        if (groupedTabs.delete(tabId)) toUngroup.push(tabId);
       }
     }
     groupBySession.delete(sessionId);
+    ungroupSafe(toUngroup);
     return freed;
   }
 
@@ -121,6 +131,9 @@ export function createTabLeases({ now = () => Date.now(), groups = null } = {}) 
     try {
       const known = groupBySession.get(owner.sessionId);
       const groupId = await groups.group(tabIds, known ?? undefined);
+      if (groupId != null) {
+        for (const id of tabIds) groupedTabs.add(id);
+      }
       if (groupId != null && groupId !== known) {
         groupBySession.set(owner.sessionId, groupId);
         const color = GROUP_COLORS[colorIdx++ % GROUP_COLORS.length];
@@ -139,10 +152,14 @@ export function createTabLeases({ now = () => Date.now(), groups = null } = {}) 
     releaseSession,
     owned,
     adopt,
-    dropTab: (tabId) => leases.delete(tabId),
+    dropTab: (tabId) => {
+      leases.delete(tabId);
+      groupedTabs.delete(tabId);
+    },
     clear: () => {
       leases.clear();
       groupBySession.clear();
+      groupedTabs.clear();
     },
     size: () => leases.size,
   };
@@ -161,5 +178,8 @@ export function chromeTabGroups(api = globalThis.chrome) {
       }
     },
     update: (groupId, props) => api.tabGroups.update(groupId, props),
+    ...(typeof api?.tabs?.ungroup === "function" && {
+      ungroup: (tabIds) => api.tabs.ungroup(tabIds),
+    }),
   };
 }
