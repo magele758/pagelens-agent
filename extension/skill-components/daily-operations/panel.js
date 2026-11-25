@@ -1,6 +1,6 @@
-import { dailyPlan, dailySelectionKey, dailySources } from "../../flows/daily-operations/catalog.js";
+import { dailyPlan, dailySelectionKey, dailySources, savedDailyPlan } from "../../flows/daily-operations/catalog.js";
 import { dailyScheduleKey, dailyStateKey, dayInChina } from "../../flows/daily-operations/history.js";
-import { renderDailyChat } from "./cards.js";
+import { renderDailyReport } from "./cards.js";
 
 export function bindDailyOperations({ getTargetTab, onBack } = {}) {
   const dialog = document.createElement("dialog");
@@ -12,7 +12,11 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
       <h2 id="daily-title">每日运营数据</h2>
       <button type="button" class="icon-btn" data-do="close" aria-label="关闭每日运营数据">×</button>
     </header>
-    <div class="daily-body">
+    <nav class="daily-views" aria-label="每日运营数据视图">
+      <button type="button" class="secondary mini" data-do="settings-view" aria-pressed="true">关注设置</button>
+      <button type="button" class="secondary mini" data-do="report-view" aria-pressed="false">采集报告</button>
+    </nav>
+    <div class="daily-body" data-do="settings-body">
       <div class="daily-section-heading"><h3 id="daily-scope-title">关注数据</h3><span data-do="count"></span></div>
       <div class="daily-scope" data-do="scope" role="group" aria-labelledby="daily-scope-title"></div>
       <section class="daily-settings" aria-labelledby="daily-order-title">
@@ -37,10 +41,12 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
         <p class="daily-hint">Chrome 运行且各平台保持登录时执行，按已选关注项采集。</p>
       </form>
     </div>
+    <div class="daily-body" data-do="report-body" hidden>
+      <article class="daily-report" data-do="article" aria-label="每日运营数据报告"></article>
+    </div>
     <footer class="daily-footer">
       <span data-do="status" role="status"></span>
-      <div><button type="button" class="secondary" data-do="report" hidden>查看报告</button>
-      <button type="button" class="primary" data-do="run">开始采集</button></div>
+      <div data-do="run-actions"><button type="button" class="primary" data-do="run">开始采集</button></div>
     </footer>`;
   document.body.append(dialog);
   const find = key => dialog.querySelector(`[data-do="${key}"]`);
@@ -57,12 +63,7 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
   let state;
   let requesting = false;
   let writeSelection = Promise.resolve();
-  let attached = false;
-  let launching = false;
-  const article = document.createElement("article");
-  article.id = "daily-chat-run";
-  article.className = "daily-chat";
-  article.setAttribute("aria-label", "每日运营数据报告");
+  const article = find("article");
 
   const showStatus = value => { find("status").textContent = value; };
   const dates = () => ({ startDay: dateInputs[0].value, endDay: dateInputs[1].value });
@@ -79,15 +80,12 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
     }
   }
 
-  function showInChat({ scroll = false } = {}) {
-    const feed = document.getElementById("msgs");
-    if (!feed) return;
-    attached = true;
-    if (!article.isConnected) {
-      feed.querySelectorAll(":scope > .empty, :scope > .big-actions").forEach(node => node.remove());
-      feed.append(article);
+  function showView(view) {
+    for (const tab of ["settings", "report"]) {
+      find(tab + "-body").hidden = tab !== view;
+      find(tab + "-view").setAttribute("aria-pressed", String(tab === view));
     }
-    if (scroll) article.scrollIntoView?.({ block: "end" });
+    find("run-actions").hidden = view === "report";
   }
 
   async function run(plan, range, { fromDialog = false } = {}) {
@@ -100,39 +98,38 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
     try {
       await permissions(ids);
       await writeSelection;
-      launching = true;
-      if (fromDialog) dialog.close();
-      showInChat({ scroll: true });
+      showStatus("");
+      showView("report");
       article.replaceChildren(Object.assign(document.createElement("p"), { textContent: "正在打开采集页面…" }));
       state = await send("pl.daily.run", { source: "all", selection: plan, ...range, windowId: await from() });
       renderReport();
     } catch (error) {
-      if (launching) article.replaceChildren(Object.assign(document.createElement("p"), { textContent: error.message }));
-      else showStatus(error.message);
+      showStatus(error.message);
+      renderReport();
     } finally {
-      launching = false;
       requesting = false;
       updateControls();
     }
   }
 
-  async function openSource(id, section, number) {
-    const status = dialog.open ? showStatus : text => {
+  async function openSource(id, section, { number, recordId } = {}) {
+    const isReport = !find("report-body").hidden;
+    const status = !isReport ? showStatus : text => {
       const node = article.querySelector("[data-daily-action-status]");
       if (node) node.textContent = text;
     };
     try {
-      const range = dialog.open ? dates() : state?.dates || dates();
-      if (dialog.open && id === "orders" && !dateInputs.every(input => input.reportValidity())) return;
+      const range = isReport ? state?.dates || dates() : dates();
+      if (!isReport && id === "orders" && !dateInputs.every(input => input.reportValidity())) return;
       status("正在打开页面…");
       await permissions([id]);
-      await send("pl.daily.open", { source: id, section, number, ...range, windowId: await from() });
-      status("已打开源页面。");
+      await send("pl.daily.open", { source: id, section, number, recordId, ...range, windowId: await from() });
+      status(recordId ? "已点击活动入口，请在 Temu 页面继续。" : "已打开源页面。");
     } catch (error) { status(error.message); }
   }
 
   function renderReport() {
-    if (attached && state) renderDailyChat(article, state, {
+    if (state) renderDailyReport(article, state, {
       onOpen: openSource,
       onRetry: plan => void run(plan, state.dates || dates()),
       onSummarize: async event => {
@@ -148,6 +145,7 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
         }
       },
     });
+    else article.textContent = "暂无采集报告。";
     updateControls();
   }
 
@@ -156,8 +154,7 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
     find("count").textContent = `已选 ${count} 项`;
     find("run").disabled = requesting || Boolean(state?.running) || !count;
     find("run").textContent = state?.running ? "采集中" : "开始采集";
-    find("report").hidden = !state;
-    find("report").textContent = state?.running ? "查看进度" : "查看报告";
+    find("report-view").textContent = state?.running ? "采集进度" : "采集报告";
     for (const box of scope.querySelectorAll("input[type=checkbox]")) {
       const { platform, id, section } = box.dataset;
       const modules = id ? [[id, dailySources[id]]] : platforms.get(platform);
@@ -231,7 +228,9 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
       }
     }
     const saved = selection = dailyPlan(next);
-    writeSelection = writeSelection.catch(() => {}).then(() => chrome.storage.local.set({ [dailySelectionKey]: saved }));
+    writeSelection = writeSelection.catch(() => {}).then(() => chrome.storage.local.set({
+      [dailySelectionKey]: { version: 2, sources: saved },
+    }));
     void writeSelection.catch(() => showStatus("未能保存关注项。"));
     updateControls();
   });
@@ -239,15 +238,12 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
   find("close").onclick = () => dialog.close();
   find("back").onclick = () => { dialog.close(); onBack?.(); };
   find("run").onclick = () => void run(selection, dates(), { fromDialog: true });
-  find("report").onclick = () => {
-    dialog.close();
-    showInChat({ scroll: true });
-    renderReport();
-  };
+  find("settings-view").onclick = () => showView("settings");
+  find("report-view").onclick = () => { showView("report"); renderReport(); };
   find("search").addEventListener("submit", event => {
     event.preventDefault();
     const input = event.currentTarget.querySelector("input");
-    void openSource("orders", "全部", input.value.trim());
+    void openSource("orders", "全部", { number: input.value.trim() });
   });
   schedule.addEventListener("submit", async event => {
     event.preventDefault();
@@ -269,17 +265,8 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !changes[dailyStateKey]) return;
     state = changes[dailyStateKey].newValue;
-    if (state?.plan && (launching || state.windowId == null)) showInChat();
-    renderReport();
+    if (dialog.open) renderReport();
   });
-  void chrome.storage.local.get(dailyStateKey).then(saved => {
-    if (state) return;
-    state = saved[dailyStateKey];
-    if (state?.plan) {
-      showInChat();
-      renderReport();
-    }
-  }).catch(() => {});
 
   return async source => {
     const today = dayInChina();
@@ -288,11 +275,12 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
     await writeSelection.catch(() => {});
     const saved = await chrome.storage.local.get([dailyStateKey, dailyScheduleKey, dailySelectionKey]);
     state = saved[dailyStateKey];
-    selection = dailyPlan(saved[dailySelectionKey]);
+    selection = savedDailyPlan(saved[dailySelectionKey]);
     schedule.elements.enabled.checked = Boolean(saved[dailyScheduleKey]?.enabled);
     schedule.elements.time.value = saved[dailyScheduleKey]?.time || "09:00";
     showStatus("");
-    updateControls();
+    showView(state?.running || (state && !source) ? "report" : "settings");
+    renderReport();
     if (!dialog.open) dialog.showModal();
     if (source && Object.hasOwn(dailySources, source)) scope.querySelector(`[data-id="${source}"]`)?.focus();
     return true;

@@ -5,21 +5,24 @@ function element(tag, content, className) {
   return node;
 }
 
-export function sectionCard(section, { onOpen } = {}) {
+export function sectionCard(section, { onOpen, onOpenRecord } = {}) {
   const body = element("details", undefined, "daily-section");
   const caption = element("summary");
-  const totals = section.complete ? String(section.records.length) : `${section.records.length} 条已读 · 未核对全量`;
+  const metrics = section.meta?.type === "metrics";
+  const totals = metrics ? `${section.records.length} 项指标` :
+    section.complete ? String(section.records.length) : `${section.records.length} 条已读 · 未核对全量`;
   caption.append(element("strong", section.section), element("span", totals, "daily-total"));
   if (section.added?.length) caption.append(element("span", `新增 ${section.added.length}`, "daily-badge"));
   body.append(caption);
   const panel = element("div", undefined, "daily-section-body");
+  if (section.meta?.date) panel.append(element("p", `统计时间（北京时间） ${section.meta.date}`, "daily-hint"));
   if (onOpen) {
     const open = element("button", "打开源页面", "secondary mini");
     open.type = "button";
     open.addEventListener("click", onOpen);
     panel.append(open);
   }
-  if (section.trend) {
+  if (section.trend && !metrics) {
     const delta = value => value == null ? "暂无基线" : value > 0 ? "+" + value : String(value);
     panel.append(element("p", `较上次 ${delta(section.previousDelta)} · 较昨日 ${delta(section.yesterdayDelta)}`, "daily-hint"));
     const chart = element("div", undefined, "daily-chart");
@@ -52,6 +55,15 @@ export function sectionCard(section, { onOpen } = {}) {
         fields.append(element("dt", label), element("dd", value || "—"));
       }
       card.append(fields);
+      if (row.action && onOpenRecord) {
+        card.append(button(row.action, async event => {
+          const control = event.currentTarget;
+          control.disabled = true;
+          try {
+            await onOpenRecord(row.id);
+          } finally { control.disabled = false; }
+        }));
+      }
       list.append(card);
     }
     more.hidden = list.children.length >= rows.length;
@@ -82,11 +94,11 @@ function countText(last) {
   return last.added > 0 ? `发现 ${last.added} 条新增 · 共 ${last.count} 条` : `读取 ${last.count} 条 · 无新增`;
 }
 
-export function renderDailyChat(article, state, { onOpen, onRetry, onSummarize }) {
-  const header = element("header", undefined, "daily-chat-header");
+export function renderDailyReport(article, state, { onOpen, onRetry, onSummarize }) {
+  const header = element("header", undefined, "daily-report-header");
   header.append(element("h3", "每日运营数据"),
-    element("span", state.running ? "进行中" : state.interrupted ? "已中断" : "已完成", "daily-chat-state"));
-  const body = element("div", undefined, "daily-chat-body");
+    element("span", state.running ? "进行中" : state.interrupted ? "已中断" : "已完成", "daily-report-state"));
+  const body = element("div", undefined, "daily-report-body");
   article.replaceChildren(header, body);
   const { done, total, current, last } = state.progress || {};
   if (state.running) {
@@ -119,19 +131,26 @@ export function renderDailyChat(article, state, { onOpen, onRetry, onSummarize }
     if (!config) continue;
     const slices = result.sections;
     const preview = slices.find(section => section.section === "全部") || (slices.length === 1 ? slices[0] : null);
-    if (preview) {
+    const mainMetric = { traffic: "商品曝光量", sales: "今日总销量", market: "活动销量" }[id];
+    for (const item of mainMetric ? slices : preview ? [preview] : []) {
+      const value = item.records.find(row => row.id === mainMetric)?.fields.数值;
       const metric = element("div", undefined, "daily-metric");
-      metric.append(element("small", `${config.name} · ${preview.section}`),
-        element("strong", preview.records.length),
-        element("span", preview.complete ? preview.added?.length ? `新增 ${preview.added.length}` : "条记录" : "条已读"));
+      metric.append(element("small", `${config.name} · ${item.section}`),
+        element("strong", value ?? item.records.length),
+        element("span", value !== undefined ? mainMetric :
+          item.complete ? item.added?.length ? `新增 ${item.added.length}` : "条记录" : "条已读"));
       metrics.append(metric);
     }
     if (slices.length) {
       const group = element("section", undefined, "daily-report-group");
       group.append(element("h4", config.name));
       for (const section of slices) {
-        group.append(sectionCard(section, { onOpen: () => onOpen(id, section.section) }));
-        if (!section.complete || section.records.length && (needsAttention.test(section.section) || section.added?.length)) {
+        group.append(sectionCard(section, {
+          onOpen: () => onOpen(id, section.section),
+          onOpenRecord: recordId => onOpen(id, section.section, { recordId }),
+        }));
+        if (!section.complete || section.meta?.type !== "metrics" && section.records.length &&
+          (needsAttention.test(section.section) || section.added?.length)) {
           const label = section.complete ? needsAttention.test(section.section) ?
             `${section.records.length} 条可查看` : `${section.added.length} 条新增` : "需要核对全量";
           addIssue(section.section, label, !section.complete);

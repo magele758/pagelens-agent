@@ -11,7 +11,8 @@ export function dailyReportData(state) {
       const section = result?.sections.find(item => item.section === name);
       return {
         platform, module, section: name,
-        status: !section ? "未完成" : section.complete ? "已核对" : "部分读取",
+        status: !section ? "未完成" : section.meta?.type === "metrics" ? "已读取指标" :
+          section.complete ? "已核对" : "部分读取",
         count: section?.records.length ?? null,
         added: section?.previousDelta != null ? section.added?.length ?? 0 : null,
         updated: section?.previousDelta != null ? section.changed?.length ?? 0 : null,
@@ -48,7 +49,7 @@ export async function summarizeDailyRun(state) {
     const { content, reasoning } = await streamTurn(model, {
       signal: AbortSignal.timeout(60000), onReasoningDelta: () => {},
       messages: [
-        { role: "system", content: '用简体中文给跨境运营人员列出最多三条简短的事实或建议，优先待处理、待回复、违规、资金限制和采集失败。只输出 JSON 对象，格式为 {"要点":["要点内容"]}。状态可能重叠，不能相加当作总量。区分总数和新增。null 表示无基线或未读取，部分读取不是总量。只依据给定事实。' },
+        { role: "system", content: '用简体中文给跨境运营人员列出最多三条简短的事实或建议，优先待处理、待回复、违规、资金限制和采集失败。只输出 JSON 对象，格式为 {"要点":["要点内容"]}。状态可能重叠，不能相加当作总量。区分总数和新增。“已读取指标”的数量仅代表已读取的指标项数，具体数值可在报告中查看。null 表示无基线或未读取，部分读取不是总量。只依据给定事实。' },
         { role: "user", content: JSON.stringify({
           列: ["平台", "模块", "页签", "状态", "条数", "新增", "更新", "较上次", "较昨日"],
           结果: facts, 已核对无记录的页签: empty.map(row => [row.platform, row.module, row.section].join("›")),

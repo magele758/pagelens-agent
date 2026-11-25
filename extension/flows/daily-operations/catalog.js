@@ -1,3 +1,5 @@
+import { TEMU_SELLER_OPERATIONS } from "../temu/seller-operations/routes.js";
+
 const globalTemu = "https://agentseller.temu.com";
 const europeanTemu = "https://agentseller-eu.temu.com";
 
@@ -35,6 +37,23 @@ export const dailySources = {
     sections: ["限制记录"], header: "限制原因",
     fields: /^(限制原因|.*限制金额(?:\([A-Z]+\))?|限制金额说明)$/u,
   },
+  campaigns: {
+    name: "Temu 营销活动", platform: "Temu", module: "营销活动", mode: "campaigns",
+    url: TEMU_SELLER_OPERATIONS["temu-campaign-data"].href,
+    sections: ["邀约活动", "直降促销活动", "专属补贴活动"],
+  },
+  traffic: {
+    name: "Temu 商品流量", platform: "Temu", module: "商品流量", mode: "analytics",
+    url: europeanTemu + "/main/flux-analysis", sections: ["近1日", "近7日"],
+  },
+  sales: {
+    name: "Temu 销量分析", platform: "Temu", module: "销量分析", mode: "analytics",
+    url: europeanTemu + "/main/data-center/goods-data", sections: ["销量概览"],
+  },
+  market: {
+    name: "Temu 今日大盘数据", platform: "Temu", module: "今日大盘数据", mode: "analytics",
+    url: europeanTemu + "/main/act/data", sections: ["今日大盘"],
+  },
 };
 
 export const dailySelectionKey = "pagelens.dailyOperations.selection.v1";
@@ -47,6 +66,15 @@ export function dailyPlan(selection, source = "all") {
         Array.isArray(selection[id]) && selection[id].includes(section));
     return sections.length ? [[id, [...sections]]] : [];
   }));
+}
+
+export function savedDailyPlan(selection) {
+  if (selection == null) return dailyPlan();
+  if (selection.version === 2) return dailyPlan(selection.sources);
+  // Existing choices used the old catalog. Newly added sources start checked.
+  const additions = Object.fromEntries(Object.entries(dailySources)
+    .filter(([, config]) => config.mode).map(([id, config]) => [id, config.sections]));
+  return dailyPlan({ ...additions, ...selection });
 }
 
 export function dailySectionName(id, section) {

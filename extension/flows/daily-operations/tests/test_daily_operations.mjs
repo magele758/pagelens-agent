@@ -1,22 +1,50 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources } from "../catalog.js";
+import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources, savedDailyPlan } from "../catalog.js";
 import { readDailyPage } from "../page.js";
 import { addSnapshot, compareSnapshot, dailyScheduleKey, dailyStateKey, dayInChina } from "../history.js";
 import { dailyReportData, parseDailyHighlights } from "../report.js";
 import { handleDailyMessage, onDailyAlarm } from "../runtime.js";
-import { renderDailyChat } from "../../../skill-components/daily-operations/cards.js";
+import { renderDailyReport } from "../../../skill-components/daily-operations/cards.js";
+import { bindDailyOperations } from "../../../skill-components/daily-operations/panel.js";
 
 test("the selected plan defaults to all and only keeps checked known sections", () => {
-  assert.equal(Object.values(dailyPlan()).flat().length, 30);
+  assert.equal(Object.values(dailyPlan()).flat().length, 37);
   assert.deepEqual(dailyPlan({ orders: ["全部", "全部", "unknown"], refunds: [], fake: ["全部"] }), { orders: ["全部"] });
   assert.deepEqual(dailyPlan({}), {});
+  assert.deepEqual(savedDailyPlan({ version: 2, sources: {} }), {});
+  assert.deepEqual(savedDailyPlan({ chat: ["待回复消息"] }).traffic, ["近1日", "近7日"]);
+  assert.equal(savedDailyPlan({ chat: ["待回复消息"] }).orders, undefined);
+});
+
+test("daily progress and completed reports remain inside their own dialog", async () => {
+  const prior = { chrome: globalThis.chrome, document: globalThis.document };
+  const { window } = new JSDOM('<div id="msgs">existing chat</div>');
+  const run = { running: true, startedAt: 1, plan: { chat: ["待回复消息"] }, results: {},
+    progress: { total: 1, done: 0, current: { id: "chat", section: "待回复消息" } } };
+  window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  let observe;
+  globalThis.document = window.document;
+  globalThis.chrome = { storage: {
+    local: { get: async () => ({ [dailyStateKey]: run }) },
+    onChanged: { addListener: listener => { observe = listener; } },
+  } };
+  try {
+    await bindDailyOperations()();
+    assert.equal(document.querySelector("#msgs").textContent, "existing chat");
+    assert.ok(document.querySelector("dialog[open] article progress"));
+    observe({ [dailyStateKey]: { newValue: { ...run, running: false, finishedAt: 2,
+      report: { highlights: ["无待回复消息。"] },
+    } } }, "local");
+    assert.match(document.querySelector("dialog article").textContent, /无待回复消息/u);
+    assert.equal(document.querySelector("#msgs").textContent, "existing chat");
+  } finally { Object.assign(globalThis, prior); }
 });
 
 test("manual runs and alarms only open selected sources and visit selected tabs", async () => {
   const previousChrome = globalThis.chrome;
-  const stored = { [dailySelectionKey]: { violations: ["店铺违规"] } };
+  const stored = { [dailySelectionKey]: { version: 2, sources: { violations: ["店铺违规"] } } };
   const calls = [];
   let resolveAlarm;
   globalThis.chrome = {
@@ -74,12 +102,12 @@ test("the report uses aggregate facts and its cards link to and retry the select
   const action = [];
   try {
     const article = document.querySelector("article");
-    renderDailyChat(article, { ...state, running: true, phase: "collect", progress: {
+    renderDailyReport(article, { ...state, running: true, phase: "collect", progress: {
       current: { id: "chat", section: "待回复消息" }, done: 0, total: 2,
     } }, {});
     assert.equal(article.querySelector("progress").max, 2);
     assert.match(article.textContent, /正在查看 Temu › 客服 › 待回复消息/u);
-    renderDailyChat(article, state, { onOpen: (...args) => action.push(args), onRetry: plan => action.push(plan) });
+    renderDailyReport(article, state, { onOpen: (...args) => action.push(args), onRetry: plan => action.push(plan) });
     assert.match(article.textContent, /AI 摘要/u);
     article.querySelector(".daily-issues button").click();
     [...article.querySelectorAll(".daily-issues button")].find(node => node.textContent === "重试").click();
@@ -93,10 +121,52 @@ function fixture(source, html, markupVisible = () => true) {
   dom.window.HTMLElement.prototype.getClientRects = function () { return markupVisible(this) ? [{}] : []; };
   const run = params => dom.window.eval(`(${readDailyPage.toString()})`)({
     source, targetUrl: config.url, sections: config.sections, translations: config.translations,
-    header: config.header, allowedFields: config.fields?.source, ...params,
+    header: config.header, allowedFields: config.fields?.source, mode: config.mode, ...params,
   });
   return { run, doc: dom.window.document };
 }
+
+test("the traffic collector verifies the date and each card's selected period", () => {
+  const names = ["商品曝光量", "商品点击量", "支付订单数", "支付件数", "点击率", "点击订单转化率", "曝光订单转化率"];
+  const { run, doc } = fixture("traffic", `
+    <div class="_Wrz4-O9w">shop</div>
+    <section><div><span>汇总分析</span> 统计时间：北京时间 2026-11-24</div>
+      <div><span>实时</span><span>近1日</span><span id="summary">近7日</span><span>近30日</span><span>本周</span><span>本月</span></div>
+      <div>${names.map(name => `<div><span>${name}</span> <b>42</b> <small>较前1日 5%</small></div>`).join("")}</div>
+    </section>
+    <section><span>商品明细</span><span id="details">近7日</span></section>
+  `);
+  const reply = run({ section: "近1日" });
+  assert.equal(reply.ok, true);
+  assert.equal(reply.meta.date, "2026-11-24");
+  assert.equal(reply.records[0].fields.数值, "42");
+  assert.equal(run({ section: "近7日" }).code, "loading");
+  const clicks = [];
+  for (const node of doc.querySelectorAll("#summary,#details")) node.onclick = () => clicks.push(node.id);
+  assert.equal(run({ action: "section", section: "近7日" }).ok, true);
+  assert.deepEqual(clicks, ["summary"]);
+});
+
+test("campaign shortcuts match the unique row in the selected category and shop", () => {
+  const { run, doc } = fixture("campaigns", `
+    <div class="_Wrz4-O9w">shop</div>
+    <div><div class="card_active_x"><span>直降促销活动</span> 长期流量注入</div><div><span>专属补贴活动</span></div></div>
+    <div>符合条件的活动数量：2</div>
+    <table><tbody>
+      <tr><td>今日活动</td><td>2026-11-19 ～ 2026-11-25</td><td>≤ 7折</td><td>≥ 5件</td><td>0</td><td><a id="older">报名</a></td></tr>
+      <tr><td>今日活动</td><td>2026-11-27 ～ 2026-11-30</td><td>≤ 8折</td><td>≥ 5件</td><td>0</td><td><a id="target">报名</a></td></tr>
+    </tbody></table><button id="commit">同意活动规则，立即报名</button>
+  `);
+  const clicks = [];
+  for (const node of doc.querySelectorAll("a,button")) node.onclick = () => clicks.push(node.id);
+  const result = run({ section: "直降促销活动" });
+  assert.equal(result.total, 2);
+  assert.equal(result.records[1].action, "报名");
+  const shortcut = { action: "campaign-open", section: "直降促销活动", recordId: result.records[1].id };
+  assert.equal(run({ ...shortcut, expectedAccount: "other" }).code, "account-changed");
+  assert.equal(run({ ...shortcut, expectedAccount: "shop" }).ok, true);
+  assert.deepEqual(clicks, ["target"]);
+});
 
 test("the daily entry points are restricted to the business lists", () => {
   assert.equal(dailySourceForUrl(dailySources.violations.url + "?targetType=2"), "violations");

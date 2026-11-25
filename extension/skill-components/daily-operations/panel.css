@@ -11,7 +11,7 @@
 }
 .daily-dialog[open] { display: flex; flex-direction: column; }
 .daily-dialog::backdrop { background: #1c19174d; }
-.daily-header, .daily-footer, .daily-section-heading, .daily-module-row, .daily-chat-header, .daily-progress-status {
+.daily-header, .daily-footer, .daily-section-heading, .daily-module-row, .daily-report-header, .daily-progress-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -19,10 +19,13 @@
 }
 .daily-header { padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .daily-header h2 { flex: 1; margin: 0; font-size: 16px; }
+.daily-views { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.daily-views button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.daily-dialog [hidden] { display: none; }
 .daily-body { min-height: 0; overflow: auto; padding: 14px; overscroll-behavior: contain; }
-.daily-body h3, .daily-chat h4 { margin: 0; font-size: 13px; }
+.daily-body h3, .daily-report h4 { margin: 0; font-size: 13px; }
 .daily-section-heading { margin-bottom: 8px; }
-.daily-section-heading span, .daily-hint, .daily-total, .daily-chat-state {
+.daily-section-heading span, .daily-hint, .daily-total, .daily-report-state {
   color: var(--muted);
   font-size: 12px;
 }
@@ -95,7 +98,7 @@
 .daily-footer { display: block; padding: 9px 14px 12px; border-top: 1px solid var(--line); }
 .daily-footer > div { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .daily-footer [role="status"]:not(:empty) { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
-.daily-chat {
+.daily-report {
   box-sizing: border-box;
   margin: 4px 0 10px;
   border: 1px solid var(--line);
@@ -106,11 +109,11 @@
   overflow: hidden;
   min-width: 0;
 }
-.daily-chat-header { padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--bg); }
-.daily-chat-header h3 { margin: 0; font-size: 14px; }
-.daily-chat-state { white-space: nowrap; }
-.daily-chat-body { padding: 11px 12px; font-size: 13px; }
-.daily-chat-body progress {
+.daily-report-header { padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.daily-report-header h3 { margin: 0; font-size: 14px; }
+.daily-report-state { white-space: nowrap; }
+.daily-report-body { padding: 11px 12px; font-size: 13px; }
+.daily-report-body progress {
   display: block;
   width: 100%;
   height: 8px;
@@ -120,8 +123,8 @@
   background: var(--bg);
   accent-color: var(--accent);
 }
-.daily-chat-body progress::-webkit-progress-bar { border-radius: inherit; background: var(--bg); }
-.daily-chat-body progress::-webkit-progress-value { border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+.daily-report-body progress::-webkit-progress-bar { border-radius: inherit; background: var(--bg); }
+.daily-report-body progress::-webkit-progress-value { border-radius: inherit; background: var(--accent); transition: width .2s ease; }
 .daily-progress-status { margin-top: 7px; font-size: 12px; }
 .daily-progress-status small { white-space: nowrap; color: var(--muted); }
 .daily-report-time { margin: 0 0 7px; }
@@ -171,6 +174,7 @@
 .daily-chart-track { display: flex; align-items: end; justify-content: center; background: var(--bg); border-radius: 4px; }
 .daily-chart-bar { width: min(65%, 18px); background: var(--accent); border-radius: 3px 3px 0 0; }
 .daily-records li { padding: 7px; margin: 5px 0; border: 1px solid var(--line); border-radius: 6px; }
+.daily-records button { margin-top: 7px; }
 .daily-records .daily-new { border-inline-start: 3px solid var(--accent); }
 .daily-records dl { display: grid; grid-template-columns: minmax(57px, auto) 1fr; gap: 3px 6px; margin: 0; }
 .daily-records dt { color: var(--muted); }

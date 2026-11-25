@@ -1,5 +1,6 @@
 // Serialized into the seller tab. Commands here operate only on the configured list.
-export function readDailyPage({ source, targetUrl, sections, translations, header, allowedFields, action = "read", section, start, end, orderNumber, field }) {
+export function readDailyPage({ source, targetUrl, sections, translations, header, allowedFields, mode,
+  action = "read", section, start, end, orderNumber, field, recordId, expectedAccount }) {
   const target = new URL(targetUrl);
   const failure = (code, error) => ({ ok: false, code, error });
   if (window !== window.top || location.origin !== target.origin || location.pathname !== target.pathname) {
@@ -35,6 +36,8 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
 
   const account = unique([...new Set(nodes(document, accountNodes).map(text).filter(Boolean))]);
   if (!account) return failure("loading", "正在核对商家账号。");
+  if (mode === "analytics") return analytics();
+  if (mode === "campaigns") return campaigns();
   const statusText = (node, name) => {
     const value = text(node);
     return value === name || value.startsWith(name) && /^\s*\(?[\d,]+\)?$/u.test(value.slice(name.length));
@@ -195,4 +198,175 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
   if (!records.length && !empty && total !== 0) return failure("loading", "正在等待目标列表结果。");
   return { ok: true, account, records, total, page: Number(text(pageNode)) || 1,
     invalidRows: items.length > records.length && !empty, next: Boolean(next), more: false };
+
+  function analytics() {
+    const controls = nodes(document, "button,span,div,li");
+    const labelsFor = name => controls.filter(node => text(node) === name &&
+      ![...node.children].some(child => text(child) === name));
+    if (source === "traffic" && action === "section") {
+      const heading = unique(labelsFor("汇总分析"));
+      const options = labelsFor(section);
+      let target;
+      for (let parent = heading?.parentElement, i = 0; parent && i < 10; parent = parent.parentElement, i++) {
+        const local = options.filter(node => parent.contains(node));
+        if (!local.length) continue;
+        const control = unique(local);
+        target = control?.closest("button,[role=tab],[role=radio]") || control;
+        break;
+      }
+      if (!target || !enabled(target) || target.closest("a[href]") || target.form) {
+        return failure("loading", "还没有定位到流量周期选项。");
+      }
+      target.click();
+      return { ok: true };
+    }
+    if (action === "section") return { ok: true };
+    if (action !== "read") return failure("unsupported", "不支持此经营分析操作。");
+
+    const metrics = source === "traffic"
+      ? ["商品曝光量", "商品点击量", "支付订单数", "支付件数", "点击率", "点击订单转化率", "曝光订单转化率"]
+      : source === "sales"
+        ? ["今日总销量", "售罄健康分数", "无法报名活动商品数", "待反馈", "待补货", "未按期补货",
+          "SKU售罄数&占比", "低库存预警SKU数&占比", "新增SKU售罄数&占比", "售罄影响GMV&占比"]
+        : ["活动销量", "活动GMV", "活动商品数", "曝光用户数", "点击用户数", "点击转化率", "支付转化率"];
+    const normalize = value => value.replace(/\s+/gu, "");
+    const rawBody = text(document.body);
+    const date = rawBody.match(source === "traffic"
+      ? /统计时间\s*[:：]\s*北京时间\s*(\d{4}-\d{2}-\d{2}(?:\s*[~～至-]\s*\d{4}-\d{2}-\d{2})?)/u
+      : /(?:最后|最近)更新时间\s*[:：]\s*(?:北京时间\s*)?(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?)/u)?.[1];
+    if (!date) return failure("loading", "正在等待分析页面的统计时间。");
+
+    const records = metrics.flatMap(name => {
+      const values = new Map();
+      const measurable = /^(?:[¥￥$€])?\s*(?:[-+]?\d[\d,]*(?:\.\d+)?%?(?:\s*\(\s*\d+(?:\.\d+)?%\s*\))?|--|—|暂无数据|-)(?=\s|较|$)/u;
+      for (const label of controls.filter(node => normalize(text(node)) === name &&
+        ![...node.children].some(child => normalize(text(child)) === name))) {
+        const found = [];
+        for (let node = label.parentElement, depth = 0; node && depth < 6; node = node.parentElement, depth++) {
+          const content = text(node);
+          if (content.length > 220 || !normalize(content).startsWith(name)) break;
+          let i = 0;
+          for (let count = 0; count < name.length && i < content.length; i++) {
+            if (!/\s/u.test(content[i])) count++;
+          }
+          const remainder = content.slice(i).trim();
+          const value = remainder.match(measurable)?.[0];
+          if (!value) continue;
+          const compare = remainder.match(/较前[17]日|较昨日|较近7日/gu);
+          if (source === "traffic" && !compare?.includes(section.replace("近", "较前"))) continue;
+          found.push({ value, change: compare ? remainder.slice(value.length).trim().slice(0, 85) : "" });
+          if (compare) break;
+        }
+        const candidate = found.at(-1);
+        if (candidate) values.set(candidate.value, candidate);
+      }
+      if (values.size !== 1) return [];
+      const { value, change } = values.values().next().value;
+      return [{ id: name, fields: { 指标: name, 数值: value, ...(change && { 平台对比: change }) } }];
+    });
+    if (records.length < (source === "traffic" ? metrics.length : 2)) {
+      return failure("loading", "正在等待对应周期的分析指标。");
+    }
+    return { ok: true, account, records, total: records.length, next: false, more: false,
+      meta: { date, type: "metrics" } };
+  }
+
+  function campaigns() {
+    const invitation = section === "邀约活动";
+    const controlName = invitation ? "邀约详情" : "报名";
+    const categoryNames = ["直降促销活动", "专属补贴活动"];
+    const categoryCards = [];
+    if (!invitation) {
+      const labels = nodes(document, "span,div,h2,h3,h4").filter(node =>
+        categoryNames.includes(text(node)) && ![...node.children].some(child => text(child) === text(node)));
+      for (const label of labels) {
+        const name = text(label);
+        let card = label;
+        while (card.parentElement && text(card.parentElement).length < 400 &&
+          !categoryNames.some(other => name !== other && text(card.parentElement).includes(other))) {
+          card = card.parentElement;
+        }
+        const parent = card.parentElement;
+        if (parent && text(parent).length < 400 && categoryNames.every(category => text(parent).includes(category))) {
+          categoryCards.push({ name, card, label });
+        }
+      }
+      const current = unique(categoryCards.filter(item => item.name === section));
+      const other = unique(categoryCards.filter(item => item.name !== section));
+      if (!current || !other) return failure("loading", "正在定位活动类型。");
+      const active = ({ card, label }) => {
+        for (let node = label; node && card.contains(node); node = node.parentElement) {
+          if (node.matches('[aria-selected=true],[aria-checked=true],[data-state=active]') ||
+            /(?:^|[-_\s])(?:active|selected|checked)(?:$|[-_\s])/iu.test(String(node.className))) return true;
+          const style = getComputedStyle(node);
+          const rgb = style.borderTopColor?.match(/\d+/gu)?.map(Number);
+          if (parseFloat(style.borderTopWidth) > 0 && rgb?.length >= 3 && rgb[2] > rgb[0] + 30 && rgb[2] > rgb[1] + 10) return true;
+        }
+        return false;
+      };
+      if (action === "section") {
+        if (!active(current)) current.label.click();
+        return { ok: true };
+      }
+      if (!active(current) || active(other)) return failure("loading", "正在核对活动类型是否已切换。");
+    } else if (action === "section") return { ok: true };
+    if (action !== "read" && action !== "campaign-open") return failure("unsupported", "不支持此活动操作。");
+
+    const actions = nodes(document, 'button,a,[role="button"]').filter(node => text(node) === controlName);
+    const rows = [];
+    for (const control of actions) {
+      let card = invitation ? control.parentElement : control.closest("tr");
+      for (let depth = 0; card && depth < (invitation ? 7 : 1); depth++, card = card.parentElement) {
+        const body = text(card);
+        if (body.length > 1400 || (invitation && actions.filter(node => card.contains(node)).length !== 1)) break;
+        const cells = [...card.children].filter(node => node.matches("td"));
+        const dates = (invitation ? body : text(cells[1])).match(
+          /\d{4}-\d{2}-\d{2}\s*[~～至-]\s*\d{4}-\d{2}-\d{2}|长期有效/u)?.[0];
+        if (invitation && (!dates || !body.includes("邀约潜力商品") || !body.includes("活动详情"))) continue;
+        if (!invitation && (cells.length !== 6 || !cells.at(-1).contains(control) || !dates)) break;
+        const name = (invitation ? body.split("活动详情")[0] : text(cells[0])).replace(/\s+NEW$/iu, "").trim();
+        if (!name) break;
+        const id = JSON.stringify([name, dates.replace(/\s/gu, "")]);
+        const discount = invitation ? body.match(/申报折扣\s*([≤≥<>]?\s*\d+(?:\.\d+)?\s*折)/u)?.[1] : text(cells[2]);
+        const potential = body.match(/邀约潜力商品\s*(\d+\s*\/\s*\d+)/u)?.[1];
+        const deadline = body.match(/\d+\s*(?:天|小时|分钟)后截止/u)?.[0];
+        rows.push({ control, id, fields: { 活动名称: name, 活动周期: dates,
+          ...(discount && { 申报条件: discount }), ...(potential && { 邀约潜力商品: potential }),
+          ...(deadline && { 报名截止: deadline }),
+          ...(!invitation && { 库存条件: text(cells[3]), 已报名: text(cells[4]) }),
+        } });
+        break;
+      }
+    }
+
+    function validAction(node) {
+      const href = node.getAttribute("href");
+      if (!enabled(node) || node.form) return false;
+      if (!href || href === "#" || /^javascript:void\(0\);?$/iu.test(href)) return true;
+      try {
+        const url = new URL(href, location.href);
+        return url.origin === location.origin && /^\/activity\/marketing-activity(?:\/|$)/u.test(url.pathname);
+      } catch {
+        return false;
+      }
+    }
+
+    if (action === "campaign-open") {
+      if (account !== expectedAccount) return failure("account-changed", "当前店铺与报告中的店铺不同。");
+      const row = unique(rows.filter(row => row.id === recordId && validAction(row.control)));
+      if (!row) return failure("not-matched", "未找到唯一且可用的活动按钮，请在活动页确认。");
+      row.control.click();
+      return { ok: true };
+    }
+    const advertised = invitation ? null : text(document.body).match(/符合条件的活动数量\s*[:：]\s*([\d,]+)/u)?.[1];
+    const total = advertised == null ? null : Number(advertised.replaceAll(",", ""));
+    if (!rows.length && total !== 0) return failure("loading", "正在等待营销活动列表。");
+    const counts = new Map();
+    for (const row of rows) counts.set(row.id, (counts.get(row.id) || 0) + 1);
+    const records = [...new Map(rows.map(row => [row.id, {
+      id: row.id, fields: row.fields,
+      ...(counts.get(row.id) === 1 && validAction(row.control) && { action: controlName }),
+    }])).values()];
+    return { ok: true, account, records, total: total ?? records.length, next: false, more: false };
+  }
 }

@@ -1,4 +1,4 @@
-import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources } from "./catalog.js";
+import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources, savedDailyPlan } from "./catalog.js";
 import { getCdp } from "../../lib/cdp.js";
 import { readDailyPage } from "./page.js";
 import { addSnapshot, compareSnapshot, dailyHistoryKey, dailyScheduleKey, dailyStateKey, dayInChina } from "./history.js";
@@ -30,7 +30,7 @@ async function openCollector(id, windowId, visible) {
       target: documentId ? { tabId, documentIds: [documentId] } : { tabId, frameIds: [0] },
       func: readDailyPage,
       args: [{ source: id, targetUrl: config.url, sections: config.sections, translations: config.translations,
-        header: config.header, allowedFields: config.fields?.source, action, section, ...filters }],
+        header: config.header, allowedFields: config.fields?.source, mode: config.mode, action, section, ...filters }],
     });
     if (reply?.frameId !== 0 || !reply.documentId || documentId && reply.documentId !== documentId) {
       throw new Error("采集标签的页面已切换。");
@@ -151,21 +151,30 @@ async function collectRows(id, collector, section, filters) {
         state.page > oldPage || state.records[0]?.id && state.records[0].id !== first);
     } else {
       const complete = !invalidRows && !result.more && (result.total == null || result.total === rows.size);
-      return { account, records: [...rows.values()], total: result.total, complete };
+      return { account, records: [...rows.values()], total: result.total, complete,
+        ...(result.meta && { meta: result.meta }) };
     }
   }
   return { account, records: [...rows.values()], total: result.total, complete: false };
 }
 
-export async function openDailyShortcut({ source, section, startDay, endDay, number, windowId }) {
+export async function openDailyShortcut({ source, section, startDay, endDay, number, recordId, windowId }) {
   const config = dailySources[source];
   if (!config?.sections.includes(section)) throw new Error("未知的数据入口。");
   const filters = source === "orders" ? orderFilters(startDay, endDay, number) : {};
+  let saved;
+  if (recordId !== undefined) {
+    if (config.mode !== "campaigns" || typeof recordId !== "string") throw new Error("无效的活动入口。");
+    const stored = await chrome.storage.local.get(dailyStateKey);
+    saved = stored[dailyStateKey]?.results?.[source]?.sections.find(item => item.section === section);
+    if (!saved?.records.some(row => row.id === recordId && row.action)) throw new Error("活动已刷新，请选择最新的记录。");
+  }
   const collector = await openCollector(source, windowId, true);
   if (source === "orders") await applyOrderFilters(collector, section, filters);
   await collector.ready("section", section, filters);
   await pause(850);
   await collector.ready("read", section, filters);
+  if (saved) await collector.ready("campaign-open", section, { recordId, expectedAccount: saved.account });
 }
 
 let running;
@@ -195,7 +204,7 @@ async function retryDailyReport(startedAt) {
 async function executeDaily({ source = "all", selection, startDay, endDay, windowId }) {
   if (source !== "all" && !Object.hasOwn(dailySources, source)) throw new Error("未知的每日运营来源。");
   const stored = await chrome.storage.local.get([dailyHistoryKey, dailySelectionKey]);
-  const plan = dailyPlan(selection ?? stored[dailySelectionKey], source);
+  const plan = dailyPlan(selection ?? savedDailyPlan(stored[dailySelectionKey]), source);
   const total = Object.values(plan).reduce((sum, sections) => sum + sections.length, 0);
   if (!total) throw new Error("请至少选择一项要采集的数据。");
   const filters = plan.orders ? orderFilters(startDay, endDay) : {};
@@ -205,7 +214,7 @@ async function executeDaily({ source = "all", selection, startDay, endDay, windo
     if (!entries.length || entries.at(-1).at < cutoff) delete history[key];
   }
   const state = { startedAt: Date.now(), running: true, phase: "collect", plan, results: {},
-    dates: { startDay, endDay }, windowId, progress: { done: 0, total } };
+    dates: { startDay, endDay }, progress: { done: 0, total } };
   const save = (snapshotChanged = false) => chrome.storage.local.set({
     [dailyStateKey]: state, ...(snapshotChanged && { [dailyHistoryKey]: history }),
   });
