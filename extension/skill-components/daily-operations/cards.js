@@ -105,7 +105,7 @@ export function renderDailyChat(article, state, { onOpen, onRetry, onSummarize }
     return;
   }
 
-  const groups = Object.entries(state.results || {});
+  const groups = Object.keys(dailySources).flatMap(id => state.results?.[id] ? [[id, state.results[id]]] : []);
   const metrics = element("div", undefined, "daily-metrics");
   const issues = element("ul", undefined, "daily-issues");
   const detail = element("details", undefined, "daily-report-details");
