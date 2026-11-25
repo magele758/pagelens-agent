@@ -1,8 +1,7 @@
 import { DELEGATE_STORAGE_KEY, MAX_CONCURRENT_TASKS, TASK_STATUS } from "./agent/delegate.js";
 
 export const mailKey = (id) => `pl.windowMail.${id}`;
-const WINDOW_IDENTITY_REQUEST = "pl.windowMail.identify";
-const WINDOW_IDENTITY_REPLY = "pl.windowMail.identity";
+const WINDOW_MAIL_PORT = "pagelens-window-mail";
 
 export const WORK_STATUS = { running: "执行中", done: "已完成", failed: "失败", cancelled: "已取消", needs_approval: "待批准" };
 
@@ -78,10 +77,34 @@ export async function readWindowMail(windowId) {
   return [...(data[key] || []), ...tasks.map(taskEntry)].sort((a, b) => b.at - a.at);
 }
 
+function requestThroughPanelPort(request) {
+  return new Promise((resolve, reject) => {
+    const port = chrome.runtime.connect({ name: WINDOW_MAIL_PORT });
+    port.onDisconnect.addListener(() => reject(new Error("侧栏连接已中断。")));
+    port.onMessage.addListener(message => {
+      if (message.type === "identify") {
+        chrome.windows.getCurrent().then(
+          window => port.postMessage({ type: "identity", windowId: window?.id ?? null }),
+          () => port.postMessage({ type: "identity", windowId: null }),
+        ).catch(() => {});
+        return;
+      }
+      if (message.type !== "result") return;
+      resolve(message.response);
+      port.disconnect();
+    });
+    port.postMessage(request);
+  });
+}
+
 export async function sendWindowMail(from, to, kind, text, capsule, requestKey) {
-  const response = await chrome.runtime.sendMessage({ type: "pl.windowMail.send", from, to, kind, text, capsule, requestKey });
+  const response = await requestThroughPanelPort({ type: "pl.windowMail.send", from, to, kind, text, capsule, requestKey });
   if (!response?.ok) throw new Error(response?.error || "窗口消息发送失败。");
   return response.entry;
+}
+
+export function cancelWindowMail(from, id) {
+  return requestThroughPanelPort({ type: "pl.windowMail.cancel", from, id });
 }
 
 // Subscribe before the first read so a fast return cannot race the subscription.
@@ -94,7 +117,7 @@ export function waitForWindowResult(from, id, signal) {
     }
     async function abort() {
       try {
-        await chrome.runtime.sendMessage({ type: "pl.windowMail.cancel", from, id });
+        await cancelWindowMail(from, id);
       } catch { /* 本地等待仍要结束 */ }
       finish(reject, new Error("已停止等待，该委派已取消，不会再有结果进收件箱。"));
     }
@@ -118,52 +141,52 @@ function requireSidePanelSender(sender) {
   if (!sender || sender.tab || sender.url !== panelUrl) throw new Error("仅侧栏可发送窗口消息。");
 }
 
-export function bindWindowMailIdentity(windowId) {
-  chrome.runtime.onMessage.addListener((msg, sender, respond) => {
-    if (msg?.type !== WINDOW_IDENTITY_REQUEST || sender?.id !== chrome.runtime.id || msg.windowId !== windowId) return false;
-    respond(true);
-    chrome.runtime.sendMessage({ type: WINDOW_IDENTITY_REPLY, nonce: msg.nonce, windowId }).catch(() => {});
-    return false;
+function identifyPortWindow(port) {
+  return new Promise(resolve => {
+    const finish = (windowId) => {
+      clearTimeout(timer);
+      port.onMessage.removeListener(receive);
+      port.onDisconnect.removeListener(disconnected);
+      resolve(windowId);
+    };
+    const receive = (message) => {
+      if (message?.type === "identity") finish(message.windowId);
+    };
+    const disconnected = () => finish(null);
+    const timer = setTimeout(disconnected, 3000);
+    port.onMessage.addListener(receive);
+    port.onDisconnect.addListener(disconnected);
+    try {
+      port.postMessage({ type: "identify" });
+    } catch {
+      disconnected();
+    }
   });
 }
 
-export function installWindowMail(manager) {
-  const challenges = new Map();
-
-  function identifyWindow(documentId, windowId) {
-    return new Promise(resolve => {
-      const nonce = crypto.randomUUID();
-      const finish = (verifiedWindowId) => {
-        if (!challenges.delete(nonce)) return;
-        clearTimeout(timer);
-        resolve(verifiedWindowId);
-      };
-      const timer = setTimeout(() => finish(null), 2000);
-      challenges.set(nonce, { documentId, windowId, finish });
-      chrome.runtime.sendMessage({ type: WINDOW_IDENTITY_REQUEST, nonce, windowId }).then(
-        acknowledged => { if (acknowledged !== true) finish(null); },
-        () => finish(null),
-      );
-    });
-  }
-
-  async function boundWindowId(sender, claimedWindowId) {
-    if (!sender.documentId || !Number.isInteger(claimedWindowId) || claimedWindowId < 0) return null;
-    const panelUrl = chrome.runtime.getURL("sidepanel/index.html");
-    const panels = await chrome.runtime.getContexts({
-      contextTypes: ["SIDE_PANEL"], documentUrls: [panelUrl], documentIds: [sender.documentId],
-    });
+async function boundWindowId(sender, claimedWindowId, port) {
+  if (!Number.isInteger(claimedWindowId) || claimedWindowId < 0 || (!sender.documentId && !port)) return null;
+  const panelUrl = chrome.runtime.getURL("sidepanel/index.html");
+  const panels = await chrome.runtime.getContexts({
+    contextTypes: ["SIDE_PANEL"], documentUrls: [panelUrl],
+    ...(sender.documentId ? { documentIds: [sender.documentId] } : {}),
+  });
+  if (!panels.length) return null;
+  if (sender.documentId) {
     const mine = panels.find(p => p.documentId === sender.documentId);
     if (!mine || !Number.isInteger(mine.windowId)) return null;
-    // Chromium can report -1 for a real side panel. Verify the reply's browser-supplied document ID.
-    if (mine.windowId === -1) return identifyWindow(sender.documentId, claimedWindowId);
-    return mine.windowId >= 0 ? mine.windowId : null;
+    if (mine.windowId !== -1) return mine.windowId >= 0 ? mine.windowId : null;
   }
+  // Chrome can omit both IDs for side-panel senders. The browser-owned port scopes the
+  // reply to this extension page, which resolves its own window with chrome.windows.getCurrent().
+  return port ? identifyPortWindow(port) : null;
+}
 
-  async function deliver(msg, sender) {
+export function installWindowMail(manager) {
+  async function deliver(msg, sender, port) {
     const { from, to, kind } = msg;
     requireSidePanelSender(sender);
-    const bound = await boundWindowId(sender, from);
+    const bound = await boundWindowId(sender, from, port);
     if (bound == null || bound !== from) throw new Error("发送侧栏与窗口不匹配。");
     const text = String(msg.text ?? "").trim();
     if (!text || text.length > 8000) throw new Error("消息长度须为 1 至 8000 个字符。");
@@ -215,32 +238,34 @@ export function installWindowMail(manager) {
       return entry;
     });
   }
-  async function cancelWaiting(msg, sender) {
+  async function cancelWaiting(msg, sender, port) {
     requireSidePanelSender(sender);
-    const bound = await boundWindowId(sender, msg.from);
+    const bound = await boundWindowId(sender, msg.from, port);
     if (bound == null || bound !== msg.from) return;
     const task = (await manager.list()).find(t => t.id === msg.id && t.requesterWindowId === bound && t.status === "running");
     if (task) await manager.cancel(task.id);
   }
-  chrome.runtime.onMessage.addListener((msg, sender, respond) => {
+  function respondToWindowMail(msg, sender, respond, port) {
     if (sender?.id !== chrome.runtime.id) return false;
-    if (msg?.type === WINDOW_IDENTITY_REPLY) {
-      const challenge = challenges.get(msg.nonce);
-      if (challenge && challenge.documentId === sender.documentId && challenge.windowId === msg.windowId) {
-        try {
-          requireSidePanelSender(sender);
-          challenge.finish(msg.windowId);
-        } catch { /* Ignore replies from non-sidebar contexts. */ }
-      }
-      return false;
-    }
+    const failure = err => respond({ ok: false, error: err.message });
     if (msg?.type === "pl.windowMail.cancel") {
-      cancelWaiting(msg, sender).then(() => respond({ ok: true }), err => respond({ ok: false, error: err.message }));
+      cancelWaiting(msg, sender, port).then(() => respond({ ok: true }), failure);
       return true;
     }
     if (msg?.type !== "pl.windowMail.send") return false;
-    deliver(msg, sender).then(entry => respond({ ok: true, entry }), err => respond({ ok: false, error: err.message }));
+    deliver(msg, sender, port).then(entry => respond({ ok: true, entry }), failure);
     return true;
+  }
+  chrome.runtime.onMessage.addListener((msg, sender, respond) => respondToWindowMail(msg, sender, respond));
+  chrome.runtime.onConnect.addListener(port => {
+    if (port.name !== WINDOW_MAIL_PORT) return;
+    const receive = (msg) => {
+      port.onMessage.removeListener(receive);
+      respondToWindowMail(msg, port.sender, response => {
+        try { port.postMessage({ type: "result", response }); } catch { /* The panel has closed. */ }
+      }, port);
+    };
+    port.onMessage.addListener(receive);
   });
   chrome.windows.onRemoved.addListener(async id => {
     try {
