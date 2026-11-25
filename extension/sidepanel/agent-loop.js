@@ -721,9 +721,10 @@ async function sendWindowPrompt(text, userText, options) {
 
   try {
     console.info("[pagelens] sendPrompt executeLoop");
-    if (state.share && state.tab && !state.chatRef?.context) {
+    const fromInbox = options.fromInbox === true;
+    if (fromInbox || (state.share && state.tab && !state.chatRef?.context)) {
       try {
-        await withTimeout(refreshTab({ interactive: true }), 8000, "读当前页超时，先用已缓存内容。");
+        await withTimeout(refreshTab({ interactive: !fromInbox }), 8000, "读当前页超时，先用已缓存内容。");
       } catch (err) {
         console.warn("[pagelens] refreshTab", err);
         pushTraceItem(botMsg, { kind: "meta", name: "读页", ok: false });
