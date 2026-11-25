@@ -1,5 +1,5 @@
 import { DELEGATE_STORAGE_KEY, MAX_CONCURRENT_TASKS } from "../lib/agent/delegate.js";
-import { listPeerWindows, mailKey, readWindowMail, sendWindowMail, waitForWindowResult, WORK_STATUS } from "../lib/window-mail.js";
+import { bindWindowMailIdentity, listPeerWindows, mailKey, readWindowMail, sendWindowMail, waitForWindowResult, WORK_STATUS } from "../lib/window-mail.js";
 
 export function windowMailTools(from, getCapsule, userMessageId) {
   const requestKey = callId => userMessageId && callId ? `${userMessageId}/${callId}` : undefined;
@@ -89,6 +89,7 @@ export function windowMailTools(from, getCapsule, userMessageId) {
 }
 
 export function bindWindowMail(windowId) {
+  bindWindowMailIdentity(windowId);
   const box = document.getElementById("window-mail");
   const select = document.getElementById("window-peer");
   const draft = document.getElementById("window-mail-text");

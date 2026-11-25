@@ -6,7 +6,7 @@ import { systemPrompt } from "../lib/prompts.js";
 import { windowMailTools, bindWindowMail } from "../sidepanel/window-mail.js";
 import { resolveActiveTools } from "../lib/agent/tools.js";
 import { extractCapsule, capsuleCovers } from "../lib/agent/trust/capsule.js";
-import { installWindowMail, listPeerWindows, readWindowMail, sendWindowMail, waitForWindowResult } from "../lib/window-mail.js";
+import { bindWindowMailIdentity, installWindowMail, listPeerWindows, mailKey, readWindowMail, sendWindowMail, waitForWindowResult } from "../lib/window-mail.js";
 
 function event() {
   const listeners = new Set();
@@ -17,6 +17,7 @@ const db = {};
 const panelUrl = "chrome-extension://fixture/sidepanel/index.html";
 const senderFor = windowId => ({ id: "fixture", url: panelUrl, documentId: `doc-${windowId}` });
 let sender = senderFor(1);
+let identitySender = sender;
 let contextRows = [{ windowId: -1 }];
 const cancelled = [];
 const windows = [1, 2, 3].map(id => ({ id, incognito: false })).concat({ id: 4, incognito: true });
@@ -25,7 +26,12 @@ globalThis.chrome = {
     id: "fixture", onMessage: event(), getURL: () => panelUrl,
     getContexts: async () => contextRows,
     sendMessage: async msg => new Promise(resolve => {
-      for (const receive of chrome.runtime.onMessage.listeners) receive(msg, sender, resolve);
+      let messageSender = sender;
+      if (msg.type === "pl.windowMail.identify") messageSender = { id: "fixture" };
+      if (msg.type === "pl.windowMail.identity") messageSender = identitySender;
+      const keepOpen = [...chrome.runtime.onMessage.listeners]
+        .map(receive => receive(msg, messageSender, resolve)).includes(true);
+      if (!keepOpen) resolve(undefined);
     }),
   },
   windows: { getAll: async () => windows, onRemoved: event(), onCreated: event() },
@@ -57,7 +63,20 @@ installWindowMail({
 assert.deepEqual(await listPeerWindows(1), [{ id: 2, busy: false }, { id: 3, busy: false }]);
 await assert.rejects(sendWindowMail(1, 2, "message", "unbound"), /不匹配/);
 contextRows = [{ documentId: "doc-1", windowId: -1 }, { documentId: "doc-2", windowId: 1 }];
-await assert.rejects(sendWindowMail(1, 2, "message", "negative"), /不匹配/);
+await assert.rejects(sendWindowMail(1, 2, "message", "negative without responder"), /不匹配/);
+bindWindowMailIdentity(1);
+identitySender = senderFor(2);
+await assert.rejects(sendWindowMail(1, 2, "message", "wrong document replied"), /不匹配/);
+identitySender = senderFor(1);
+await assert.rejects(sendWindowMail(2, 3, "message", "wrong claimed window"), /不匹配/);
+await assert.rejects(sendWindowMail(null, 3, "message", "no claimed window"), /不匹配/);
+contextRows = [{ documentId: "doc-2", windowId: -1 }];
+await assert.rejects(sendWindowMail(1, 2, "message", "document not registered as a side panel"), /不匹配/);
+contextRows = [{ documentId: "doc-1", windowId: -1 }];
+const verified = await sendWindowMail(1, 2, "message", "same side panel confirmed");
+assert.equal((await readWindowMail(2)).find(row => row.id === verified.id)?.text, "same side panel confirmed");
+await chrome.storage.session.remove(mailKey(1));
+await chrome.storage.session.remove(mailKey(2));
 contextRows = [
   { documentId: "doc-1", windowId: 1 },
   { documentId: "doc-2", windowId: 2 },
@@ -89,6 +108,8 @@ assert.equal(task.windowId, 2);
 assert.equal(task.session.modelPlanned, true);
 assert.deepEqual(task.capsule, { actions: [] });
 const receipt = waitForWindowResult(1, entry.id);
+const knownContexts = contextRows;
+contextRows = [{ documentId: "doc-1", windowId: -1 }];
 const ctrl = new AbortController();
 const aborted = waitForWindowResult(1, entry.id, ctrl.signal);
 ctrl.abort();
@@ -98,6 +119,7 @@ await assert.rejects(aborted, (err) => {
   return true;
 });
 assert.deepEqual(cancelled, [entry.id]);
+contextRows = knownContexts;
 await assert.rejects(waitForWindowResult(3, entry.id), /过期/);
 cancelled.length = 0;
 for (const onClose of chrome.windows.onRemoved.listeners) await onClose(1);

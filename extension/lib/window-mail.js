@@ -1,6 +1,9 @@
 import { DELEGATE_STORAGE_KEY, MAX_CONCURRENT_TASKS, TASK_STATUS } from "./agent/delegate.js";
 
 export const mailKey = (id) => `pl.windowMail.${id}`;
+const WINDOW_IDENTITY_REQUEST = "pl.windowMail.identify";
+const WINDOW_IDENTITY_REPLY = "pl.windowMail.identity";
+
 export const WORK_STATUS = { running: "执行中", done: "已完成", failed: "失败", cancelled: "已取消", needs_approval: "待批准" };
 
 // Chrome 新建空白页可能是 about:blank、空地址，或自己的 newtab。
@@ -115,23 +118,53 @@ function requireSidePanelSender(sender) {
   if (!sender || sender.tab || sender.url !== panelUrl) throw new Error("仅侧栏可发送窗口消息。");
 }
 
-// Only the context for this sender counts. Missing documentId or windowId -1 is not a match.
-async function boundWindowId(sender) {
-  if (!sender.documentId) return null;
-  const panelUrl = chrome.runtime.getURL("sidepanel/index.html");
-  const panels = await chrome.runtime.getContexts({
-    contextTypes: ["SIDE_PANEL"], documentUrls: [panelUrl], documentIds: [sender.documentId],
+export function bindWindowMailIdentity(windowId) {
+  chrome.runtime.onMessage.addListener((msg, sender, respond) => {
+    if (msg?.type !== WINDOW_IDENTITY_REQUEST || sender?.id !== chrome.runtime.id || msg.windowId !== windowId) return false;
+    respond(true);
+    chrome.runtime.sendMessage({ type: WINDOW_IDENTITY_REPLY, nonce: msg.nonce, windowId }).catch(() => {});
+    return false;
   });
-  const mine = panels.find(p => p.documentId === sender.documentId);
-  if (!mine || !Number.isInteger(mine.windowId) || mine.windowId < 0) return null;
-  return mine.windowId;
 }
 
 export function installWindowMail(manager) {
+  const challenges = new Map();
+
+  function identifyWindow(documentId, windowId) {
+    return new Promise(resolve => {
+      const nonce = crypto.randomUUID();
+      const finish = (verifiedWindowId) => {
+        if (!challenges.delete(nonce)) return;
+        clearTimeout(timer);
+        resolve(verifiedWindowId);
+      };
+      const timer = setTimeout(() => finish(null), 2000);
+      challenges.set(nonce, { documentId, windowId, finish });
+      chrome.runtime.sendMessage({ type: WINDOW_IDENTITY_REQUEST, nonce, windowId }).then(
+        acknowledged => { if (acknowledged !== true) finish(null); },
+        () => finish(null),
+      );
+    });
+  }
+
+  async function boundWindowId(sender, claimedWindowId) {
+    if (!sender.documentId || !Number.isInteger(claimedWindowId) || claimedWindowId < 0) return null;
+    const panelUrl = chrome.runtime.getURL("sidepanel/index.html");
+    const panels = await chrome.runtime.getContexts({
+      contextTypes: ["SIDE_PANEL"], documentUrls: [panelUrl], documentIds: [sender.documentId],
+    });
+    const mine = panels.find(p => p.documentId === sender.documentId);
+    if (!mine || !Number.isInteger(mine.windowId)) return null;
+    // Chromium can report -1 for a real side panel. Verify the reply's browser-supplied document ID.
+    if (mine.windowId === -1) return identifyWindow(sender.documentId, claimedWindowId);
+    return mine.windowId >= 0 ? mine.windowId : null;
+  }
+
   async function deliver(msg, sender) {
     const { from, to, kind } = msg;
     requireSidePanelSender(sender);
-    if (await boundWindowId(sender) !== from) throw new Error("发送侧栏与窗口不匹配。");
+    const bound = await boundWindowId(sender, from);
+    if (bound == null || bound !== from) throw new Error("发送侧栏与窗口不匹配。");
     const text = String(msg.text ?? "").trim();
     if (!text || text.length > 8000) throw new Error("消息长度须为 1 至 8000 个字符。");
     const requestKey = typeof msg.requestKey === "string" ? msg.requestKey.slice(0, 500) : "";
@@ -184,13 +217,23 @@ export function installWindowMail(manager) {
   }
   async function cancelWaiting(msg, sender) {
     requireSidePanelSender(sender);
-    const bound = await boundWindowId(sender);
+    const bound = await boundWindowId(sender, msg.from);
     if (bound == null || bound !== msg.from) return;
     const task = (await manager.list()).find(t => t.id === msg.id && t.requesterWindowId === bound && t.status === "running");
     if (task) await manager.cancel(task.id);
   }
   chrome.runtime.onMessage.addListener((msg, sender, respond) => {
-    if (sender.id !== chrome.runtime.id) return false;
+    if (sender?.id !== chrome.runtime.id) return false;
+    if (msg?.type === WINDOW_IDENTITY_REPLY) {
+      const challenge = challenges.get(msg.nonce);
+      if (challenge && challenge.documentId === sender.documentId && challenge.windowId === msg.windowId) {
+        try {
+          requireSidePanelSender(sender);
+          challenge.finish(msg.windowId);
+        } catch { /* Ignore replies from non-sidebar contexts. */ }
+      }
+      return false;
+    }
     if (msg?.type === "pl.windowMail.cancel") {
       cancelWaiting(msg, sender).then(() => respond({ ok: true }), err => respond({ ok: false, error: err.message }));
       return true;
