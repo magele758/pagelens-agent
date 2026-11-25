@@ -26,38 +26,27 @@ function usableWindowId(id) {
   return Number.isInteger(id) && id >= 0 ? id : null;
 }
 
-/** 在返回 taskId 之前占住与侧栏相同的窗口锁；拿不到则拒绝，不把锁留到 execute。 */
-function acquireWindow(windowId) {
+/** 在返回 taskId 之前占住与侧栏相同的窗口锁，直到调用 unlock。 */
+async function acquireWindow(windowId) {
   let release;
   const gate = new Promise((resolve) => {
     release = resolve;
   });
-  let settled = false;
-  const granted = new Promise((resolve, reject) => {
-    const finish = (fn) => {
-      if (settled) return;
-      settled = true;
-      fn();
-    };
-    let request;
-    try {
-      request = withWindowTask(windowId, () => {
-        finish(() => resolve(release));
+  try {
+    return await new Promise((resolve, reject) => {
+      const request = withWindowTask(windowId, () => {
+        resolve(() => {
+          release();
+          return request;
+        });
         return gate;
       });
-    } catch (err) {
-      finish(() => reject(err));
-      return;
-    }
-    request.catch((err) => finish(() => reject(err)));
-  });
-  return granted.then(
-    (unlock) => unlock,
-    (err) => {
-      if (err?.code === "WINDOW_BUSY") throw new DelegateError("BUSY", err.message || WINDOW_BUSY_MESSAGE, { retryable: true });
-      throw err;
-    },
-  );
+      request.catch(reject);
+    });
+  } catch (err) {
+    if (err?.code === "WINDOW_BUSY") throw new DelegateError("BUSY", err.message || WINDOW_BUSY_MESSAGE, { retryable: true });
+    throw err;
+  }
 }
 
 export const DELEGATE_STORAGE_KEY = "agentDelegateTasks";
@@ -247,7 +236,10 @@ export function createDelegateManager({
 
   function persist() {
     const run = writeTail.then(async () => {
-      const list = [...tasks.values()].sort((a, b) => a.createdAt - b.createdAt);
+      // 其他任务也会保存整张表，待授锁任务只用于内存中的幂等匹配和取消。
+      const list = [...tasks.values()]
+        .filter((task) => windowLocks.get(task.id)?.release !== null)
+        .sort((a, b) => a.createdAt - b.createdAt);
       while (list.length > MAX_TASKS_KEPT) {
         const idx = list.findIndex((t) => t.status !== TASK_STATUS.RUNNING);
         if (idx < 0) break;
@@ -278,17 +270,28 @@ export function createDelegateManager({
     return entry;
   }
 
-  function releaseWindow(taskId) {
+  async function releaseWindow(taskId) {
     const slot = windowLocks.get(taskId);
     if (!slot) return;
-    windowLocks.delete(taskId);
-    windowHeld.delete(slot.windowId);
-    slot.release?.();
+    try {
+      await slot.release?.();
+    } finally {
+      windowLocks.delete(taskId);
+      windowHeld.delete(slot.windowId);
+    }
+  }
+
+  async function endRun(taskId) {
+    try {
+      await releaseWindow(taskId);
+    } finally {
+      controllers.delete(taskId);
+      onActivityChange(runningCount());
+    }
   }
 
   function finish(task, status, { answer, error, endReason } = {}) {
     if (task.status !== TASK_STATUS.RUNNING) return Promise.resolve();
-    releaseWindow(task.id);
     Object.assign(task, {
       status,
       answer: answer != null ? String(answer) : task.answer,
@@ -296,8 +299,6 @@ export function createDelegateManager({
       endReason: endReason || task.endReason || "",
       finishedAt: now(),
     });
-    controllers.delete(task.id);
-    onActivityChange(runningCount());
     emit({ type: AGENT_TASK_EVENTS.FINISHED, taskId: task.id, at: now(), status, answer: task.answer, error: task.error });
     return touch(task);
   }
@@ -391,13 +392,13 @@ export function createDelegateManager({
 
   async function execute(task, controller, session) {
     const signal = controller.signal;
-    let taint = createTaintState();
-    if (session?.modelPlanned) {
-      taint = ingestData(taint, { source: "delegate", tool: "run_parallel_tasks" });
-      task.taint = taint.level;
-    }
     let run = null;
     try {
+      let taint = createTaintState();
+      if (session?.modelPlanned) {
+        taint = ingestData(taint, { source: "delegate", tool: "run_parallel_tasks" });
+        task.taint = taint.level;
+      }
       const settings = await loadSettings();
       run = await createRun({ task, settings, signal });
       const tools = withUntrustedOutput(run.tools || [], {
@@ -451,7 +452,42 @@ export function createDelegateManager({
         error: { code: err?.code || "TASK_FAILED", message: String(err?.message || err).slice(0, 500) },
       });
     } finally {
-      await run?.cleanup?.().catch(() => {});
+      try {
+        await run?.cleanup?.();
+      } catch {
+        // 清理失败也必须归还窗口锁。
+      } finally {
+        await endRun(task.id);
+      }
+    }
+  }
+
+  async function startTask(task, controller, session) {
+    let attemptedWrite = false;
+    try {
+      if (task.windowId != null) {
+        const unlock = await acquireWindow(task.windowId);
+        const slot = windowLocks.get(task.id);
+        if (!slot) {
+          await unlock();
+          return;
+        }
+        slot.release = unlock;
+        if (task.status !== TASK_STATUS.RUNNING) await releaseWindow(task.id);
+      }
+      attemptedWrite = true;
+      await persist();
+      if (task.status !== TASK_STATUS.RUNNING) return;
+
+      emit({ type: AGENT_TASK_EVENTS.STARTED, taskId: task.id, at: now(), task: publicTask(task, { withSteps: false }) });
+      const done = execute(task, controller, session);
+      Object.defineProperty(task, "done", { value: done, enumerable: false, configurable: true });
+    } catch (err) {
+      tasks.delete(task.id);
+      if (attemptedWrite) await persist().catch(() => {});
+      throw err;
+    } finally {
+      if (!task.done) await endRun(task.id);
     }
   }
 
@@ -534,24 +570,8 @@ export function createDelegateManager({
       if (lockWindow != null) windowLocks.set(task.id, { windowId: lockWindow, release: null });
       if (lockWindow != null) windowHeld.add(lockWindow);
       onActivityChange(runningCount());
-      Object.defineProperty(task, "recorded", { value: persist(), enumerable: false });
-      try {
-        if (lockWindow != null) {
-          const release = await acquireWindow(lockWindow);
-          const slot = windowLocks.get(task.id);
-          if (slot) slot.release = release;
-        }
-        await task.recorded;
-      } catch (err) {
-        releaseWindow(task.id);
-        tasks.delete(task.id);
-        controllers.delete(task.id);
-        onActivityChange(runningCount());
-        throw err;
-      }
-      emit({ type: AGENT_TASK_EVENTS.STARTED, taskId: task.id, at: now(), task: publicTask(task, { withSteps: false }) });
-      const done = execute(task, controller, session);
-      Object.defineProperty(task, "done", { value: done, enumerable: false, configurable: true });
+      Object.defineProperty(task, "recorded", { value: startTask(task, controller, session), enumerable: false });
+      await task.recorded;
       return publicTask(task, { withSteps: false });
     },
 
@@ -574,11 +594,11 @@ export function createDelegateManager({
       const task = await getTask(taskId, owner);
       if (task.status !== TASK_STATUS.RUNNING) return { ...publicTask(task, { withSteps: false }), alreadyFinished: true };
       const controller = controllers.get(task.id);
-      if (controller) {
-        controller.abort();
+      controller?.abort();
+      if (task.done) {
         let timer;
         const grace = new Promise((r) => (timer = setTimeout(r, CANCEL_GRACE_MS)));
-        await Promise.race([task.done?.catch?.(() => {}), grace]);
+        await Promise.race([task.done.catch(() => {}), grace]);
         clearTimeout(timer);
       }
       if (task.status === TASK_STATUS.RUNNING) await finish(task, TASK_STATUS.CANCELLED, { endReason: "abort" });
