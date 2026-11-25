@@ -354,18 +354,28 @@ export async function injectMain(tabId, func, args = []) {
 }
 
 const GROUP_COLORS = ["orange", "blue", "cyan", "green", "purple", "pink", "yellow", "red"];
+const WINDOW_SCOPED_CHROME_PREFIX = /^(tabs|tabGroups|windows|webNavigation)\./;
+
+export function isBoundWindowId(windowId) {
+  return Number.isInteger(windowId) && windowId >= 0;
+}
+
+export function isWindowScopedChromeMethod(method) {
+  return WINDOW_SCOPED_CHROME_PREFIX.test(String(method || "").trim());
+}
 
 export async function ensureTaskGroup(tabId, { groupId, title, color, windowId } = {}) {
   if (!tabId || typeof chrome.tabs?.group !== "function") return null;
   const denied = await requireOptionalFeature("tabGroups");
   if (denied) return null;
   const tab = await tabInWindow(tabId, windowId);
+  const targetWindowId = isBoundWindowId(windowId) ? windowId : tab.windowId;
   try {
     let id = Number.isInteger(groupId) && groupId >= 0 ? groupId : null;
     if (id != null) {
       try {
         const group = await chrome.tabGroups.get(id);
-        if (windowId != null && group.windowId !== windowId) throw new Error("标签组已移出任务窗口");
+        if (targetWindowId != null && group.windowId !== targetWindowId) throw new Error("标签组已移出任务窗口");
         await chrome.tabs.group({ tabIds: [tabId], groupId: id });
         return id;
       } catch {
@@ -374,7 +384,7 @@ export async function ensureTaskGroup(tabId, { groupId, title, color, windowId }
     }
     const created = await chrome.tabs.group({
       tabIds: [tabId],
-      createProperties: tab.windowId != null ? { windowId: tab.windowId } : undefined,
+      createProperties: targetWindowId != null ? { windowId: targetWindowId } : undefined,
     });
     if (chrome.tabGroups?.update) {
       const label = String(title || "PageLens").replace(/\s+/g, " ").trim().slice(0, 40);
@@ -480,6 +490,13 @@ export async function chromeCall(method, args, windowId, defaultTabId) {
       return { ok: false, error: `只能打开 http(s) URL，收到：${url}` };
     }
   }
+  const boundWindow = isBoundWindowId(windowId);
+  if (isWindowScopedChromeMethod(name) && !boundWindow) {
+    return {
+      ok: false,
+      error: `无法确定任务所属窗口，未绑定窗口时不能调用 ${name}。`,
+    };
+  }
   const permission = permissionForChromeMethod(name);
   if (permission) {
     const denied = await requireOptionalFeature(permission);
@@ -490,7 +507,7 @@ export async function chromeCall(method, args, windowId, defaultTabId) {
     const hostDenied = await requireHostUrl(url);
     if (hostDenied) return { ok: false, error: hostDenied };
   }
-  if (windowId != null) {
+  if (boundWindow) {
     try {
       [name, params] = await scopeChromeCall(name, params, windowId, defaultTabId);
     } catch (err) {

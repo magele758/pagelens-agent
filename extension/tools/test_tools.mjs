@@ -251,7 +251,7 @@ assert(compact.id === 1 && compact.favIconUrl === undefined, "compact tab");
 const denied = await chromeCall("cookies.getAll", [{ domain: "x.com" }]);
 assert(denied.ok === false && /不允许/.test(denied.error), "deny cookies");
 
-const listed = await chromeCall("tabs.query", [{ currentWindow: true }]);
+const listed = await chromeCall("tabs.query", [{ currentWindow: true }], 10);
 assert(listed.ok && listed.result.length === 2, "tabs.query");
 
 const badNav = await chromeCall("tabs.create", [{ url: "javascript:alert(1)" }]);
