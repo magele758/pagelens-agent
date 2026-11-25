@@ -4,7 +4,7 @@ import { JSDOM } from "jsdom";
 import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources } from "../catalog.js";
 import { readDailyPage } from "../page.js";
 import { addSnapshot, compareSnapshot, dailyScheduleKey, dailyStateKey, dayInChina } from "../history.js";
-import { dailyReportData } from "../report.js";
+import { dailyReportData, parseDailyHighlights } from "../report.js";
 import { handleDailyMessage, onDailyAlarm } from "../runtime.js";
 import { renderDailyChat } from "../../../skill-components/daily-operations/cards.js";
 
@@ -61,8 +61,10 @@ test("the report uses aggregate facts and its cards link to and retry the select
     plan: { chat: ["待回复消息"], funds: ["限制记录"] },
     results: { chat: { sections: [entry], errors: [] },
       funds: { sections: [], errors: [{ error: "请登录" }] } },
-    report: { text: "请查看待回复消息。" },
+    report: { highlights: ["请查看待回复消息。"] },
   };
+  assert.deepEqual(parseDailyHighlights('<think>内部分析</think>{"要点":["核对待回复消息"]}'), ["核对待回复消息"]);
+  assert.deepEqual(parseDailyHighlights("不带结构的内部分析"), []);
   const data = dailyReportData(state);
   assert.equal(data[0].count, 1);
   assert.equal(data[1].status, "未完成");

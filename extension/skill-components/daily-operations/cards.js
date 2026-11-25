@@ -159,16 +159,15 @@ export function renderDailyChat(article, state, { onOpen, onRetry, onSummarize }
   const time = new Date(state.finishedAt || state.startedAt);
   body.append(element("p", time.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }), "daily-hint daily-report-time"));
   if (metrics.childElementCount) body.append(metrics);
-  if (state.report?.text) {
+  if (state.report?.highlights?.length) {
     const summary = element("section", undefined, "daily-summary");
     summary.append(element("h4", "AI 摘要"));
-    for (const line of state.report.text.split(/\n+/u).map(line => line.trim()).filter(Boolean)) {
-      summary.append(element("p", line.replace(/^(?:[-*•]|\d+[.、])\s*/u, "").replaceAll("**", "")));
-    }
+    for (const line of state.report.highlights) summary.append(element("p", line));
     body.append(summary);
-  } else if (state.report?.note || state.interrupted) {
-    body.append(element("p", state.report?.note || "本次采集中断，可以开始新的采集。", "daily-hint"));
-    if (state.report?.note && groups.some(([, result]) => result.sections.length)) {
+  } else if (state.report || state.interrupted) {
+    body.append(element("p", state.report?.note || (state.interrupted ? "本次采集中断，可以开始新的采集。" :
+      "可重新生成本次报告的 AI 摘要。"), "daily-hint"));
+    if (state.report && groups.some(([, result]) => result.sections.length)) {
       body.append(button("重试 AI 摘要", onSummarize));
     }
   }

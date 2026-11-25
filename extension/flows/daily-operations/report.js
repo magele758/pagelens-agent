@@ -1,5 +1,6 @@
 import { dailySources } from "./catalog.js";
-import { streamChat } from "../../lib/openai.js";
+import { splitThinking } from "../../lib/markdown.js";
+import { streamTurn } from "../../lib/openai.js";
 import { isModelReady, loadSettings, resolveModel } from "../../lib/storage.js";
 
 export function dailyReportData(state) {
@@ -21,6 +22,18 @@ export function dailyReportData(state) {
   });
 }
 
+export function parseDailyHighlights(content) {
+  const { answer } = splitThinking(content);
+  const json = answer.match(/^```(?:json)?\s*([\s\S]+?)\s*```$/iu)?.[1] ?? answer;
+  try {
+    const { 要点 } = JSON.parse(json);
+    return Array.isArray(要点) ? 要点.filter(value => typeof value === "string" && value.trim())
+      .slice(0, 3).map(value => value.trim().slice(0, 280)) : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function summarizeDailyRun(state) {
   if (!Object.values(state.results).some(result => result.sections.length)) {
     return { note: "本次没有可供模型整理的数据。" };
@@ -32,17 +45,18 @@ export async function summarizeDailyRun(state) {
     const empty = stats.filter(row => row.status === "已核对" && row.count === 0 && !(row.previousDelta || row.yesterdayDelta));
     const facts = stats.filter(row => !empty.includes(row)).map(row =>
       [row.platform, row.module, row.section, row.status, row.count, row.added, row.updated, row.previousDelta, row.yesterdayDelta]);
-    const text = await streamChat(model, {
-      temperature: 0.1, lowLatency: true, signal: AbortSignal.timeout(60000),
+    const { content, reasoning } = await streamTurn(model, {
+      signal: AbortSignal.timeout(60000), onReasoningDelta: () => {},
       messages: [
-        { role: "system", content: "用简体中文给跨境运营人员列出最多三条需要关注的事实或建议，优先待处理、待回复、违规、资金限制和采集失败。每条一行，纯文本。状态可能重叠，不能相加当作总量。区分总数和新增。null 表示无基线或未读取，部分读取不是总量。只依据给定事实。" },
+        { role: "system", content: '用简体中文给跨境运营人员列出最多三条简短的事实或建议，优先待处理、待回复、违规、资金限制和采集失败。只输出 JSON 对象，格式为 {"要点":["要点内容"]}。状态可能重叠，不能相加当作总量。区分总数和新增。null 表示无基线或未读取，部分读取不是总量。只依据给定事实。' },
         { role: "user", content: JSON.stringify({
           列: ["平台", "模块", "页签", "状态", "条数", "新增", "更新", "较上次", "较昨日"],
           结果: facts, 已核对无记录的页签: empty.map(row => [row.platform, row.module, row.section].join("›")),
         }) },
       ],
-    }, () => {});
-    return text?.trim() ? { text: text.trim().slice(0, 1800) } : { note: "模型没有返回摘要。" };
+    });
+    const highlights = content === reasoning ? [] : parseDailyHighlights(content);
+    return highlights.length ? { highlights } : { note: "模型未返回可用摘要。" };
   } catch (error) {
     const status = error.message?.match(/^[45]\d\d\b/u)?.[0];
     const note = error.name === "TimeoutError" ? "模型响应超时。" : status ? `模型请求失败（${status}）。` : "无法连接当前模型。";
