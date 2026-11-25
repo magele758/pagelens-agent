@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 
 const store = {};
 const sent = [];
+const pinged = [];
+const opened = [];
 let panel = { ok: true, busy: false, windowId: 1 };
 let scopePings = false;
+let replyToPing = null;
+let allWindows = [{ id: 1 }];
+let getAllCalls = 0;
 let runReply = { ok: true };
 let tabs = [{ id: 7, windowId: 1, url: "http://localhost:8080/", status: "complete" }];
 const updated = [];
@@ -22,6 +27,8 @@ globalThis.chrome = {
     sendMessage: async (msg) => {
       sent.push(msg.type);
       if (msg.type === "pl.agentPrompt.ping") {
+        pinged.push(msg.windowId);
+        if (replyToPing) return replyToPing(msg.windowId);
         if (!panel || (scopePings && msg.windowId !== panel.windowId)) throw new Error("Could not establish connection. Receiving end does not exist.");
         return panel;
       }
@@ -29,8 +36,19 @@ globalThis.chrome = {
       return { ok: true };
     },
   },
-  windows: { getLastFocused: async () => ({ id: 1 }) },
-  sidePanel: { open: async () => { throw new Error("user gesture required"); } },
+  windows: {
+    getLastFocused: async () => ({ id: 1 }),
+    getAll: async () => {
+      getAllCalls += 1;
+      return allWindows;
+    },
+  },
+  sidePanel: {
+    open: async ({ windowId }) => {
+      opened.push(windowId);
+      throw new Error("user gesture required");
+    },
+  },
   tabs: {
     get: async (id) => tabs.find((t) => t.id === id) || null,
     query: async ({ windowId } = {}) => tabs.filter((t) => windowId == null || t.windowId === windowId),
@@ -84,10 +102,12 @@ const { setDelegateManager, TASK_STATUS } = await import("../lib/agent/delegate.
   scopePings = true;
   panel.windowId = 9;
   chrome.runtime.getContexts = async () => [{ windowId: 9 }];
+  getAllCalls = 0;
   sent.length = 0;
   const result = await startAgentPrompt({ prompt: "make a draft", runtime: "panel" }, "other-panel");
   assert.equal(result.started, true);
   assert.equal(store.agentPromptActive.windowId, 9);
+  assert.equal(getAllCalls, 0);
   assert.equal(sent.filter(type => type === "pl.agentPrompt.run").length, 1);
   await takeCompletion({ id: "other-panel", ok: true });
   panel.windowId = 1;
@@ -101,6 +121,7 @@ const { setDelegateManager, TASK_STATUS } = await import("../lib/agent/delegate.
   panel.windowId = 9;
   chrome.runtime.getContexts = async () => [{ windowId: 9 }];
   tabs = [{ id: 11, windowId: 9, url: "http://shop.example/item", status: "complete" }];
+  getAllCalls = 0;
   sent.length = 0;
   const result = await startAgentPrompt(
     { prompt: "open shop", runtime: "panel", tabUrlIncludes: "shop.example" },
@@ -108,11 +129,105 @@ const { setDelegateManager, TASK_STATUS } = await import("../lib/agent/delegate.
   );
   assert.equal(result.started, true);
   assert.equal(store.agentPromptActive.windowId, 9);
+  assert.equal(getAllCalls, 0);
   assert.equal(sent.filter(type => type === "pl.agentPrompt.run").length, 1);
   await takeCompletion({ id: "url-panel", ok: true });
   panel.windowId = 1;
   scopePings = false;
   tabs = [{ id: 7, windowId: 1, url: "http://localhost:8080/", status: "complete" }];
+  delete chrome.runtime.getContexts;
+}
+
+// An unknown context window requires enumeration. A late listener can answer in the next round.
+{
+  chrome.runtime.getContexts = async () => [{ windowId: -1 }];
+  allWindows = [{ id: 1 }, { id: 9 }];
+  pinged.length = 0;
+  opened.length = 0;
+  getAllCalls = 0;
+  let pingsToNine = 0;
+  let pendingPings = 0;
+  let maxPendingPings = 0;
+  replyToPing = async (windowId) => {
+    pendingPings += 1;
+    maxPendingPings = Math.max(maxPendingPings, pendingPings);
+    await Promise.resolve();
+    pendingPings -= 1;
+    if (windowId !== 9) return null;
+    pingsToNine += 1;
+    return pingsToNine === 2 ? { ok: true, busy: false, windowId } : null;
+  };
+
+  const start = performance.now();
+  const result = await startAgentPrompt({ prompt: "make a draft", runtime: "panel" }, "late-panel");
+  assert.ok(performance.now() - start < 3000);
+  assert.equal(result.started, true);
+  assert.equal(store.agentPromptActive.windowId, 9);
+  assert.deepEqual(pinged, [1, 1, 9, 1, 9]);
+  assert.equal(maxPendingPings, 1);
+  assert.deepEqual(opened, [1]);
+  assert.equal(getAllCalls, 1);
+  await takeCompletion({ id: "late-panel", ok: true });
+  replyToPing = null;
+  allWindows = [{ id: 1 }];
+  delete chrome.runtime.getContexts;
+}
+
+// A focused panel wins immediately. If its initial ping misses, two pongs in the first
+// discovery round are ambiguous even when the URL fragment matches a tab in one window.
+{
+  let getContextsCalls = 0;
+  chrome.runtime.getContexts = async () => {
+    getContextsCalls += 1;
+    return [{ windowId: 1 }, { windowId: 9 }];
+  };
+  replyToPing = (windowId) => ({ ok: true, busy: false, windowId });
+  pinged.length = 0;
+  opened.length = 0;
+  getAllCalls = 0;
+  const job = { prompt: "open shop", runtime: "panel", tabUrlIncludes: "localhost:8080" };
+  let result = await startAgentPrompt(job, "focused-panel");
+  assert.equal(result.started, true);
+  assert.equal(store.agentPromptActive.windowId, 1);
+  assert.deepEqual(pinged, [1]);
+  assert.equal(getContextsCalls, 0);
+  await takeCompletion({ id: "focused-panel", ok: true });
+
+  pinged.length = 0;
+  replyToPing = (windowId) => pinged.length === 1 ? null : { ok: true, busy: false, windowId };
+  const start = performance.now();
+  result = await startAgentPrompt(job, "ambiguous-panels");
+  assert.ok(performance.now() - start < 1500);
+  assert.equal(result.done.errorCode, "AMBIGUOUS_PANEL");
+  assert.equal(result.done.error, "多个窗口已打开侧栏，请指定目标标签。");
+  assert.equal(store.agentPromptActive, undefined);
+  assert.deepEqual(pinged, [1, 1, 9]);
+  assert.deepEqual(opened, []);
+  assert.equal(getAllCalls, 0);
+  replyToPing = null;
+  delete chrome.runtime.getContexts;
+}
+
+// A valid context window must not hide another context with an unknown window ID.
+{
+  chrome.runtime.getContexts = async () => [{ windowId: 3 }, { windowId: -1 }];
+  allWindows = [{ id: 1 }, { id: 3 }, { id: 9 }];
+  getAllCalls = 0;
+  pinged.length = 0;
+  opened.length = 0;
+  replyToPing = (windowId) => windowId === 9 ? { ok: true, busy: false, windowId } : null;
+
+  const start = performance.now();
+  const result = await startAgentPrompt({ prompt: "make a draft", runtime: "panel" }, "mixed-contexts");
+  assert.ok(performance.now() - start < 2000);
+  assert.equal(result.started, true);
+  assert.equal(store.agentPromptActive.windowId, 9);
+  assert.deepEqual(pinged, [1, 1, 3, 9]);
+  assert.deepEqual(opened, []);
+  assert.equal(getAllCalls, 1);
+  await takeCompletion({ id: "mixed-contexts", ok: true });
+  replyToPing = null;
+  allWindows = [{ id: 1 }];
   delete chrome.runtime.getContexts;
 }
 
@@ -162,6 +277,24 @@ const { setDelegateManager, TASK_STATUS } = await import("../lib/agent/delegate.
   assert.equal(r.done.errorCode, "WRONG_WINDOW");
 }
 
+// An explicit tab can wait for its own panel, even when another window has a responsive panel.
+{
+  chrome.runtime.getContexts = async () => [{ windowId: 9 }];
+  allWindows = [{ id: 1 }, { id: 2 }, { id: 9 }];
+  tabs = [{ id: 9, windowId: 2, url: "http://localhost:8080/", status: "complete" }];
+  replyToPing = (windowId) => windowId === 9 ? { ok: true, busy: false, windowId } : null;
+  pinged.length = 0;
+  opened.length = 0;
+  const result = await startAgentPrompt({ prompt: "x", runtime: "panel", tabId: 9 }, "tab-panel-closed");
+  assert.equal(result.done.errorCode, "SIDEPANEL_NOT_OPEN");
+  assert.equal(store.agentPromptActive, undefined);
+  assert.deepEqual([...new Set(pinged)], [2]);
+  assert.deepEqual(opened, [2]);
+  replyToPing = null;
+  allWindows = [{ id: 1 }];
+  delete chrome.runtime.getContexts;
+}
+
 // panel rejects run
 {
   tabs = [];
@@ -174,9 +307,16 @@ const { setDelegateManager, TASK_STATUS } = await import("../lib/agent/delegate.
 // runtime "panel" and panel closed -> SIDEPANEL_NOT_OPEN (never a silent fallback)
 {
   panel = null;
+  opened.length = 0;
+  getAllCalls = 0;
+  const start = performance.now();
   const r = await startAgentPrompt({ prompt: "x", runtime: "panel" }, "j8");
+  const elapsed = performance.now() - start;
+  assert.ok(elapsed >= 5900 && elapsed < 8000, `panel wait took ${elapsed} ms`);
   assert.equal(r.done.errorCode, "SIDEPANEL_NOT_OPEN");
   assert.match(r.done.hint, /headless/);
+  assert.deepEqual(opened, [1]);
+  assert.equal(getAllCalls, 1);
 }
 
 // bad runtime value
@@ -211,8 +351,16 @@ const manager = {
 // no delegate runner installed -> explicit failure, not SIDEPANEL_NOT_OPEN
 {
   panel = null;
+  pinged.length = 0;
+  opened.length = 0;
+  getAllCalls = 0;
+  const start = performance.now();
   const r = await startAgentPrompt({ prompt: "x" }, "h0");
+  assert.ok(performance.now() - start < 1500);
   assert.equal(r.done.errorCode, "HEADLESS_UNAVAILABLE");
+  assert.deepEqual(pinged, [1]);
+  assert.deepEqual(opened, []);
+  assert.equal(getAllCalls, 0);
 }
 
 setDelegateManager(manager);
