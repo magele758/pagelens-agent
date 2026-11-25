@@ -1,13 +1,62 @@
-import { DELEGATE_STORAGE_KEY, MAX_CONCURRENT_TASKS } from "./agent/delegate.js";
+import { DELEGATE_STORAGE_KEY, MAX_CONCURRENT_TASKS, TASK_STATUS } from "./agent/delegate.js";
 
 export const mailKey = (id) => `pl.windowMail.${id}`;
 export const WORK_STATUS = { running: "执行中", done: "已完成", failed: "失败", cancelled: "已取消", needs_approval: "待批准" };
+
+// Chrome 新建空白页可能是 about:blank、空地址，或自己的 newtab。
+const AUTOMATION_BLANK = new Set(["", "about:blank", "chrome://newtab", "chrome://newtab/"]);
+
+function isAutomationBlankUrl(url) {
+  return AUTOMATION_BLANK.has(url || "");
+}
+
+function isUntouchedAutomationBlank(tabs) {
+  if (!Array.isArray(tabs) || tabs.length !== 1) return false;
+  const tab = tabs[0];
+  if (!isAutomationBlankUrl(tab?.url)) return false;
+  if (tab.pendingUrl && !isAutomationBlankUrl(tab.pendingUrl)) return false;
+  return true;
+}
+
+async function openSidePanel(windowId) {
+  try {
+    await chrome.sidePanel?.open({ windowId });
+  } catch (err) {
+    console.warn("[pagelens] 自动窗口启动失败后无法打开侧栏", err);
+  }
+}
+
+// 没人碰过的空白页关掉；关不掉或用户已经碰过，就打开侧栏。不要留下没侧栏的空白窗。
+async function recoverFailedAutoWindow(windowId) {
+  let tabs = null;
+  try {
+    tabs = await chrome.tabs.query({ windowId });
+  } catch {
+    tabs = null;
+  }
+  if (isUntouchedAutomationBlank(tabs)) {
+    try {
+      await chrome.windows.remove(windowId);
+      return;
+    } catch { /* 关不掉再打开侧栏 */ }
+  }
+  await openSidePanel(windowId);
+}
+
+async function runningWindowIds() {
+  const data = await chrome.storage.session.get(DELEGATE_STORAGE_KEY);
+  const tasks = Array.isArray(data?.[DELEGATE_STORAGE_KEY]) ? data[DELEGATE_STORAGE_KEY] : [];
+  return new Set(tasks.filter(t => t?.status === TASK_STATUS.RUNNING && Number.isInteger(t.windowId)).map(t => t.windowId));
+}
 
 export async function listPeerWindows(from) {
   const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
   const source = windows.find(w => w.id === from);
   if (!source) throw new Error("发起窗口已关闭。");
-  return windows.filter(w => w.id !== from && w.incognito === source.incognito).map(w => w.id);
+  const busy = await runningWindowIds();
+  return windows
+    .filter(w => w.id !== from && w.incognito === source.incognito)
+    .map(w => ({ id: w.id, busy: busy.has(w.id) }));
 }
 
 function taskEntry(t) {
@@ -109,17 +158,14 @@ export function installWindowMail(manager) {
         try {
           return await startInWindow(win.id);
         } catch (err) {
-          // Roll back only the original empty work window if the user hasn't used it.
-          const tabs = await chrome.tabs.query({ windowId: win.id }).catch(() => []);
-          if (tabs.length === 1 && tabs[0].id === win.tabs?.[0]?.id &&
-              tabs[0].url === "about:blank" && !tabs[0].pendingUrl) {
-            await chrome.windows.remove(win.id).catch(() => {});
-          }
+          await recoverFailedAutoWindow(win.id);
           throw err;
         }
       });
     }
-    if (!(await listPeerWindows(from)).includes(to)) throw new Error("请选择同一浏览模式下另一个已打开的窗口。");
+    const peer = (await listPeerWindows(from)).find(w => w.id === to);
+    if (!peer) throw new Error("请选择同一浏览模式下另一个已打开的窗口。");
+    if (peer.busy) throw new Error(`窗口 ${to} 正在执行任务，请等它结束后再发送。`);
     if (kind === "task") return startInWindow(to);
     if (kind !== "message") throw new Error("未知消息类型。");
     return navigator.locks.request("pl.windowMail.write", async () => {

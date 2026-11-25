@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { JSDOM } from "jsdom";
 import "./fixtures/web-locks.mjs";
 import { DELEGATE_STORAGE_KEY } from "../lib/agent/delegate.js";
-import { windowMailTools } from "../sidepanel/window-mail.js";
+import { systemPrompt } from "../lib/prompts.js";
+import { windowMailTools, bindWindowMail } from "../sidepanel/window-mail.js";
 import { resolveActiveTools } from "../lib/agent/tools.js";
 import { extractCapsule, capsuleCovers } from "../lib/agent/trust/capsule.js";
 import { installWindowMail, listPeerWindows, readWindowMail, sendWindowMail, waitForWindowResult } from "../lib/window-mail.js";
@@ -26,7 +28,7 @@ globalThis.chrome = {
       for (const receive of chrome.runtime.onMessage.listeners) receive(msg, sender, resolve);
     }),
   },
-  windows: { getAll: async () => windows, onRemoved: event() },
+  windows: { getAll: async () => windows, onRemoved: event(), onCreated: event() },
   tabs: { query: async q => [{ id: q.windowId * 10, url: "https://example.org/" }] },
   storage: {
     onChanged: event(),
@@ -52,7 +54,7 @@ installWindowMail({
   cancel: async id => cancelled.push(id),
 });
 
-assert.deepEqual(await listPeerWindows(1), [2, 3]);
+assert.deepEqual(await listPeerWindows(1), [{ id: 2, busy: false }, { id: 3, busy: false }]);
 await assert.rejects(sendWindowMail(1, 2, "message", "unbound"), /不匹配/);
 contextRows = [{ documentId: "doc-1", windowId: -1 }, { documentId: "doc-2", windowId: 1 }];
 await assert.rejects(sendWindowMail(1, 2, "message", "negative"), /不匹配/);
@@ -157,8 +159,50 @@ assert.ok(busy.every(t => t.status === "failed"));
 assert.equal(opened.length, 2);
 capacityUsed = 0;
 rejectStart = true;
+const panelOpens = [];
+chrome.sidePanel = { open: async ({ windowId }) => { panelOpens.push(windowId); } };
 await assert.rejects(sendWindowMail(4, null, "auto_task", "失败", capsule, "new"), /start failed/);
 assert.deepEqual(removed, [22]);
+assert.deepEqual(panelOpens, []);
+
+async function expectRollback(prompt, key, query, closes) {
+  const removedBefore = removed.length;
+  const panelsBefore = panelOpens.length;
+  const openedBefore = opened.length;
+  chrome.tabs.query = query;
+  await assert.rejects(sendWindowMail(4, null, "auto_task", prompt, capsule, key), /start failed/);
+  assert.equal(opened.length, openedBefore + 1);
+  const id = opened.at(-1).id;
+  assert.deepEqual(removed.slice(removedBefore), closes ? [id] : []);
+  assert.deepEqual(panelOpens.slice(panelsBefore), closes ? [] : [id]);
+}
+const blankTab = (url, extra = {}) => async ({ windowId }) => [{ id: windowId * 10, url, ...extra }];
+await expectRollback("空白空串", "blank-empty", blankTab(""), true);
+await expectRollback("空白新标签", "blank-ntp", blankTab("chrome://newtab"), true);
+await expectRollback("空白新标签斜杠", "blank-ntp-slash", blankTab("chrome://newtab/"), true);
+await expectRollback("空白pending空", "blank-pending-empty", blankTab("about:blank", { pendingUrl: "" }), true);
+await expectRollback("空白pending空白", "blank-pending-blank", blankTab("about:blank", { pendingUrl: "about:blank" }), true);
+await expectRollback("空白pending新标签", "blank-pending-ntp", blankTab("chrome://newtab/", { pendingUrl: "chrome://newtab/" }), true);
+chrome.windows.remove = async () => { throw new Error("remove failed"); };
+await expectRollback("关窗失败", "remove-fails", blankTab("about:blank"), false);
+chrome.windows.remove = async id => { removed.push(id); };
+await expectRollback("用户打开了页", "user-url", blankTab("https://example.org/touched"), false);
+await expectRollback("用户多开标签", "user-tabs", async ({ windowId }) => [
+  { id: windowId * 10, url: "about:blank" },
+  { id: windowId * 10 + 1, url: "about:blank" },
+], false);
+await expectRollback("用户正在导航", "user-pending", blankTab("about:blank", { pendingUrl: "https://example.org/next" }), false);
+await expectRollback("标签查询失败", "query-fails", async (query) => {
+  if (query?.active) return [{ id: query.windowId * 10, url: "about:blank" }];
+  throw new Error("tabs unavailable");
+}, false);
+const removedBeforePanel = removed.length;
+chrome.tabs.query = blankTab("https://example.org/touched");
+chrome.sidePanel.open = async () => { throw new Error("no gesture"); };
+await assert.rejects(sendWindowMail(4, null, "auto_task", "侧栏也失败", capsule, "panel-fails"), /start failed/);
+assert.equal(removed.length, removedBeforePanel);
+chrome.sidePanel.open = async ({ windowId }) => { panelOpens.push(windowId); };
+chrome.tabs.query = async ({ windowId }) => [{ id: windowId * 10, url: "https://example.org/" }];
 console.log("PASS automatic window allocation, joining, checkpoint replay and rollback");
 
 // Background delegate_window_task must follow the same stop signal after it returns.
@@ -179,7 +223,9 @@ installWindowMail({
   async cancel(id) {
     const job = bgTasks.find(item => item.id === id && item.status === "running");
     if (!job || bgCancelled.includes(id)) return;
+    job.status = "cancelled";
     bgCancelled.push(id);
+    await chrome.storage.session.set({ [DELEGATE_STORAGE_KEY]: bgTasks });
   },
 });
 const cancelMessages = [];
@@ -230,14 +276,14 @@ const finished = JSON.parse(await delegate.execute(
   { windowId: 2, text: "已经做完", background: true },
   { signal: stop.signal, callId: "done-one" },
 ));
-const running = JSON.parse(await delegate.execute(
-  { windowId: 2, text: "仍在执行", background: true },
-  { signal: stop.signal, callId: "run-one" },
-));
 const doneTask = bgTasks.find(item => item.id === finished.taskId);
 doneTask.status = "done";
 doneTask.answer = "ok";
 await chrome.storage.session.set({ [DELEGATE_STORAGE_KEY]: bgTasks });
+const running = JSON.parse(await delegate.execute(
+  { windowId: 2, text: "仍在执行", background: true },
+  { signal: stop.signal, callId: "run-one" },
+));
 const sentBeforeStop = cancelMessages.length;
 stop.abort();
 await until(() => bgCancelled.includes(running.taskId));
@@ -253,7 +299,61 @@ const waiting = delegate.execute(
 await until(() => bgTasks.some(item => item.prompt === "前台等待"));
 await new Promise(resolve => setTimeout(resolve, 0));
 foreground.abort();
-await assert.rejects(waiting, /已停止等待，该委派已取消，不会再有结果进收件箱/);
+const foregroundResult = JSON.parse(await waiting);
+assert.equal(foregroundResult.status, "cancelled");
 assert.equal(bgCancelled.includes(bgTasks.find(item => item.prompt === "前台等待").id), true);
 chrome.runtime.sendMessage = deliverMessage;
 console.log("PASS background delegation follows stop without cancelling finished tasks");
+
+const mailPrompt = systemPrompt({}, { windowMail: true });
+assert.match(mailPrompt, /单页或前后依赖的操作直接完成/);
+assert.match(mailPrompt, /忙着的窗口不要再接另一项任务/);
+assert.doesNotMatch(mailPrompt, /无限重试/);
+await chrome.storage.session.set({ [DELEGATE_STORAGE_KEY]: [
+  { id: "busy-2", windowId: 2, requesterWindowId: 1, status: "running", prompt: "占着", createdAt: 1 },
+  { id: "done-3", windowId: 3, requesterWindowId: 1, status: "done", prompt: "完了", createdAt: 2, answer: "ok" },
+  { id: "approve-3", windowId: 3, requesterWindowId: 1, status: "needs_approval", prompt: "等批准", createdAt: 3 },
+] });
+assert.deepEqual(await listPeerWindows(1), [{ id: 2, busy: true }, { id: 3, busy: false }]);
+const listTool = windowMailTools(1, () => ({}), "turn-busy").find(tool => tool.name === "list_task_windows");
+assert.match(listTool.description, /busy/);
+assert.deepEqual(JSON.parse(await listTool.execute()), {
+  current: 1,
+  peers: [{ id: 2, busy: true }, { id: 3, busy: false }],
+});
+const tasksBeforeBusySend = bgTasks.length;
+await assert.rejects(sendWindowMail(1, 2, "task", "再派一个", { actions: [] }, "busy-task"), /窗口 2 正在执行任务/);
+await assert.rejects(sendWindowMail(1, 2, "message", "再传一句", undefined, "busy-msg"), /窗口 2 正在执行任务/);
+assert.equal(bgTasks.length, tasksBeforeBusySend);
+assert.equal((await readWindowMail(2)).some(entry => entry.text === "再传一句" || entry.text === "再派一个"), false);
+await sendWindowMail(1, 3, "message", "空闲可收");
+assert.equal((await readWindowMail(3)).some(entry => entry.text === "空闲可收"), true);
+
+const dom = new JSDOM(`<details id="window-mail">
+  <summary>窗口协作</summary>
+  <select id="window-peer"></select>
+  <textarea id="window-mail-text"></textarea>
+  <span id="window-mail-status"></span>
+  <ol id="window-mail-log"></ol>
+  <button type="button" data-kind="message">发消息</button>
+  <button type="button" data-kind="task">委派任务</button>
+</details>`);
+globalThis.document = dom.window.document;
+globalThis.Option = dom.window.Option;
+bindWindowMail(1);
+const select = document.getElementById("window-peer");
+await until(() => [...select.options].some(option => option.value === "2" && option.disabled));
+const busyOption = [...select.options].find(option => option.value === "2");
+const idleOption = [...select.options].find(option => option.value === "3");
+assert.equal(busyOption.textContent, "窗口 2（任务中）");
+assert.equal(busyOption.disabled, true);
+assert.equal(idleOption.textContent, "窗口 3");
+assert.equal(idleOption.disabled, false);
+select.value = "3";
+await chrome.storage.session.set({ [DELEGATE_STORAGE_KEY]: [
+  { id: "busy-2", windowId: 2, requesterWindowId: 1, status: "running", prompt: "占着", createdAt: 1 },
+  { id: "busy-3", windowId: 3, requesterWindowId: 1, status: "running", prompt: "也占", createdAt: 4 },
+] });
+await until(() => select.value === "" && [...select.options].find(option => option.value === "3")?.disabled === true);
+assert.equal([...select.options].find(option => option.value === "3").textContent, "窗口 3（任务中）");
+console.log("PASS busy peers are listed, disabled, and refused");
