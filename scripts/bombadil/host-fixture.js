@@ -62,6 +62,10 @@ const local = {
   [CLIPPINGS_STORAGE_KEY]: clips, ...Object.fromEntries(sessions.map(s => [itemKey(s.id), s])),
 };
 const event = { addListener() {}, removeListener() {} };
+const runtimeListeners = new Set();
+document.addEventListener('fixture-runtime-message', ({ detail }) => {
+  for (const listener of runtimeListeners) listener(detail.message, { id: 'fixture' }, detail.respond);
+});
 Object.assign(globalThis.chrome ??= {}, {
   storage: { local: storageArea('local', local), session: storageArea('session', { [PROCESS_EPOCH_KEY]: 'fixture-process' }),
     onChanged: { addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); } } },
@@ -81,7 +85,9 @@ Object.assign(globalThis.chrome ??= {}, {
     return [{ result: { ...source, video: source === tabs[0] ? { duration: 120, currentTime: 0 } : null,
       videoIsPrimary: source === tabs[0] } }];
   } },
-  runtime: { id: 'fixture', onMessage: event, getURL: path => 'https://extension.invalid/' + path,
+  runtime: { id: 'fixture',
+    onMessage: { addListener(fn) { runtimeListeners.add(fn); }, removeListener(fn) { runtimeListeners.delete(fn); } },
+    getURL: path => 'https://extension.invalid/' + path,
     getManifest: () => ({ optional_permissions: ['tabs'] }),
     sendMessage: async () => ({ ok: false, error: 'Service unavailable in fixture' }) },
 });

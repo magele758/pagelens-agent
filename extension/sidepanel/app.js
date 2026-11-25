@@ -92,10 +92,9 @@ async function runExternalPrompt(id, prompt, signal) {
   const t0 = Date.now();
   let payload;
   try {
-    await refreshTab().catch(() => {});
     const before = state.messages.length;
     signal.throwIfAborted();
-    await sendPrompt(prompt, { signal });
+    await sendPrompt(prompt, { signal, fromInbox: true });
     const bot = state.messages.slice(before).reverse().find((m) => m.role === "bot");
     const aborted = bot?.metrics?.finishReason === "abort";
     const steps = (bot?.trace || [])
