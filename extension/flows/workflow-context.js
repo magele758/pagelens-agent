@@ -1,4 +1,5 @@
 import { workflowPlatforms } from "./catalog.js";
+import { dailySourceForUrl } from "./daily-operations/catalog.js";
 import { isTemuEnrollmentPage, temuSellerDataPage, TEMU_SELLER_OPERATIONS } from "./temu/seller-operations/routes.js";
 
 const AMAZON_STOREFRONTS = new Set([
@@ -19,6 +20,7 @@ export function identifyWorkflowPage(raw) {
   const site = hostname.replace(/^(?:www|m)\./u, "");
   const context = (platform, surface, productId, sourceUrl) => ({ platform, surface, productId, sourceUrl });
   if (hostname === "seller.shopee.cn") return context("shopee", "seller");
+  if (origin === "https://fangguo.com" && dailySourceForUrl(url.href) === "orders") return context("fangguo", "seller");
   if (origin === "https://sellerhub.shein.com") return context("shein", "seller");
   if (temuSellerDataPage(url.href)) return context("temu", "seller");
   if (/^agentseller(?:-[a-z0-9]+)?\.temu\.com$/u.test(hostname)) return context("temu", "seller");
@@ -44,7 +46,8 @@ export function identifyWorkflowPage(raw) {
 
 export function shortcutsForPage(url) {
   const page = identifyWorkflowPage(url);
-  const platform = workflowPlatforms.find(item => item.id === page?.platform);
+  const platform = page?.platform === "fangguo" ? { id: "fangguo", name: "方果", features: [] }
+    : workflowPlatforms.find(item => item.id === page?.platform);
   const sellerPage = page?.platform === "temu" && page.surface === "seller" ? temuSellerDataPage(url) : null;
   const canStartTemuListing = /^https:\/\/agentseller\.temu\.com\/(?:goods\/(?:list|create\/category)\/?(?:[?#]|$)|[?#]|$)/u.test(url || "");
   const features = platform?.features.filter(feature => {
@@ -55,5 +58,6 @@ export function shortcutsForPage(url) {
     if (feature.id === "temu-campaign-draft") return isTemuEnrollmentPage(url);
     return Boolean(sellerPage && TEMU_SELLER_OPERATIONS[feature.id]?.kind === sellerPage.kind);
   }) ?? [];
+  if (dailySourceForUrl(url)) features.unshift({ id: "daily-operations", name: "每日运营", pageUrl: url });
   return { page, platform, features };
 }

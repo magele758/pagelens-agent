@@ -15,6 +15,7 @@ import { installWindowMail } from "./lib/window-mail.js";
 import { installDelegate } from "./lib/agent/delegate-sw.js";
 import { installAgentGateway } from "./lib/bridge/gateway.js";
 import { chooseNativeProductDirectory, nativeSend } from "./lib/native-host.js";
+import { handleDailyMessage, onDailyAlarm, restoreDailyOperations } from "./flows/daily-operations/runtime.js";
 
 applyOptionalLocalSettings().catch(() => {});
 installWindowMail(installDelegate());
@@ -24,6 +25,8 @@ onAgentTaskEvent((ev) => {
 installAgentGateway(installBridge());
 installInboxConfirm();
 wireAgentInboxAlarm();
+chrome.alarms.onAlarm.addListener(onDailyAlarm);
+restoreDailyOperations().catch(() => {});
 syncAgentInboxAlarm().catch(() => {});
 // Kick once shortly after SW starts so agents do not wait a full alarm period (no-op when disabled).
 setTimeout(() => {
@@ -56,6 +59,12 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (typeof msg?.type === "string" && msg.type.startsWith("pl.daily.")) {
+    if (_sender?.id !== chrome.runtime.id || _sender?.url !== chrome.runtime.getURL("sidepanel/index.html")) return false;
+    handleDailyMessage(msg).then(value => sendResponse({ ok: true, value }),
+      error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
   if (typeof msg?.type === "string" && msg.type.startsWith("pl.mxApproval.")) {
     if (_sender?.id !== chrome.runtime.id || _sender?.url !== chrome.runtime.getURL("sidepanel/index.html")) return false;
     manageMxApproval(msg)

@@ -55,3 +55,11 @@
 ## 浏览器属性测试
 
 [本地运行、CI、覆盖门槛与失败重放](bombadil-testing.md)。设置、主侧栏和知识图谱有各自的属性文件；主侧栏复用生产启动入口，并使用两份带旁注的测试会话。
+
+### 跨境每日运营
+
+从「工作流 → 每日运营」打开。方果订单、Temu 退货退款、客服、违规、资金限制页面也会显示快捷入口。支持单项采集、一键采集、北京时间定时，以及方果状态和订单号的查询跳转。仅完整快照参与与上次、昨日和最近七日的比较。识别不到弹窗关闭图标时暂停对应来源。
+
+- [来源与页面识别](../extension/flows/daily-operations/catalog.js)
+- [按页采集及快照](../extension/flows/daily-operations/runtime.js)
+- [侧栏动态组件](../extension/skill-components/daily-operations/panel.js)
