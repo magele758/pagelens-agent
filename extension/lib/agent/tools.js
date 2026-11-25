@@ -22,6 +22,7 @@ import {
   injectFrames,
   injectMain,
   injectVideo,
+  isBoundWindowId,
   isHttpUrl,
   restrictedUrl,
   runJsInTab,
@@ -158,6 +159,14 @@ async function resolveTabId(ctx, args) {
   if (!id) throw new Error("没有可操作的标签。");
   if (ctx.getWindowId?.() != null) await tabInWindow(id, ctx.getWindowId());
   return id;
+}
+
+function requireBoundWindowId(ctx, action = "操作窗口标签") {
+  const windowId = ctx.getWindowId?.();
+  if (!isBoundWindowId(windowId)) {
+    throw new Error(`无法确定任务所属窗口，未绑定窗口时不能${action}。`);
+  }
+  return windowId;
 }
 
 const BACKGROUND_SHOT_TIMEOUT_MS = 4000;
@@ -302,6 +311,7 @@ export function createAgentTools(ctx) {
         limit: { type: "integer", description: "最多几页，默认 4，最大 8" },
       }),
       async execute(args) {
+        const windowId = requireBoundWindowId(ctx, "批量抽取标签");
         const limit = Math.min(Math.max(Number(args?.limit) || 4, 1), 8);
         const rawIds = Array.isArray(args?.tabIds)
           ? [...new Set(args.tabIds.map(Number).filter((n) => n > 0))].slice(0, limit)
@@ -309,7 +319,7 @@ export function createAgentTools(ctx) {
         let tabIds = rawIds;
         if (!tabIds.length) {
           const currentWindow = args?.currentWindow !== false;
-          const tabs = await chrome.tabs.query(tabQuery(ctx.getWindowId?.(), currentWindow));
+          const tabs = await chrome.tabs.query(tabQuery(windowId, currentWindow));
           const needle = String(args?.query || "").trim().toLowerCase();
           tabIds = [];
           for (const tab of tabs) {
@@ -640,10 +650,11 @@ export function createAgentTools(ctx) {
         query: { type: "string", description: "按标题或 URL 子串过滤" },
       }),
       async execute(args) {
+        const windowId = requireBoundWindowId(ctx, "列出标签");
         const denied = await requireOptionalFeature("tabs");
         if (denied) return denied;
         const currentWindow = args?.currentWindow !== false;
-        const tabs = await chrome.tabs.query(tabQuery(ctx.getWindowId?.(), currentWindow));
+        const tabs = await chrome.tabs.query(tabQuery(windowId, currentWindow));
         const needle = String(args?.query || "").trim().toLowerCase();
         const rows = tabs
           .filter((tab) => !restrictedUrl(tab.url) || tab.active)
@@ -704,9 +715,10 @@ export function createAgentTools(ctx) {
       async execute(args) {
         const url = String(args.url || "").trim();
         if (!isHttpUrl(url)) return `只能打开 http(s) URL，收到：${url}`;
+        const windowId = requireBoundWindowId(ctx, "打开新标签");
         const hostDenied = await requireHostUrl(url);
         if (hostDenied) return hostDenied;
-        const tab = await chrome.tabs.create({ ...tabQuery(ctx.getWindowId?.(), false), url, active: Boolean(args.active) });
+        const tab = await chrome.tabs.create({ ...tabQuery(windowId, false), url, active: Boolean(args.active) });
         const groupId = await attachTabToTask(ctx, tab.id);
         await ctx.onTabsMutated?.(args.active ? tab.id : undefined);
         return toToolText({ opened: compactTab(tab), groupId });
@@ -743,9 +755,10 @@ export function createAgentTools(ctx) {
       description: "解散删除本轮 PageLens 任务分组并关闭其全部标签。用户说「关掉这批」「结束任务」时用。",
       parameters: obj({}),
       async execute() {
+        const windowId = requireBoundWindowId(ctx, "关闭任务分组");
         const groupId = ctx.getTaskGroupId?.();
         if (groupId == null || groupId < 0) return "当前任务还没有标签分组。";
-        const tabs = await chrome.tabs.query({ ...tabQuery(ctx.getWindowId?.(), false), groupId });
+        const tabs = await chrome.tabs.query({ ...tabQuery(windowId, false), groupId });
         const ids = tabs.map((t) => t.id).filter((id) => id != null);
         if (ids.length) {
           await chrome.tabs.ungroup?.(ids).catch(() => {});
@@ -866,6 +879,7 @@ export function createAgentTools(ctx) {
         ["title"],
       ),
       async execute(args) {
+        const windowId = requireBoundWindowId(ctx, "收藏打开的标签");
         const denied = await requireOptionalFeature("bookmarks");
         if (denied) return denied;
         const tabsDenied = await requireOptionalFeature("tabs");
@@ -873,10 +887,10 @@ export function createAgentTools(ctx) {
         if (!chrome.bookmarks?.create) return "当前未授权 bookmarks。";
         const title = String(args.title || "").trim();
         if (!title) return "需要文件夹名称。";
+        const query = tabQuery(windowId, args.currentWindow !== false);
+        const tabs = await chrome.tabs.query(query);
         const parentId = await defaultBookmarkParentId(args.parentId);
         const folder = await chrome.bookmarks.create({ parentId, title });
-        const query = tabQuery(ctx.getWindowId?.(), args.currentWindow !== false);
-        const tabs = await chrome.tabs.query(query);
         const added = [];
         const skipped = [];
         const seen = new Set();
