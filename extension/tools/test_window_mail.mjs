@@ -6,7 +6,7 @@ import { systemPrompt } from "../lib/prompts.js";
 import { windowMailTools, bindWindowMail } from "../sidepanel/window-mail.js";
 import { resolveActiveTools } from "../lib/agent/tools.js";
 import { extractCapsule, capsuleCovers } from "../lib/agent/trust/capsule.js";
-import { installWindowMail, listPeerWindows, readWindowMail, sendWindowMail, waitForWindowResult } from "../lib/window-mail.js";
+import { installWindowMail, listPeerWindows, mailKey, readWindowMail, sendWindowMail, waitForWindowResult } from "../lib/window-mail.js";
 
 function event() {
   const listeners = new Set();
@@ -17,18 +17,36 @@ const db = {};
 const panelUrl = "chrome-extension://fixture/sidepanel/index.html";
 const senderFor = windowId => ({ id: "fixture", url: panelUrl, documentId: `doc-${windowId}` });
 let sender = senderFor(1);
+let portSender = null;
+let currentWindowId = null;
 let contextRows = [{ windowId: -1 }];
 const cancelled = [];
+const cancelMessages = [];
 const windows = [1, 2, 3].map(id => ({ id, incognito: false })).concat({ id: 4, incognito: true });
 globalThis.chrome = {
   runtime: {
-    id: "fixture", onMessage: event(), getURL: () => panelUrl,
+    id: "fixture", onMessage: event(), onConnect: event(), getURL: () => panelUrl,
     getContexts: async () => contextRows,
     sendMessage: async msg => new Promise(resolve => {
       for (const receive of chrome.runtime.onMessage.listeners) receive(msg, sender, resolve);
     }),
+    connect({ name }) {
+      const panel = { name, onMessage: event(), onDisconnect: event() };
+      const worker = { name, sender: portSender ?? sender, onMessage: event(), onDisconnect: event() };
+      for (const [from, to] of [[panel, worker], [worker, panel]]) {
+        from.postMessage = msg => queueMicrotask(() => {
+          if (from === panel && msg.type === "pl.windowMail.cancel") cancelMessages.push(msg.id);
+          for (const receive of to.onMessage.listeners) receive(msg);
+        });
+        from.disconnect = () => {
+          for (const listener of to.onDisconnect.listeners) listener();
+        };
+      }
+      for (const receive of chrome.runtime.onConnect.listeners) receive(worker);
+      return panel;
+    },
   },
-  windows: { getAll: async () => windows, onRemoved: event(), onCreated: event() },
+  windows: { getAll: async () => windows, getCurrent: async () => ({ id: currentWindowId }), onRemoved: event(), onCreated: event() },
   tabs: { query: async q => [{ id: q.windowId * 10, url: "https://example.org/" }] },
   storage: {
     onChanged: event(),
@@ -57,15 +75,31 @@ installWindowMail({
 assert.deepEqual(await listPeerWindows(1), [{ id: 2, busy: false }, { id: 3, busy: false }]);
 await assert.rejects(sendWindowMail(1, 2, "message", "unbound"), /不匹配/);
 contextRows = [{ documentId: "doc-1", windowId: -1 }, { documentId: "doc-2", windowId: 1 }];
-await assert.rejects(sendWindowMail(1, 2, "message", "negative"), /不匹配/);
+await assert.rejects(sendWindowMail(1, 2, "message", "negative without window"), /不匹配/);
+currentWindowId = 1;
+portSender = senderFor(3);
+await assert.rejects(sendWindowMail(1, 2, "message", "unregistered port document"), /不匹配/);
+portSender = null;
+await assert.rejects(sendWindowMail(2, 3, "message", "wrong claimed window"), /不匹配/);
+await assert.rejects(sendWindowMail(null, 3, "message", "no claimed window"), /不匹配/);
+contextRows = [{ documentId: "doc-2", windowId: -1 }];
+await assert.rejects(sendWindowMail(1, 2, "message", "document not registered as a side panel"), /不匹配/);
+contextRows = [{ documentId: "doc-1", windowId: -1 }];
+sender = { id: "fixture", url: panelUrl };
+const verified = await sendWindowMail(1, 2, "message", "same side panel confirmed");
+assert.equal((await readWindowMail(2)).find(row => row.id === verified.id)?.text, "same side panel confirmed");
+await chrome.storage.session.remove(mailKey(1));
+await chrome.storage.session.remove(mailKey(2));
+await assert.rejects(sendWindowMail(2, 3, "message", "wrong window without document ID"), /不匹配/);
+contextRows = [];
+await assert.rejects(sendWindowMail(1, 2, "message", "no active side panel"), /不匹配/);
+sender = senderFor(1);
 contextRows = [
   { documentId: "doc-1", windowId: 1 },
   { documentId: "doc-2", windowId: 2 },
   { documentId: "doc-4", windowId: 4 },
 ];
 await assert.rejects(sendWindowMail(2, 1, "message", "spoof"), /不匹配/);
-sender = { id: "fixture", url: panelUrl };
-await assert.rejects(sendWindowMail(1, 2, "message", "no-doc"), /不匹配/);
 sender = senderFor(1);
 await assert.rejects(sendWindowMail(1, 1, "message", "self"), /另一个/);
 await assert.rejects(sendWindowMail(1, 4, "message", "private"), /另一个/);
@@ -89,6 +123,9 @@ assert.equal(task.windowId, 2);
 assert.equal(task.session.modelPlanned, true);
 assert.deepEqual(task.capsule, { actions: [] });
 const receipt = waitForWindowResult(1, entry.id);
+const knownContexts = contextRows;
+sender = { id: "fixture", url: panelUrl };
+contextRows = [{ documentId: "doc-1", windowId: -1 }];
 const ctrl = new AbortController();
 const aborted = waitForWindowResult(1, entry.id, ctrl.signal);
 ctrl.abort();
@@ -98,6 +135,8 @@ await assert.rejects(aborted, (err) => {
   return true;
 });
 assert.deepEqual(cancelled, [entry.id]);
+contextRows = knownContexts;
+sender = senderFor(1);
 await assert.rejects(waitForWindowResult(3, entry.id), /过期/);
 cancelled.length = 0;
 for (const onClose of chrome.windows.onRemoved.listeners) await onClose(1);
@@ -114,6 +153,7 @@ console.log("PASS cross-window messages, task delivery, failure receipts, cancel
 
 // Auto allocation belongs to the sender's browsing mode, never to an existing peer.
 chrome.runtime.onMessage.listeners.clear();
+chrome.runtime.onConnect.listeners.clear();
 const jobs = [];
 const opened = [];
 const removed = [];
@@ -207,6 +247,7 @@ console.log("PASS automatic window allocation, joining, checkpoint replay and ro
 
 // Background delegate_window_task must follow the same stop signal after it returns.
 chrome.runtime.onMessage.listeners.clear();
+chrome.runtime.onConnect.listeners.clear();
 sender = senderFor(1);
 const bgTasks = [];
 const bgCancelled = [];
@@ -228,12 +269,7 @@ installWindowMail({
     await chrome.storage.session.set({ [DELEGATE_STORAGE_KEY]: bgTasks });
   },
 });
-const cancelMessages = [];
-const deliverMessage = chrome.runtime.sendMessage;
-chrome.runtime.sendMessage = async msg => {
-  if (msg?.type === "pl.windowMail.cancel") cancelMessages.push(msg.id);
-  return deliverMessage(msg);
-};
+cancelMessages.length = 0;
 async function until(fn) {
   for (let i = 0; i < 30; i++) {
     if (fn()) return;
@@ -302,7 +338,6 @@ foreground.abort();
 const foregroundResult = JSON.parse(await waiting);
 assert.equal(foregroundResult.status, "cancelled");
 assert.equal(bgCancelled.includes(bgTasks.find(item => item.prompt === "前台等待").id), true);
-chrome.runtime.sendMessage = deliverMessage;
 console.log("PASS background delegation follows stop without cancelling finished tasks");
 
 const mailPrompt = systemPrompt({}, { windowMail: true });

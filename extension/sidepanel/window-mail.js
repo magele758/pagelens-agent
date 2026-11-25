@@ -1,10 +1,10 @@
 import { DELEGATE_STORAGE_KEY, MAX_CONCURRENT_TASKS } from "../lib/agent/delegate.js";
-import { listPeerWindows, mailKey, readWindowMail, sendWindowMail, waitForWindowResult, WORK_STATUS } from "../lib/window-mail.js";
+import { cancelWindowMail, listPeerWindows, mailKey, readWindowMail, sendWindowMail, waitForWindowResult, WORK_STATUS } from "../lib/window-mail.js";
 
 export function windowMailTools(from, getCapsule, userMessageId) {
   const requestKey = callId => userMessageId && callId ? `${userMessageId}/${callId}` : undefined;
   async function cancelDispatched(taskId) {
-    await chrome.runtime.sendMessage({ type: "pl.windowMail.cancel", from, id: taskId });
+    await cancelWindowMail(from, taskId);
   }
   // 停止只取消这一条，任务已不是 running 时不再发送。
   async function cancelIfStillRunning(taskId) {
