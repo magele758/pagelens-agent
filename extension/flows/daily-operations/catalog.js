@@ -54,9 +54,14 @@ export const dailySources = {
     name: "Temu 今日大盘数据", platform: "Temu", module: "今日大盘数据", mode: "analytics",
     url: europeanTemu + "/main/act/data", sections: ["今日大盘"],
   },
+  home: {
+    name: "Temu 首页", platform: "Temu", module: "首页", mode: "analytics",
+    url: europeanTemu + "/", sections: ["经营概览", "昨日流量"],
+  },
 };
 
 export const dailySelectionKey = "pagelens.dailyOperations.selection.v1";
+export const dailySelectionVersion = 3;
 
 export function dailyPlan(selection, source = "all") {
   return Object.fromEntries(Object.entries(dailySources).flatMap(([id, config]) => {
@@ -70,7 +75,8 @@ export function dailyPlan(selection, source = "all") {
 
 export function savedDailyPlan(selection) {
   if (selection == null) return dailyPlan();
-  if (selection.version === 2) return dailyPlan(selection.sources);
+  if (selection.version === dailySelectionVersion) return dailyPlan(selection.sources);
+  if (selection.version === 2) return dailyPlan({ home: dailySources.home.sections, ...selection.sources });
   // Existing choices used the old catalog. Newly added sources start checked.
   const additions = Object.fromEntries(Object.entries(dailySources)
     .filter(([, config]) => config.mode).map(([id, config]) => [id, config.sections]));

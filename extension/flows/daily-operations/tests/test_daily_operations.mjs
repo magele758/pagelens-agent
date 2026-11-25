@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources, savedDailyPlan } from "../catalog.js";
+import { dailyPlan, dailySelectionKey, dailySelectionVersion, dailySourceForUrl, dailySources, savedDailyPlan } from "../catalog.js";
 import { readDailyPage } from "../page.js";
 import { addSnapshot, compareSnapshot, dailyScheduleKey, dailyStateKey, dayInChina } from "../history.js";
 import { dailyReportData, parseDailyHighlights } from "../report.js";
@@ -10,10 +10,11 @@ import { renderDailyReport } from "../../../skill-components/daily-operations/ca
 import { bindDailyOperations } from "../../../skill-components/daily-operations/panel.js";
 
 test("the selected plan defaults to all and only keeps checked known sections", () => {
-  assert.equal(Object.values(dailyPlan()).flat().length, 37);
+  assert.equal(Object.values(dailyPlan()).flat().length, 39);
   assert.deepEqual(dailyPlan({ orders: ["全部", "全部", "unknown"], refunds: [], fake: ["全部"] }), { orders: ["全部"] });
   assert.deepEqual(dailyPlan({}), {});
-  assert.deepEqual(savedDailyPlan({ version: 2, sources: {} }), {});
+  assert.deepEqual(savedDailyPlan({ version: dailySelectionVersion, sources: {} }), {});
+  assert.deepEqual(savedDailyPlan({ version: 2, sources: {} }), { home: ["经营概览", "昨日流量"] });
   assert.deepEqual(savedDailyPlan({ chat: ["待回复消息"] }).traffic, ["近1日", "近7日"]);
   assert.equal(savedDailyPlan({ chat: ["待回复消息"] }).orders, undefined);
 });
@@ -44,7 +45,7 @@ test("daily progress and completed reports remain inside their own dialog", asyn
 
 test("manual runs and alarms only open selected sources and visit selected tabs", async () => {
   const previousChrome = globalThis.chrome;
-  const stored = { [dailySelectionKey]: { version: 2, sources: { violations: ["店铺违规"] } } };
+  const stored = { [dailySelectionKey]: { version: dailySelectionVersion, sources: { violations: ["店铺违规"] } } };
   const calls = [];
   let resolveAlarm;
   globalThis.chrome = {
@@ -145,6 +146,27 @@ test("the traffic collector verifies the date and each card's selected period", 
   for (const node of doc.querySelectorAll("#summary,#details")) node.onclick = () => clicks.push(node.id);
   assert.equal(run({ action: "section", section: "近7日" }).ok, true);
   assert.deepEqual(clicks, ["summary"]);
+});
+
+test("Temu home separates the latest overview from dated yesterday traffic", () => {
+  const overview = ["待发货", "已售罄", "低库存预警", "售罄影响交易额占比", "库存可售天数", "在售商品数",
+    "今日销量", "近7日销量", "近30日销量", "近90日品质退货率"];
+  const traffic = ["商品访客数", "商品浏览量", "商品加购人数", "商品收藏人数", "商详支付买家数", "全部支付买家数"];
+  const cards = names => names.map((name, i) => `<div><span>${name}</span> <b>${i}</b></div>`).join("");
+  const { run, doc } = fixture("home", `
+    <div class="_Wrz4-O9w">shop</div><nav><div>待发货</div></nav>
+    <main>${cards(overview)}<section><h2>昨日流量</h2> <small id="date">统计日期2026-11-24</small>
+      ${cards(traffic)}</section></main>
+  `);
+  const summary = run({ section: "经营概览" });
+  assert.deepEqual(Array.from(summary.records, row => row.id), overview);
+  assert.equal(summary.records[0].fields.数值, "0");
+  assert.equal(summary.meta.date, undefined);
+  const yesterday = run({ section: "昨日流量" });
+  assert.equal(yesterday.meta.date, "2026-11-24");
+  assert.deepEqual(Array.from(yesterday.records, row => row.id), traffic);
+  doc.querySelector("#date").remove();
+  assert.equal(run({ section: "昨日流量" }).code, "loading");
 });
 
 test("campaign shortcuts match the unique row in the selected category and shop", () => {

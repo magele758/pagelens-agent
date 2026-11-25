@@ -223,52 +223,73 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
     if (action === "section") return { ok: true };
     if (action !== "read") return failure("unsupported", "不支持此经营分析操作。");
 
+    if (source === "home") {
+      const yesterday = section === "昨日流量";
+      const metrics = yesterday
+        ? ["商品访客数", "商品浏览量", "商品加购人数", "商品收藏人数", "商详支付买家数", "全部支付买家数"]
+        : ["待发货", "已售罄", "低库存预警", "售罄影响交易额占比", "库存可售天数", "在售商品数",
+          "今日销量", "近7日销量", "近30日销量", "近90日品质退货率"];
+      const date = text(document.body).match(/昨日流量\s*统计日期\s*[:：]?\s*(\d{4}-\d{2}-\d{2})/u)?.[1];
+      if (yesterday && !date) return failure("loading", "正在等待首页昨日流量的统计日期。");
+      const records = metricRecords(metrics);
+      if (records.length !== metrics.length) return failure("loading", "正在等待首页经营指标。");
+      return metricSnapshot(records, yesterday ? date : undefined);
+    }
+
     const metrics = source === "traffic"
       ? ["商品曝光量", "商品点击量", "支付订单数", "支付件数", "点击率", "点击订单转化率", "曝光订单转化率"]
       : source === "sales"
         ? ["今日总销量", "售罄健康分数", "无法报名活动商品数", "待反馈", "待补货", "未按期补货",
           "SKU售罄数&占比", "低库存预警SKU数&占比", "新增SKU售罄数&占比", "售罄影响GMV&占比"]
         : ["活动销量", "活动GMV", "活动商品数", "曝光用户数", "点击用户数", "点击转化率", "支付转化率"];
-    const normalize = value => value.replace(/\s+/gu, "");
     const rawBody = text(document.body);
     const date = rawBody.match(source === "traffic"
       ? /统计时间\s*[:：]\s*北京时间\s*(\d{4}-\d{2}-\d{2}(?:\s*[~～至-]\s*\d{4}-\d{2}-\d{2})?)/u
       : /(?:最后|最近)更新时间\s*[:：]\s*(?:北京时间\s*)?(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?)/u)?.[1];
     if (!date) return failure("loading", "正在等待分析页面的统计时间。");
 
-    const records = metrics.flatMap(name => {
-      const values = new Map();
-      const measurable = /^(?:[¥￥$€])?\s*(?:[-+]?\d[\d,]*(?:\.\d+)?%?(?:\s*\(\s*\d+(?:\.\d+)?%\s*\))?|--|—|暂无数据|-)(?=\s|较|$)/u;
-      for (const label of controls.filter(node => normalize(text(node)) === name &&
-        ![...node.children].some(child => normalize(text(child)) === name))) {
-        const found = [];
-        for (let node = label.parentElement, depth = 0; node && depth < 6; node = node.parentElement, depth++) {
-          const content = text(node);
-          if (content.length > 220 || !normalize(content).startsWith(name)) break;
-          let i = 0;
-          for (let count = 0; count < name.length && i < content.length; i++) {
-            if (!/\s/u.test(content[i])) count++;
-          }
-          const remainder = content.slice(i).trim();
-          const value = remainder.match(measurable)?.[0];
-          if (!value) continue;
-          const compare = remainder.match(/较前[17]日|较昨日|较近7日/gu);
-          if (source === "traffic" && !compare?.includes(section.replace("近", "较前"))) continue;
-          found.push({ value, change: compare ? remainder.slice(value.length).trim().slice(0, 85) : "" });
-          if (compare) break;
-        }
-        const candidate = found.at(-1);
-        if (candidate) values.set(candidate.value, candidate);
-      }
-      if (values.size !== 1) return [];
-      const { value, change } = values.values().next().value;
-      return [{ id: name, fields: { 指标: name, 数值: value, ...(change && { 平台对比: change }) } }];
-    });
+    const records = metricRecords(metrics);
     if (records.length < (source === "traffic" ? metrics.length : 2)) {
       return failure("loading", "正在等待对应周期的分析指标。");
     }
-    return { ok: true, account, records, total: records.length, next: false, more: false,
-      meta: { date, type: "metrics" } };
+    return metricSnapshot(records, date);
+
+    function metricSnapshot(records, date) {
+      return { ok: true, account, records, total: records.length, next: false, more: false,
+        meta: { ...(date && { date }), type: "metrics" } };
+    }
+
+    function metricRecords(metrics) {
+      const normalize = value => value.replace(/\s+/gu, "");
+      return metrics.flatMap(name => {
+        const values = new Map();
+        const measurable = /^(?:[¥￥$€])?\s*(?:[-+]?\d[\d,]*(?:\.\d+)?%?(?:\s*\(\s*\d+(?:\.\d+)?%\s*\))?|--|—|暂无数据|-)(?=\s|较|$)/u;
+        for (const label of controls.filter(node => normalize(text(node)) === name &&
+          ![...node.children].some(child => normalize(text(child)) === name))) {
+          const found = [];
+          for (let node = label.parentElement, depth = 0; node && depth < 6; node = node.parentElement, depth++) {
+            const content = text(node);
+            if (content.length > 220 || !normalize(content).startsWith(name)) break;
+            let i = 0;
+            for (let count = 0; count < name.length && i < content.length; i++) {
+              if (!/\s/u.test(content[i])) count++;
+            }
+            const remainder = content.slice(i).trim();
+            const value = remainder.match(measurable)?.[0];
+            if (!value) continue;
+            const compare = remainder.match(/较前[17]日|较昨日|较近7日/gu);
+            if (source === "traffic" && !compare?.includes(section.replace("近", "较前"))) continue;
+            found.push({ value, change: compare ? remainder.slice(value.length).trim().slice(0, 85) : "" });
+            if (compare) break;
+          }
+          const candidate = found.at(-1);
+          if (candidate) values.set(candidate.value, candidate);
+        }
+        if (values.size !== 1) return [];
+        const { value, change } = values.values().next().value;
+        return [{ id: name, fields: { 指标: name, 数值: value, ...(change && { 平台对比: change }) } }];
+      });
+    }
   }
 
   function campaigns() {

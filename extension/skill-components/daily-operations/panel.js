@@ -1,4 +1,4 @@
-import { dailyPlan, dailySelectionKey, dailySources, savedDailyPlan } from "../../flows/daily-operations/catalog.js";
+import { dailyPlan, dailySelectionKey, dailySelectionVersion, dailySources, savedDailyPlan } from "../../flows/daily-operations/catalog.js";
 import { dailyScheduleKey, dailyStateKey, dayInChina } from "../../flows/daily-operations/history.js";
 import { renderDailyReport } from "./cards.js";
 
@@ -229,7 +229,7 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
     }
     const saved = selection = dailyPlan(next);
     writeSelection = writeSelection.catch(() => {}).then(() => chrome.storage.local.set({
-      [dailySelectionKey]: { version: 2, sources: saved },
+      [dailySelectionKey]: { version: dailySelectionVersion, sources: saved },
     }));
     void writeSelection.catch(() => showStatus("未能保存关注项。"));
     updateControls();

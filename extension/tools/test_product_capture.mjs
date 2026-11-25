@@ -34,7 +34,7 @@ test("only exposes capabilities that match each site's surface and current route
   assert.deepEqual(featureIds("https://agentseller.temu.com/activity/marketing-activity"), [
     "daily-operations", "temu-campaign-data", "temu-campaign-draft",
   ]);
-  for (const path of ["/main/flux-analysis", "/main/data-center/goods-data", "/main/act/data"]) {
+  for (const path of ["/", "/main/flux-analysis", "/main/data-center/goods-data", "/main/act/data"]) {
     assert.deepEqual(featureIds(`https://agentseller-eu.temu.com${path}`), ["daily-operations"], path);
   }
   assert.deepEqual(featureIds("https://seller.kuajingmaihuo.com/labor/account"), ["temu-finance-data"]);

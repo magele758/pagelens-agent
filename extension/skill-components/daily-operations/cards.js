@@ -89,6 +89,7 @@ function button(label, action, className = "secondary mini") {
 
 function countText(last) {
   if (last.failed) return "采集失败";
+  if (last.type === "metrics") return `读取 ${last.count} 项指标`;
   if (!last.complete) return `读取 ${last.count} 条，仍需核对`;
   if (last.added == null) return `读取 ${last.count} 条`;
   return last.added > 0 ? `发现 ${last.added} 条新增 · 共 ${last.count} 条` : `读取 ${last.count} 条 · 无新增`;
@@ -131,8 +132,10 @@ export function renderDailyReport(article, state, { onOpen, onRetry, onSummarize
     if (!config) continue;
     const slices = result.sections;
     const preview = slices.find(section => section.section === "全部") || (slices.length === 1 ? slices[0] : null);
-    const mainMetric = { traffic: "商品曝光量", sales: "今日总销量", market: "活动销量" }[id];
-    for (const item of mainMetric ? slices : preview ? [preview] : []) {
+    const mainMetricFor = section => id === "home" ? (section === "昨日流量" ? "商品访客数" : "今日销量") :
+      { traffic: "商品曝光量", sales: "今日总销量", market: "活动销量" }[id];
+    for (const item of mainMetricFor(slices[0]?.section) ? slices : preview ? [preview] : []) {
+      const mainMetric = mainMetricFor(item.section);
       const value = item.records.find(row => row.id === mainMetric)?.fields.数值;
       const metric = element("div", undefined, "daily-metric");
       metric.append(element("small", `${config.name} · ${item.section}`),

@@ -241,6 +241,7 @@ async function executeDaily({ source = "all", selection, startDay, endDay, windo
             result.sections.push(entry);
             if (snapshot.complete) history[key] = addSnapshot(history[key] || [], snapshot);
             state.progress.last = { id, section, count: entry.records.length,
+              ...(entry.meta?.type && { type: entry.meta.type }),
               added: entry.previousDelta != null ? entry.added.length : null, complete: entry.complete };
           } catch (error) {
             result.errors.push({ section, error: error.message });
