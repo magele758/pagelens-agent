@@ -199,24 +199,37 @@ export async function runNativeDraft(job, bridge) {
   } finally {
     clearTimeout(timer);
     port.disconnect();
-    if (!/verification|captcha|验证/i.test(failedMsg)) {
-      for (const winId of ownedWindows) {
-        try {
-          const win = await chrome.windows?.get?.(winId, { populate: true });
-          const tabs = win?.tabs || [];
-          const onlyAutomation = tabs.every(t => {
-            const u = String(t.url || t.pendingUrl || "");
-            return ownedEver.has(t.id) || !u || u === "about:blank" || u.startsWith("chrome://newtab");
-          });
-          if (win && onlyAutomation) {
-            const groupedIds = tabs.filter(t => t.groupId != null && t.groupId >= 0).map(t => t.id);
-            if (groupedIds.length && typeof chrome.tabs?.ungroup === "function") {
-              await chrome.tabs.ungroup(groupedIds).catch(() => {});
-            }
-            await chrome.windows.remove(winId).catch(() => {});
-          }
-        } catch {}
-      }
-    }
+    if (!/verification|captcha|验证/i.test(failedMsg))
+      await closeOwnedAutomation({ ownedIds: ownedEver, windowIds: ownedWindows, closeTab: tabId => call("close_tab", { tabId }) });
+  }
+}
+
+/** A window is automation-only when every tab in it was opened by this task; blank pages alone prove nothing. */
+export function windowOnlyHasOwnedTabs(tabs, ownedIds) {
+  return tabs.length > 0 && tabs.every(t => ownedIds.has(t.id));
+}
+
+/**
+ * Close every tab this task opened (even if dragged elsewhere), then remove the original windows
+ * that held only those tabs. Decided from a snapshot taken before closing, so a Chrome-made newtab
+ * left behind by close_tab never triggers a second window removal and destination windows are untouched.
+ */
+export async function closeOwnedAutomation({ ownedIds, windowIds, closeTab, chromeApi = globalThis.chrome }) {
+  const doomed = [];
+  for (const windowId of windowIds) {
+    try {
+      const win = await chromeApi.windows?.get?.(windowId, { populate: true });
+      const tabs = win?.tabs || [];
+      if (!win || !windowOnlyHasOwnedTabs(tabs, ownedIds)) continue;
+      const groupedIds = tabs.filter(t => t.groupId != null && t.groupId >= 0).map(t => t.id);
+      if (groupedIds.length && typeof chromeApi.tabs?.ungroup === "function") await chromeApi.tabs.ungroup(groupedIds).catch(() => {});
+      doomed.push(windowId);
+    } catch {}
+  }
+  for (const tabId of ownedIds) {
+    try { await closeTab(tabId); } catch {}
+  }
+  for (const windowId of doomed) {
+    try { await chromeApi.windows.remove(windowId).catch(() => {}); } catch {}
   }
 }
