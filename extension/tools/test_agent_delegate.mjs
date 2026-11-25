@@ -585,8 +585,9 @@ const toolMessages = (seen) => seen.flatMap((s) => s.messages.filter((m) => m.ro
       signal.addEventListener("abort", () => reject(new Error("abort")), { once: true });
     }),
   };
+  const storage = memoryTaskStorage();
   const manager = createDelegateManager({
-    storage: memoryTaskStorage(),
+    storage,
     approvals: createApprovalQueue({ storage: memoryAdapter() }),
     createRun: async () => ({ tools: [], systemPrompt: "", model: hang }),
     resolveTabWindow: async (tabId) => (tabId === 7 ? 4 : null),
@@ -630,12 +631,18 @@ const toolMessages = (seen) => seen.flatMap((s) => s.messages.filter((m) => m.ro
     await sideRelease.promise;
   });
   await sideReady.promise;
-  await assert.rejects(
-    manager.start({ prompt: "侧栏已占用", windowId: 8 }),
-    (err) => err instanceof DelegateError && err.code === "BUSY" && err.retryable === true,
-  );
-  sideRelease.resolve();
-  await sideHeld;
+  try {
+    const args = { prompt: "侧栏已占用", windowId: 8, requesterWindowId: 1, peerRequestKey: "busy-call" };
+    const isBusy = (err) => err instanceof DelegateError && err.code === "BUSY" && err.retryable === true;
+    await Promise.all([
+      assert.rejects(manager.start(args), isBusy),
+      assert.rejects(manager.start(args), isBusy),
+    ]);
+    assert.deepEqual((await storage.load()).map((task) => task.id), [tabTask.id, other.id]);
+  } finally {
+    sideRelease.resolve();
+    await sideHeld;
+  }
 
   await manager.cancel(tabTask.id);
   await manager.cancel(other.id);
@@ -643,6 +650,121 @@ const toolMessages = (seen) => seen.flatMap((s) => s.messages.filter((m) => m.ro
   assert.equal(again.status, TASK_STATUS.RUNNING);
   await manager.cancel(again.id);
   console.log("PASS window lock: no focused-window grab; busy before taskId");
+}
+
+// 取消待授锁任务，同时验证其他任务写存储时不会带上它。
+{
+  const requested = Promise.withResolvers();
+  const allowGrant = Promise.withResolvers();
+  const windowId = 16;
+  const originalRequest = navigator.locks.request;
+  navigator.locks.request = (name, options, callback) => {
+    if (name !== `pagelens-agent-window-${windowId}`) {
+      return originalRequest.call(navigator.locks, name, options, callback);
+    }
+    requested.resolve();
+    return allowGrant.promise.then(() => originalRequest.call(navigator.locks, name, options, callback));
+  };
+  const storage = memoryTaskStorage();
+  const executions = [];
+  const manager = createDelegateManager({
+    storage,
+    createRun: async ({ task }) => {
+      executions.push(task.id);
+      return { tools: [], systemPrompt: "", model: scriptedModel([]) };
+    },
+  });
+  const start = manager.start({ prompt: "等待窗口锁", windowId });
+  try {
+    await requested.promise;
+    const [pending] = await manager.list();
+    const independent = await manager.start({ prompt: "无窗口的独立任务" });
+    await manager.wait(independent.id);
+    assert.deepEqual((await storage.load()).map((task) => task.id), [independent.id]);
+    assert.equal((await manager.cancel(pending.id)).status, TASK_STATUS.CANCELLED);
+    allowGrant.resolve();
+    assert.equal((await start).status, TASK_STATUS.CANCELLED);
+    await manager.wait(pending.id);
+    assert.deepEqual(executions, [independent.id], "cancellation before grant must prevent execution");
+    assert.equal((await storage.load()).find((task) => task.id === pending.id)?.status, TASK_STATUS.CANCELLED);
+    await withWindowTask(windowId, () => {});
+  } finally {
+    allowGrant.resolve();
+    navigator.locks.request = originalRequest;
+  }
+  console.log("PASS cancellation before window lock grant skips execution and releases the lock");
+}
+
+// 模拟忽略 abort 的在途工具调用，跨过真实取消宽限，再暂停清理。
+{
+  const windowId = 17;
+  const toolEntered = Promise.withResolvers();
+  const toolReturn = Promise.withResolvers();
+  const cleanupEntered = Promise.withResolvers();
+  const cleanupReturn = Promise.withResolvers();
+  let cleanupRuns = 0;
+  const manager = createDelegateManager({
+    createRun: async () => ({
+      tools: [{
+        ...fakeTools([])[0],
+        async execute() {
+          toolEntered.resolve();
+          await toolReturn.promise;
+          return "工具已结束";
+        },
+      }],
+      systemPrompt: "",
+      model: scriptedModel([[{ name: "extract_page" }]]),
+      async cleanup() {
+        cleanupRuns++;
+        cleanupEntered.resolve();
+        await cleanupReturn.promise;
+      },
+    }),
+  });
+  const started = await manager.start({ prompt: "运行慢工具", windowId });
+  try {
+    await toolEntered.promise;
+    const lockIsBusy = () => assert.rejects(withWindowTask(windowId, () => {}), { code: "WINDOW_BUSY" });
+    const cancellation = manager.cancel(started.id);
+    await lockIsBusy();
+    assert.equal((await cancellation).status, TASK_STATUS.CANCELLED);
+    assert.equal(cleanupRuns, 0, "the tool is still running after the cancellation grace period");
+    assert.equal(manager.runningCount(), 1);
+    await lockIsBusy();
+    toolReturn.resolve();
+    await cleanupEntered.promise;
+    await lockIsBusy();
+  } finally {
+    toolReturn.resolve();
+    cleanupReturn.resolve();
+    await manager.wait(started.id);
+  }
+  assert.equal(cleanupRuns, 1);
+  assert.equal(manager.runningCount(), 0);
+  await withWindowTask(windowId, () => {});
+  console.log("PASS running cancellation keeps the window locked through tool completion and cleanup");
+}
+
+{
+  const windowId = 18;
+  let lockHeldDuringCleanup = false;
+  const manager = createDelegateManager({
+    createLoop: () => ({ run() { throw new Error("运行失败"); } }),
+    createRun: async () => ({
+      async cleanup() {
+        lockHeldDuringCleanup = await withWindowTask(windowId, () => false).catch((err) => err.code === "WINDOW_BUSY");
+        throw new Error("清理失败");
+      },
+    }),
+  });
+  const started = await manager.start({ prompt: "失败时清理", windowId });
+  const done = await manager.wait(started.id);
+  assert.equal(done.status, TASK_STATUS.FAILED);
+  assert.equal(done.error.message, "运行失败");
+  assert.equal(lockHeldDuringCleanup, true);
+  await withWindowTask(windowId, () => {});
+  console.log("PASS failed delegate releases the window lock even when cleanup fails");
 }
 
 {
@@ -727,6 +849,7 @@ const toolMessages = (seen) => seen.flatMap((s) => s.messages.filter((m) => m.ro
     const settings = { text: { baseUrl: "http://127.0.0.1:11434/v1", model: "m", apiKey: "" }, nativeShell: false };
     const capsule = resolveDelegateCapsule({ prompt: "打开 https://news.example/b" }).capsule;
     let cleanupRuns = 0;
+    let lockHeldDuringCleanup = false;
     const manager = createDelegateManager({
       storage: memoryTaskStorage(),
       approvals: createApprovalQueue({ storage: memoryAdapter() }),
@@ -738,6 +861,7 @@ const toolMessages = (seen) => seen.flatMap((s) => s.messages.filter((m) => m.ro
           model: scriptedModel([[{ name: "open_tab", args: { url: "https://news.example/b" } }]]),
           cleanup: async () => {
             cleanupRuns++;
+            lockHeldDuringCleanup = await withWindowTask(task.windowId, () => false).catch((err) => err.code === "WINDOW_BUSY");
             await run.cleanup();
           },
         };
@@ -753,8 +877,10 @@ const toolMessages = (seen) => seen.flatMap((s) => s.messages.filter((m) => m.ro
     const done = await manager.wait(started.id);
     assert.equal(done.status, TASK_STATUS.DONE);
     assert.equal(cleanupRuns, 1, "delegate executes run.cleanup() in finally");
+    assert.equal(lockHeldDuringCleanup, true, "delegate still owns the window lock during cleanup");
     assert.deepEqual(events.at(-1), ["ungroup", [12]], "delegate cleanup dissolves generated task tab group");
     assert.equal(swTabs.find((t) => t.id === 12).groupId, -1);
+    await withWindowTask(4, () => {});
   } finally {
     globalThis.chrome = previousChrome;
   }
