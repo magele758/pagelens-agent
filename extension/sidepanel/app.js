@@ -55,6 +55,7 @@ import { pickTargetTab, refreshTab } from "./tab-context.js";
 import { applyUiTheme, bindThemeEditor } from "./theme.js";
 import { delegatePanel, trustPanel } from "./trust-runtime.js";
 import { bindWorkflowCatalog } from "./workflow-catalog.js";
+import { bindDailyOperations } from "../skill-components/daily-operations/panel.js";
 import { bindWorkflowShortcuts } from "./workflow-shortcuts.js";
 import { bindTemuListingPanel } from "./temu-listing-panel.js";
 import { bindTemuSellerOperationsPanel } from "../flows/temu/seller-operations/panel.js";
@@ -221,7 +222,8 @@ function wire() {
     onBack,
     replay: request => replaySheinListing({ ...request, settings: state.settings }),
   });
-  const workflowHandlers = { openProductListing, openSheinListing, openMarketing, openTiktokDraft, openTemuListing, openTemuOperations, ...captureActions };
+  const openDailyOperations = bindDailyOperations({ getTargetTab: pickTargetTab, onBack });
+  const workflowHandlers = { openProductListing, openSheinListing, openMarketing, openTiktokDraft, openTemuListing, openTemuOperations, openDailyOperations, ...captureActions };
   openCatalog = bindWorkflowCatalog(workflowHandlers);
   bindWorkflowShortcuts({ getTargetTab: pickTargetTab, handlers: workflowHandlers, onTabAccess: refreshTab });
   try {

@@ -1,0 +1,55 @@
+.daily-dialog {
+  width: min(100% - 16px, 520px);
+  max-height: 92dvh;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--text);
+  background: var(--bg);
+  overflow: hidden;
+}
+.daily-dialog::backdrop { background: #0005; }
+.daily-header, .daily-group > header, .daily-run, .daily-inline, .daily-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.daily-header { position: sticky; top: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.daily-header h2 { flex: 1; margin: 0; font-size: 16px; }
+.daily-body { max-height: calc(92dvh - 52px); overflow: auto; padding: 12px; }
+.daily-config, .daily-group {
+  padding: 10px;
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  min-width: 0;
+}
+.daily-config label { display: block; font-size: 12px; }
+.daily-inline, .daily-shortcuts { flex-wrap: wrap; margin-top: 6px; }
+.daily-inline input { display: block; max-width: 100%; }
+.daily-run { margin-bottom: 12px; }
+.daily-run [role="status"], .daily-hint { font-size: 12px; color: var(--muted); }
+.daily-group > header { justify-content: space-between; margin-bottom: 7px; }
+.daily-group h3 { margin: 0; font-size: 14px; }
+.daily-section { border-top: 1px solid var(--line); }
+.daily-section summary { cursor: pointer; padding: 8px 0; }
+.daily-total, .daily-badge { margin-left: 8px; font-size: 12px; }
+.daily-badge { color: var(--accent); }
+.daily-section-body { padding: 0 0 8px; }
+.daily-chart {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  text-align: center;
+  gap: 5px;
+  padding: 8px 0;
+}
+.daily-chart > div { display: grid; grid-template-rows: 1.1rem 10px 1rem; font-size: 12px; }
+.daily-chart meter { width: 100%; }
+.daily-chart small { grid-row: 3; }
+.daily-records { list-style: none; padding: 0; }
+.daily-records li { padding: 8px; margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; }
+.daily-records .daily-new { border-inline-start: 3px solid var(--accent); }
+.daily-records dl { display: grid; grid-template-columns: minmax(66px, auto) 1fr; gap: 4px 8px; margin: 0; }
+.daily-records dt { color: var(--muted); }
+.daily-records dd { margin: 0; overflow-wrap: anywhere; }
+.daily-error { color: var(--danger, #b42828); margin: 6px 0; }

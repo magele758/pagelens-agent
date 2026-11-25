@@ -1,9 +1,11 @@
 import { workflowPlatforms } from "../flows/catalog.js";
+import { dailySourceForUrl } from "../flows/daily-operations/catalog.js";
 import { $ } from "./dom.js";
 
 const PLATFORM_PREFERENCE = "pagelens.workflowPlatformId";
 
 export async function launchWorkflowFeature(feature, platform, handlers) {
+  if (feature.id === "daily-operations") return handlers.openDailyOperations(dailySourceForUrl(feature.pageUrl));
   const launch = {
     "product-listing": handlers.openProductListing,
     "shein-product-listing": handlers.openSheinListing,
@@ -26,10 +28,15 @@ export function bindWorkflowCatalog(handlers) {
   const empty = $("workflow-feature-empty");
   const close = $("workflow-catalog-close");
   const library = $("workflow-catalog-library");
+  const daily = $("workflow-catalog-daily");
   const status = $("workflow-catalog-status");
   const buttons = new Map();
   let current = workflowPlatforms[0];
   let opening = false;
+  daily?.addEventListener("click", () => {
+    dialog.close();
+    void handlers.openDailyOperations();
+  });
 
   function open() {
     if (dialog.open) return;
