@@ -16,7 +16,11 @@ import {
   getActiveId,
   clearActiveId,
   ACTIVE_KEY,
+  ACTIVE_EPOCH_PREFIX,
   ACTIVE_WINDOW_PREFIX,
+  PROCESS_EPOCH_KEY,
+  stashWindowHint,
+  takeWindowHint,
   normalizeRun,
   loadAllSessions,
   deleteSession,
@@ -33,25 +37,34 @@ import { installMemoryIndexedDB } from "./idb_mem.mjs";
 
 const idb = installMemoryIndexedDB();
 const bag = {};
+const sessionBag = {};
+function memoryArea(store) {
+  return {
+    get: async (keys) => {
+      if (typeof keys === "string") return { [keys]: store[keys] };
+      if (Array.isArray(keys)) {
+        const out = {};
+        for (const k of keys) out[k] = store[k];
+        return out;
+      }
+      return { ...store };
+    },
+    set: async (obj) => Object.assign(store, obj),
+    remove: async (keys) => {
+      for (const k of [].concat(keys)) delete store[k];
+    },
+  };
+}
 globalThis.chrome = {
   storage: {
-    local: {
-      get: async (keys) => {
-        if (typeof keys === "string") return { [keys]: bag[keys] };
-        if (Array.isArray(keys)) {
-          const out = {};
-          for (const k of keys) out[k] = bag[k];
-          return out;
-        }
-        return { ...bag };
-      },
-      set: async (obj) => Object.assign(bag, obj),
-      remove: async (keys) => {
-        for (const k of [].concat(keys)) delete bag[k];
-      },
-    },
+    local: memoryArea(bag),
+    session: memoryArea(sessionBag),
   },
+  windows: { getAll: async () => [{ id: 11 }, { id: 22 }] },
 };
+function restartBrowser() {
+  for (const k of Object.keys(sessionBag)) delete sessionBag[k];
+}
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
@@ -366,4 +379,66 @@ chrome.windows = { getAll: async () => [{ id: 11 }, { id: 22 }] };
 const liveFork = await openSessionInWindow("live-elsewhere", 22);
 assert(liveFork.id !== "live-elsewhere" && liveFork.run == null && liveFork.taskGroupId == null, "live active binding still forks");
 assert(await getActiveId(11) === "live-elsewhere", "source window keeps original");
+
+// A pointer written by an earlier browser process is dropped; the session body stays.
+chrome.windows = { getAll: async () => [{ id: 55 }] };
+await saveSession({
+  id: "old-process",
+  messages: [{ role: "user", text: "上个进程" }, { role: "bot", text: "旧窗口" }],
+}, { windowId: 55 });
+const firstEpoch = sessionBag[PROCESS_EPOCH_KEY];
+assert(typeof firstEpoch === "string" && firstEpoch && bag[ACTIVE_EPOCH_PREFIX + "55"] === firstEpoch, "pointer carries process epoch");
+assert((await loadActiveSession(55))?.id === "old-process", "same process restores pointer");
+restartBrowser();
+assert((await getActiveId(55)) === "", "stale pointer is not active");
+assert(sessionBag[PROCESS_EPOCH_KEY] === undefined, "getActiveId does not mint an epoch");
+assert((await loadActiveSession(55)) === null, "reused window id after restart starts empty");
+assert(sessionBag[PROCESS_EPOCH_KEY] && sessionBag[PROCESS_EPOCH_KEY] !== firstEpoch, "new process gets a new epoch");
+assert(bag[ACTIVE_WINDOW_PREFIX + "55"] === "", "stale pointer cleared");
+assert((await loadSession("old-process"))?.messages[1].text === "旧窗口", "stale pointer keeps session body");
+assert((await listSessions()).some((s) => s.id === "old-process"), "stale pointer keeps history entry");
+
+// Pre-upgrade pointers have no epoch and count as stale.
+await saveSession({
+  id: "pre-epoch",
+  messages: [{ role: "user", text: "升级前" }, { role: "bot", text: "ok" }],
+}, { keepActive: true });
+bag[ACTIVE_WINDOW_PREFIX + "66"] = "pre-epoch";
+delete bag[ACTIVE_EPOCH_PREFIX + "66"];
+chrome.windows = { getAll: async () => [{ id: 66 }] };
+assert((await loadActiveSession(66)) === null, "plain string pointer is dropped once");
+assert(bag[ACTIVE_WINDOW_PREFIX + "66"] === "", "plain string pointer cleared");
+assert((await loadSession("pre-epoch")) !== null, "plain string pointer keeps body");
+
+// Two live windows naming one session: the loader forks instead of sharing.
+await saveSession({
+  id: "shared",
+  messages: [{ role: "user", text: "共用" }, { role: "bot", text: "原文" }],
+  taskGroupId: 3,
+}, { windowId: 11 });
+bag[ACTIVE_WINDOW_PREFIX + "22"] = "shared";
+bag[ACTIVE_EPOCH_PREFIX + "22"] = bag[ACTIVE_EPOCH_PREFIX + "11"];
+chrome.windows = { getAll: async () => [{ id: 11 }, { id: 22 }] };
+const sharedFork = await loadActiveSession(22);
+assert(sharedFork.id !== "shared" && sharedFork.taskGroupId == null, "occupied pointer forks on load");
+assert(sharedFork.messages.at(-1).text === "原文", "occupied fork keeps text");
+assert((await getActiveId(22)) === sharedFork.id, "loader now points at its fork");
+assert((await loadActiveSession(11))?.id === "shared", "first window keeps the original");
+assert((await getActiveId(11)) === "shared", "first window pointer unchanged");
+
+// A stale pointer in a reused live window does not occupy the session.
+bag[ACTIVE_WINDOW_PREFIX + "11"] = "shared";
+bag[ACTIVE_EPOCH_PREFIX + "11"] = "previous-process";
+const reclaimed = await openSessionInWindow("shared", 22);
+assert(reclaimed.id === "shared" && reclaimed.taskGroupId === 3, "stale holder does not force a fork");
+assert((await loadActiveSession(11)) === null, "stale holder starts empty");
+assert((await getActiveId(22)) === "shared", "new holder keeps the session");
+
+// The new-window hint is shown once.
+await stashWindowHint(77, "新窗口提示");
+assert((await takeWindowHint(77)) === "新窗口提示", "hint read by the new window");
+assert((await takeWindowHint(77)) === "", "hint is one-shot");
+assert((await takeWindowHint(78)) === "", "other windows have no hint");
+await stashWindowHint(null, "x");
+assert(!Object.keys(sessionBag).some((k) => k.endsWith("null")), "invalid window id ignored");
 console.log("PASS sessions");

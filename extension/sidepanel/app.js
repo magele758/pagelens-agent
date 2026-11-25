@@ -72,7 +72,7 @@ import { debugLog, exportDebugLogFresh } from "../lib/debug-log.js";
 import { testLangfuseConnection } from "../lib/langfuse.js";
 import { clearSavedHandle, pickLibraryFolder, setLibraryPath, syncPackToLibrary } from "../lib/library.js";
 import { initMarkdown } from "../lib/markdown.js";
-import { loadActiveSession } from "../lib/sessions.js";
+import { loadActiveSession, stashWindowHint, takeWindowHint } from "../lib/sessions.js";
 import { clearSkillFolderHandle, pickSkillFolder, setSkillFolderPath, skillFolderStatus } from "../lib/skill-folder.js";
 import {
   applyOptionalLocalSettings,
@@ -83,6 +83,9 @@ import {
   normalizeSettings,
   resolveModel,
 } from "../lib/storage.js";
+
+const NEW_WINDOW_HINT = "这是新任务窗口，这里的对话与原窗口分开保存。";
+
 async function runExternalPrompt(id, prompt, signal) {
   const t0 = Date.now();
   let payload;
@@ -261,12 +264,14 @@ function wire() {
     const status = $("hist-status");
     try {
       const win = await chrome.windows.create({ type: "normal", focused: true });
+      const hint = stashWindowHint(win.id, NEW_WINDOW_HINT).catch((err) => console.warn("[pagelens] window hint", err));
       try {
         await chrome.sidePanel.open({ windowId: win.id });
         status.textContent = "已打开新任务窗口。";
       } catch {
         status.textContent = "新窗口已打开。点击新窗口的 PageLens 图标即可开始任务。";
       }
+      await hint;
     } catch (err) {
       status.textContent = `新建窗口失败：${err.message || err}`;
     }
@@ -722,12 +727,27 @@ setTimeout(() => {
 async function boot() {
   console.info("[pagelens] boot");
   try {
+    let windowId = null;
     try {
-      const windowId = await resolveWindowId();
+      windowId = await resolveWindowId();
+    } catch (err) {
+      console.warn("[pagelens] resolveWindowId", err);
+      windowId = await resolveWindowId().catch((retryErr) => {
+        console.warn("[pagelens] resolveWindowId retry", retryErr);
+        return null;
+      });
+    }
+    try {
       initMarkdown(windowId);
-      bindWindowMail(windowId);
     } catch (err) {
       console.warn("[pagelens] initMarkdown", err);
+    }
+    if (windowId != null) {
+      try {
+        bindWindowMail(windowId);
+      } catch (err) {
+        console.warn("[pagelens] bindWindowMail", err);
+      }
     }
     try {
       state.settings = (await applyOptionalLocalSettings()) || (await loadSettings());
@@ -771,6 +791,11 @@ async function boot() {
     }
   } catch (err) {
     console.warn("[pagelens] session", err);
+  }
+  if (state.windowId != null) {
+    takeWindowHint(state.windowId)
+      .then((hint) => { if (hint) flashStatus(hint, true); })
+      .catch((err) => console.warn("[pagelens] window hint", err));
   }
   refreshTab().catch((err) => console.warn("[pagelens] tab", err));
   consumePending().catch(() => {});
