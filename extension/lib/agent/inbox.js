@@ -802,8 +802,23 @@ async function claimJob(jobName, job) {
   await deleteRel(INBOX_ROOT, jobName).catch(() => {});
 }
 
+async function archiveClaimedPrompt(root, jobName, job, claimedRel) {
+  if (claimedRel) {
+    await writeJson(root, `${PROCESSED_REL}/${jobName}`, redactJobToken(job));
+    await deleteRel(root, claimedRel);
+    return;
+  }
+  await claimJob(jobName, job);
+}
+
+async function releaseClaimedPrompt(root, jobName, job, claimedRel) {
+  if (!claimedRel) return;
+  await writeJson(root, jobName, job);
+  await deleteRel(root, claimedRel);
+}
+
 async function writeAgentPromptOutput(out) {
-  await writeJson(OUTBOX_ROOT, `${out.id}.json`, out);
+  await writeJson(OUTBOX_ROOT, `${out.id}.json`, { ...out, consumerExtensionId: chrome.runtime?.id });
   await recordJobFinished(
     { id: out.id, action: "agent_prompt" },
     out,
@@ -812,7 +827,7 @@ async function writeAgentPromptOutput(out) {
 }
 
 /** Returns the finished outbox payload, or null when the job started (async) or stays queued. */
-async function dispatchAgentPrompt(jobName, job) {
+async function dispatchAgentPrompt(jobName, job, { root = INBOX_ROOT, claimedRel } = {}) {
   const jobId = String(job.id || jobName.replace(/\.json$/i, ""));
   let started;
   try {
@@ -833,10 +848,13 @@ async function dispatchAgentPrompt(jobName, job) {
   } catch (err) {
     started = { done: { ok: false, errorCode: "DISPATCH_FAILED", error: err?.message || String(err) } };
   }
-  if (started.queued) return null;
+  if (started.queued) {
+    await releaseClaimedPrompt(root, jobName, job, claimedRel);
+    return null;
+  }
   if (started.started) {
     markJobStarted();
-    await claimJob(jobName, job);
+    await archiveClaimedPrompt(root, jobName, job, claimedRel);
     return null;
   }
   const out = {
@@ -847,7 +865,7 @@ async function dispatchAgentPrompt(jobName, job) {
     metadata: job.metadata ?? null,
     meta: { action: "agent_prompt", ms: 0 },
   };
-  await claimJob(jobName, job);
+  await archiveClaimedPrompt(root, jobName, job, claimedRel);
   await writeAgentPromptOutput(out);
   return out;
 }
@@ -895,8 +913,6 @@ async function runInboxJob(job, { directed, queued, settings, deps }) {
   let result;
   const development = ["dev_status", "dev_reload"].includes(job?.action);
   try {
-    if (directed && ["agent_prompt", "agent_cancel"].includes(job?.action))
-      throw new Error("Agent prompts and cancellations use the shared inbox");
     result = development
       ? { ok: true, result: await developmentInboxJob(job, { directed, queued }) }
       : await executeJob(job, { ...deps, settings, directed });
@@ -998,8 +1014,8 @@ export async function pollAgentInboxOnce(deps = {}) {
         continue;
       }
       await drainDrafts();
-      if (!directed && job?.action === "agent_prompt") {
-        const outcome = await dispatchAgentPrompt(name, job);
+      if (job?.action === "agent_prompt") {
+        const outcome = await dispatchAgentPrompt(name, job, { root, claimedRel });
         if (outcome) results.push(outcome);
         continue;
       }

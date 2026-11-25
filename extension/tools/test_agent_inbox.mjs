@@ -717,4 +717,88 @@ store.settings = { agentInboxEnabled: true, agentInboxVersion: 1, cdpInput: fals
   navigator.locks.request = requestLock;
 }
 
+// --- directed prompts use the owning extension's pending, processing, and processed paths ---
+{
+  const { createTokenRecord } = await import("../lib/bridge/auth.js");
+  const { token, record } = await createTokenRecord({ name: "directed prompt", scopes: ["page:read"] });
+  const target = "a".repeat(32);
+  const root = `${inbox.INBOX_ROOT}/${target}`;
+  const activeKey = "agentPromptActive";
+  const oldId = chrome.runtime.id;
+  const oldSettings = store.settings;
+  const getLocal = chrome.storage.local.get;
+  const files = native.directed[target] = {};
+  const enqueue = (job) => { files[`${job.id}.json`] = JSON.stringify(job); };
+  const poll = () => {
+    native.calls.length = 0;
+    return inbox.pollAgentInboxOnce();
+  };
+  const outboxWrites = () => native.calls.filter(call => call.action === "writeText" && call.root === inbox.OUTBOX_ROOT);
+  const assertArchived = (name) => {
+    const archives = native.calls.filter(call => call.action === "writeText" && call.rel === `processed/${name}`);
+    assert.deepEqual(archives.map(call => call.root), [root], "archive is written only under the directed root");
+    assert.ok(native.calls.some(call => call.action === "deleteFile" && call.root === root && call.rel === `processing/${name}`));
+    assert.deepEqual(files, {}, "the directed claim is removed");
+  };
+
+  store.settings = { ...store.settings, agentInboxEnabled: true };
+  chrome.storage.local.get = async (key) => key === "agentTokens" ? { agentTokens: [record] } : getLocal(key);
+  try {
+    enqueue({ id: "directed-empty", action: "agent_prompt", prompt: "" });
+    chrome.runtime.id = "b".repeat(32);
+    assert.equal((await poll()).processed, 0);
+    assert.deepEqual(native.calls.map(call => [call.action, call.inboxId]), [["readdir", chrome.runtime.id]]);
+    assert.deepEqual(outboxWrites(), []);
+
+    chrome.runtime.id = target;
+    assert.equal((await poll()).processed, 1);
+    assertArchived("directed-empty.json");
+    const [emptyReceipt] = outboxWrites();
+    assert.equal(emptyReceipt.rel, "directed-empty.json");
+    const emptyOutput = JSON.parse(emptyReceipt.text);
+    assert.equal(emptyOutput.errorCode, "BAD_JOB");
+    assert.equal(emptyOutput.consumerExtensionId, target);
+
+    enqueue({ id: "directed-start", action: "agent_prompt", prompt: "Start", runtime: "headless" });
+    assert.deepEqual(await poll(), { ok: true, processed: 0, results: [] });
+    assertArchived("directed-start.json");
+    assert.deepEqual(outboxWrites(), [], "a started run has no completion receipt yet");
+    const startedRun = (await chrome.storage.session.get(activeKey))[activeKey];
+    assert.equal(startedRun?.id, "directed-start");
+    assert.equal(startedRun.runtime, "headless");
+
+    // A panel run remains active through the poll's headless completion check.
+    const startedAt = Date.now();
+    await chrome.storage.session.set({
+      [activeKey]: { id: "active-panel", runtime: "panel", startedAt, deadline: startedAt + 60_000 },
+    });
+    const queued = { id: "directed-queued", action: "agent_prompt", prompt: "Wait", runtime: "headless", token };
+    enqueue(queued);
+    assert.deepEqual(await poll(), { ok: true, processed: 0, results: [] });
+    const changes = native.calls.filter(call => ["writeText", "deleteFile"].includes(call.action));
+    assert.deepEqual(changes.map(call => [call.action, call.root, call.rel]), [
+      ["writeText", root, "directed-queued.json"],
+      ["deleteFile", root, "processing/directed-queued.json"],
+    ]);
+    assert.deepEqual(JSON.parse(changes[0].text), queued, "the pending job retains its token for the next poll");
+    assert.deepEqual(files, {}, "the queued claim is removed from processing");
+    await chrome.storage.session.remove(activeKey);
+
+    enqueue({ id: "directed-cancel", action: "agent_cancel", targetId: "directed-start" });
+    assert.equal((await poll()).processed, 1);
+    assertArchived("directed-cancel.json");
+    const [cancelReceipt] = outboxWrites();
+    assert.equal(cancelReceipt.rel, "directed-cancel.json");
+    const cancelOutput = JSON.parse(cancelReceipt.text);
+    assert.equal(cancelOutput.ok, true);
+    assert.equal(cancelOutput.cancelled, false);
+    assert.equal(cancelOutput.consumerExtensionId, target);
+  } finally {
+    await chrome.storage.session.remove(activeKey);
+    chrome.storage.local.get = getLocal;
+    store.settings = oldSettings;
+    chrome.runtime.id = oldId;
+  }
+}
+
 console.log("test_agent_inbox: ok");

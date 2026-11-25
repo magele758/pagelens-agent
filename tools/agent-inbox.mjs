@@ -2,6 +2,10 @@
 /**
  * PageLens agent-inbox CLI — drop jobs for the extension SW to pick up.
  *
+ * `--extension-id`, `PAGELENS_EXTENSION_ID`, or a trimmed `agent-inbox-extension-id`
+ * matching 32 lowercase a–p places `agent_prompt` and `cancel` in `agent-inbox/<id>/`.
+ * `wait` / `status` do not read that file.
+ *
  *   node tools/agent-inbox.mjs enqueue --action clipboard_write --text 'hi'
  *   node tools/agent-inbox.mjs enqueue --action wechat_fill_draft --title '...' --html-file ./body.html
  *   node tools/agent-inbox.mjs enqueue --action agent_prompt --prompt-file ./task.txt [--tab-url-includes localhost:8080] [--timeout-ms 300000]
@@ -60,12 +64,19 @@ function jobId(value) {
   return value;
 }
 
+function readIdFile() {
+  try {
+    const raw = fs.readFileSync(path.join(home, "agent-inbox-extension-id"), "utf8").trim();
+    return /^[a-p]{32}$/.test(raw) ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
 function enqueue(opts) {
   const id = jobId(opts.id || crypto.randomUUID());
   const action = String(opts.action || "").trim();
   if (!action) throw new Error("--action required");
-  if (extensionId && ["agent_prompt", "agent_cancel"].includes(action))
-    throw new Error("Agent prompts and cancellations use the shared inbox");
   const development = action === "dev_status" || action === "dev_reload";
   const repairing = action === "ptc_repair_mx_draft";
   const sellerAction = action === "ptc_mx_seller_action";
@@ -288,10 +299,14 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._[0] || "status";
   extensionId = args["extension-id"] || process.env.PAGELENS_EXTENSION_ID;
-  if (extensionId) {
-    if (!/^[a-p]{32}$/.test(extensionId)) throw new Error("Expected a Chrome extension ID for --extension-id");
-    if (cmd === "cancel") throw new Error("Agent cancellations use the shared inbox");
-    INBOX = path.join(sharedInbox, extensionId);
+  if (extensionId && !/^[a-p]{32}$/.test(extensionId)) {
+    throw new Error("Expected a Chrome extension ID for --extension-id");
+  }
+  const routePrompt = cmd === "cancel" || (cmd === "enqueue" && ["agent_prompt", "agent_cancel"].includes(String(args.action || "").trim()));
+  const routeId = extensionId || (routePrompt ? readIdFile() : "");
+  const inboxId = routePrompt ? routeId : extensionId;
+  if (inboxId) {
+    INBOX = path.join(sharedInbox, inboxId);
     PROCESSED = path.join(INBOX, "processed");
   }
   if (cmd === "enqueue") {
