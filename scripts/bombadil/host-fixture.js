@@ -1,4 +1,4 @@
-import { activeWindowStorageKey, INDEX_KEY, itemKey, normalizeSession, toSummary } from '../../extension/lib/sessions.js';
+import { activeEpochStorageKey, activeWindowStorageKey, INDEX_KEY, itemKey, normalizeSession, PROCESS_EPOCH_KEY, toSummary } from '../../extension/lib/sessions.js';
 import { CLIPPINGS_STORAGE_KEY } from '../../extension/lib/clippings.js';
 
 const tabs = ['video', 'article'].map((kind, i) => ({
@@ -58,12 +58,12 @@ function storageArea(area, data) {
 
 const local = {
   settings: { text: { baseUrl: 'https://model.invalid', model: 'fixture', apiKey: 'fixture' } },
-  [INDEX_KEY]: sessions.map(toSummary), [activeWindowStorageKey(1)]: 'Alpha',
+  [INDEX_KEY]: sessions.map(toSummary), [activeWindowStorageKey(1)]: 'Alpha', [activeEpochStorageKey(1)]: 'fixture-process',
   [CLIPPINGS_STORAGE_KEY]: clips, ...Object.fromEntries(sessions.map(s => [itemKey(s.id), s])),
 };
 const event = { addListener() {}, removeListener() {} };
 Object.assign(globalThis.chrome ??= {}, {
-  storage: { local: storageArea('local', local), session: storageArea('session', {}),
+  storage: { local: storageArea('local', local), session: storageArea('session', { [PROCESS_EPOCH_KEY]: 'fixture-process' }),
     onChanged: { addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); } } },
   windows: { getCurrent: async () => ({ id: 1 }), getAll: async () => [{ id: 1 }], onCreated: event, onRemoved: event },
   tabs: { get: async id => tabs.find(t => t.id === id), query: async () => [tabMetadata()],
