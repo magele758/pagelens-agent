@@ -88,6 +88,7 @@ function sizeFixture(labels) {
     menu.hidden = true;
   });
   assert.equal((await page.run({ kind: "color-target", key })).code, "MENU_STILL_OPEN");
+  assert.equal((await page.run({ kind: "color-target", key, recoverOpened: true })).code, "MENU_STILL_OPEN");
   doc.getElementById("foreign").hidden = true;
   input.value = "in-progress";
   assert.equal((await page.run({ kind: "color-target", key })).code, "SPEC_CONTROL_MISSING");
@@ -102,10 +103,110 @@ function sizeFixture(labels) {
   assert.equal((await page.run({ kind: "set-color", key, value: "花色", allowOpened: true })).code, "MENU_STILL_OPEN");
   assert.equal(clicks, 0);
   input.focus();
+  doc.getElementById("foreign").hidden = false;
+  const existing = await page.run({ kind: "color-target", key, recoverOpened: true });
+  assert.equal(existing.ok, true);
+  assert.equal(existing.opened, true);
+  assert.equal(scrolls, 1, "a verified existing color chooser does not trigger the pointer fallback");
   const committed = await page.run({ kind: "set-color", key, value: "花色", allowOpened: true });
   assert.equal(committed.status, "filled", committed.message);
   assert.equal(clicks, 1);
   assert.equal(other.placeholder, "选择或自定义颜色");
+  assert.equal(doc.getElementById("foreign").hidden, false, "a separate listbox is left alone");
+  page.close();
+}
+
+{
+  const key = "productSkcList[0].mainSpec[0]";
+  const page = fixture(`<div id="${key}"><div class="colour-spec-select_colorSpecSelect__test">
+    <input placeholder="选择或自定义颜色"></div></div>
+    <div class="colour-spec-select_allItemContainer__test" data-testid="beast-core-portal">
+      <span class="colour-spec-select_selectItem__test">象牙白</span>
+    </div>`);
+  const { doc } = page;
+  const input = doc.querySelector("input");
+  const menu = doc.querySelector('[class*="colour-spec-select_allItemContainer__"]');
+  let scrolled = false;
+  input.focus();
+  input.scrollIntoView = () => { scrolled = true; };
+  menu.getBoundingClientRect = () => {
+    const top = scrolled ? 300 : 1200;
+    return { width: 180, height: 175, left: 200, right: 380, top, bottom: top + 175 };
+  };
+  menu.firstElementChild.addEventListener("click", () => {
+    input.placeholder = "象牙白";
+    menu.hidden = true;
+  });
+  const point = await page.run({ kind: "color-target", key, recoverOpened: true });
+  assert.equal(scrolled, true);
+  assert.equal(point.opened, true, point.message);
+  const result = await page.run({ kind: "set-color", key, value: "象牙白" });
+  assert.equal(result.status, "filled", result.message);
+  assert.equal(input.placeholder, "象牙白");
+  page.close();
+}
+
+{
+  const key = "productSkcList[0].mainSpec[0]";
+  const page = fixture(`<span class="STP_stepsItemTitle_test">基本信息</span>
+    <div id="${key}"><div class="colour-spec-select_colorSpecSelect__test">
+      <input placeholder="选择或自定义颜色">
+    </div></div>
+    <div data-testid="beast-core-portal">
+      <div class="colour-spec-select_allItemContainer__test">
+        <span class="colour-spec-select_selectItem__test">象牙白</span>
+      </div>
+    </div>`);
+  const { doc } = page;
+  const input = doc.querySelector("input");
+  const menu = doc.querySelector('[class*="colour-spec-select_allItemContainer__"]');
+  let dismissals = 0;
+  doc.querySelector(".STP_stepsItemTitle_test").addEventListener("mousedown", () => {
+    dismissals++;
+    menu.hidden = true;
+  });
+  menu.addEventListener("click", () => { assert.fail("closing a stale menu must not click an option"); });
+  doc.elementFromPoint = () => input;
+  input.getBoundingClientRect = () => ({ left: 100, top: 200, width: 100, height: 20 });
+  const point = await page.run({ kind: "color-target", key, recoverOpened: true });
+  assert.equal(point.ok, true, point.message);
+  assert.equal(point.x, 150);
+  assert.equal(point.y, 210);
+  assert.equal(dismissals, 1);
+  assert.equal(input.placeholder, "选择或自定义颜色");
+  page.close();
+}
+
+{
+  const key = "productSkcList[0].mainSpec[0]";
+  const page = fixture(`<div id="${key}"><div class="colour-spec-select_colorSpecSelect__test">
+    <input placeholder="选择或自定义颜色" readonly>
+    </div></div>
+    <div data-testid="beast-core-portal"><div class="colour-spec-select_allItemContainer__test">
+      <span class="colour-spec-select_groupItem__test">白色系</span>
+      <span class="colour-spec-select_groupItem__test">绿色系</span>
+      <span class="colour-spec-select_selectItem__test">白色</span>
+      <span class="colour-spec-select_selectItem__test" hidden>绿色</span>
+      <span class="colour-spec-select_selectItem__test" hidden>深绿色</span>
+    </div></div>`);
+  const input = page.doc.querySelector("input");
+  const menu = page.doc.querySelector('[class*="colour-spec-select_allItemContainer__"]');
+  const [, greenFamily] = menu.querySelectorAll('[class*="colour-spec-select_groupItem__"]');
+  const [white, green, darkGreen] = menu.querySelectorAll('[class*="colour-spec-select_selectItem__"]');
+  greenFamily.addEventListener("click", () => {
+    white.hidden = true;
+    green.hidden = darkGreen.hidden = false;
+  });
+  [white, darkGreen].forEach(node => node.addEventListener("click", () => { assert.fail("selected an unrelated color"); }));
+  green.addEventListener("click", () => {
+    input.placeholder = "绿色";
+    menu.hidden = true;
+  });
+  input.focus();
+  assert.equal((await page.run({ kind: "color-target", key, recoverOpened: true })).opened, true);
+  const result = await page.run({ kind: "set-color", key, value: "绿色", allowOpened: true });
+  assert.equal(result.status, "filled", result.message);
+  assert.equal(result.value, "绿色");
   page.close();
 }
 

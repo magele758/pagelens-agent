@@ -33,34 +33,78 @@ const value = id => get(`#temu-${id}-value`).textContent;
 const openSelect = id => get(`#temu-${id} .temu-select-trigger`).click();
 const category = { id: "cup", ids: ["sport", "outdoors", "cup"], path: ["运动与户外用品", "运动与户外休闲用品", "运动杯"] };
 const product = { title: "Water Bottle", input: normalizeTemuListingInput({ title: "Water Bottle" }) };
+const apparel = [
+  ["Cotton Tee", "t-shirt", "女装 T 恤"],
+  ["Linen Shirt", "shirt", "女装衬衫"],
+  ["Knit Tank", "tank", "女装背心"],
+  ["Fleece Hoodie", "hoodie", "女装卫衣"],
+  ["Polo Top", "polo", "女装 Polo 衫"],
+].map(([title, id, label]) => ({
+  title,
+  input: normalizeTemuListingInput({ title }),
+  category: { id, ids: ["clothing", "womens", id], path: ["服装", "女装", label] },
+}));
 let navigation;
 let replayed;
+const batchReplays = [];
+const batchComplete = Promise.withResolvers();
+let batchRequest;
+let focusedTab;
 let recommended = [];
 let picked = 0;
 let typedDirectory;
+let typedProducts = [product];
 let back = 0;
 const open = bindTemuListingPanel({
-  getTargetTab: async () => ({ id: 4, url: "https://agentseller.temu.com/goods/list" }),
+  getTargetTab: async () => ({ id: 4, windowId: 8, url: "https://agentseller.temu.com/goods/list" }),
   onBack: () => back++,
   fetchImpl,
   chooseDirectory: async () => ++picked === 1
     ? { directoryName: "跨境", products: [product], issues: [] } : null,
   readDirectory: async path => {
     typedDirectory = path;
-    return { root: path, products: [product], issues: [] };
+    return { root: path, products: typedProducts, issues: [] };
   },
   suggestCategory: async ({ title, operatorNotes }, { useModel }) => {
     recommended.push([title, operatorNotes, useModel]);
-    return { category, source: useModel ? "model" : "local" };
+    return { category: apparel.find(product => product.title === title)?.category ?? category,
+      source: useModel ? "model" : "local" };
   },
   openTab: async options => {
     navigation = options;
     return { id: 5, url: options.href };
   },
   replay: async args => {
+    if (args.tabId >= 30) {
+      batchReplays.push(args);
+      return args.tabId === 31
+        ? { status: "needs-review", items: [], issues: [{ label: "尺码表", message: "缺少人体尺寸" }], missing: [] }
+        : { status: "ready-for-review", items: [], issues: [], missing: [] };
+    }
     replayed = args;
     return { status: "verified", items: [{ status: "verified" }], issues: [], missing: [] };
   },
+  async runBatch(request) {
+    batchRequest = request;
+    const { products, sourceTab, runProduct, signal, onJob } = request;
+    assert.equal(sourceTab.id, 4);
+    assert.equal(sourceTab.windowId, 8);
+    const jobs = [];
+    for (const [index, product] of products.entries()) {
+      const tabId = 30 + index;
+      const tab = { id: tabId, url: "https://agentseller.temu.com/goods/create/category", windowId: 8 };
+      onJob(index, { status: "queued", tabId });
+      const receipt = await runProduct(product, {
+        tab, index, signal, onStep: ({ label }) => onJob(index, { status: "running", tabId, message: label }),
+      });
+      const job = { status: receipt.status === "ready-for-review" ? "completed" : receipt.status, tabId, receipt };
+      jobs.push(job);
+      onJob(index, job);
+    }
+    batchComplete.resolve();
+    return jobs;
+  },
+  activateTab: async id => { focusedTab = id; },
 });
 await open();
 assert.equal(value("listing-site"), "美国站");
@@ -133,5 +177,38 @@ get('[data-action="read-directory"]').click();
 await delay(10);
 assert.equal(typedDirectory, "/Products/Fit sample");
 assert.equal(get("#temu-directory-summary").textContent, "Water Bottle");
+const runAll = get('[data-action="run-all"]');
+assert.ok(runAll.hidden || runAll.disabled, "one selected product cannot start a multi-product batch");
+
+typedProducts = [...apparel, product];
+inputText(get("#temu-directory-path"), "/Products/Oversized");
+get('[data-action="read-directory"]').click();
+await delay(15);
+assert.equal(runAll.disabled, true);
+assert.equal(batchRequest, undefined);
+
+typedProducts = apparel;
+inputText(get("#temu-directory-path"), "/Products/Apparel");
+get('[data-action="read-directory"]').click();
+await delay(20);
+assert.equal(runAll.disabled, false);
+assert.equal(runAll.hidden, false);
+assert.match(get("#temu-directory-summary").textContent, /5 件商品/);
+assert.match(value("listing-category"), /女装 T 恤/);
+runAll.click();
+await Promise.race([batchComplete.promise, delay(1000).then(() => assert.fail("batch did not finish"))]);
+await delay(0);
+assert.equal(batchRequest.products.length, 5);
+assert.deepEqual(batchReplays.map(({ tabId, input }) => ({
+  tabId, title: input.title, categoryPath: input.categoryPath,
+})), apparel.map((product, index) => ({
+  tabId: 30 + index, title: product.title, categoryPath: product.category.path,
+})));
+const reviewButtons = [...document.querySelectorAll(".temu-listing-dialog button")]
+  .filter(button => button.textContent.trim() === "查看商品页");
+assert.equal(reviewButtons.length, 5);
+reviewButtons[1].click();
+await delay(0);
+assert.equal(focusedTab, 31);
 dom.window.close();
-console.log("Temu listing selector, directory, recommendation, and auto-navigation verified.");
+console.log("Temu listing selector, directory, recommendation, auto-navigation, and batch review verified.");

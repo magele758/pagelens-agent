@@ -103,7 +103,7 @@ function matchedSkuGroups(state, sources, colors) {
 }
 
 export async function replayTemuListing({ tabId, input, call, onStep, signal, suggestFields, shouldSuggestField,
-  readSizeChart, suggestSizeChart } = {}) {
+  readSizeChart, suggestSizeChart, resume } = {}) {
   const start = Date.now();
   const items = [];
   const issues = [];
@@ -557,12 +557,23 @@ export async function replayTemuListing({ tabId, input, call, onStep, signal, su
       return stop("试填参数", { code: "INPUT_REQUIRED", message: "选择一个经营站点和完整商品类目，再检查商品名称。" });
     }
 
-    report("category", "选择经营站点和商品分类");
-    const moved = await run("temu_category", { site: sites[0], categoryPath: input.categoryPath,
-      ...(input.categoryId && { categoryId: input.categoryId }) });
-    if (!moved?.ok) return stop("经营站点与商品分类", moved);
-    draftUrl = moved.href;
-    record("经营站点与商品分类", moved);
+    if (resume) {
+      report("editor", "核对待续填商品");
+      const resumed = await run("temu_resume", { href: resume.href });
+      if (!resumed?.ok) return stop("核对待续填商品", resumed);
+      if (resumed.href !== resume.href) return stop("核对待续填商品", {
+        code: "PAGE_CHANGED", message: "待续填的 Temu 商品页已切换。",
+      });
+      draftUrl = resumed.href;
+      record("核对待续填商品", resumed);
+    } else {
+      report("category", "选择经营站点和商品分类");
+      const moved = await run("temu_category", { site: sites[0], categoryPath: input.categoryPath,
+        ...(input.categoryId && { categoryId: input.categoryId }) });
+      if (!moved?.ok) return stop("经营站点与商品分类", moved);
+      draftUrl = moved.href;
+      record("经营站点与商品分类", moved);
+    }
 
     report("editor", "读取商品类目表单");
     let first = await readEditor({ wait: true });

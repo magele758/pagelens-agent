@@ -9,6 +9,7 @@ import { requireHostUrl, requireOptionalFeature } from "../lib/optional-permissi
 import { bindTemuListingSelect } from "./temu-listing-select.js";
 import { prepareSizeChartInput, readProductImage } from "../flows/shopee/product-listing/sidepanel/product-directory.js";
 import { suggestTemuSizeChart } from "../flows/temu/product-listing/size-chart-suggestion.js";
+import { findTemuBatchResumeTabs, runTemuBatchPrefill, TEMU_BATCH_LIMIT } from "../flows/temu/product-listing/batch-run.js";
 
 const startUrl = "https://agentseller.temu.com/goods/create/category";
 const sitePreference = "pagelens.temu.listingSite";
@@ -41,6 +42,8 @@ export function bindTemuListingPanel({
   getTargetTab, getSettings, isAgentBusy, onBack,
   chooseDirectory = chooseTemuProductDirectory, readDirectory = loadTemuProductDirectory, suggestCategory = suggestTemuCategory,
   fetchImpl = fetch, openTab = openTemuWorkflowTab, replay = replayTemuListing,
+  runBatch = runTemuBatchPrefill, findResumeTabs = findTemuBatchResumeTabs,
+  activateTab = tabId => chrome.tabs.update(tabId, { active: true }),
 }) {
   const dialog = document.createElement("dialog");
   dialog.className = "temu-listing-dialog";
@@ -85,9 +88,12 @@ export function bindTemuListingPanel({
       <div id="temu-listing-message" role="status" aria-live="polite"></div>
       <p id="temu-listing-result-detail" class="temu-hint" hidden></p>
       <ul id="temu-listing-issues"></ul>
+      <ul id="temu-batch-results" aria-label="批量试填结果" hidden></ul>
     </div>
     <footer class="temu-listing-footer">
       <button class="temu-listing-action primary" type="button" data-action="run" disabled>开始上品</button>
+      <button class="temu-listing-action" type="button" data-action="run-all" hidden>批量试填</button>
+      <button class="temu-listing-action" type="button" data-action="resume-all" hidden>续填已打开商品</button>
       <button class="temu-listing-action" type="button" data-action="stop" hidden>停止</button>
     </footer>`;
   document.body.append(dialog);
@@ -97,6 +103,7 @@ export function bindTemuListingPanel({
   const message = find("listing-message");
   const resultDetail = find("listing-result-detail");
   const issues = find("listing-issues");
+  const batchResults = find("batch-results");
   const source = dialog.querySelector("fieldset");
   const directorySummary = find("directory-summary");
   const categoryHint = find("category-hint");
@@ -222,6 +229,12 @@ export function bindTemuListingPanel({
 
   function syncRunButton() {
     action("run").disabled = Boolean(run || directoryRequest || !chosenCategory);
+    const batch = action("run-all");
+    batch.hidden = products.length < 2;
+    batch.disabled = Boolean(run || directoryRequest || products.length > TEMU_BATCH_LIMIT);
+    batch.textContent = products.length > TEMU_BATCH_LIMIT ? `每批最多 ${TEMU_BATCH_LIMIT} 件` : `批量试填 ${products.length} 件`;
+    action("resume-all").hidden = batch.hidden || products.length > TEMU_BATCH_LIMIT;
+    action("resume-all").disabled = batch.disabled;
   }
 
   function updateCategory(value) {
@@ -359,7 +372,7 @@ export function bindTemuListingPanel({
     directoryRequest = pending;
     action("choose").disabled = true;
     action("read-directory").disabled = true;
-    action("run").disabled = true;
+    syncRunButton();
     tell("正在读取商品目录…");
     try {
       const result = await read();
@@ -372,6 +385,8 @@ export function bindTemuListingPanel({
       directorySummary.textContent = products.length === 1 ? products[0].title : `${name} · ${products.length} 件商品`;
       upload.checked = false;
       issues.replaceChildren();
+      batchResults.replaceChildren();
+      batchResults.hidden = true;
       if (products.length) {
         setProduct(0);
       } else {
@@ -423,19 +438,133 @@ export function bindTemuListingPanel({
     issues.replaceChildren(...[...new Set(receipts)].map(textContent => Object.assign(document.createElement("li"), { textContent })));
   }
 
-  action("run").addEventListener("click", async () => {
+  function issueMessages(result) {
+    return [...(result?.issues || []).map(({ label, message }) => `${label}：${message}`),
+      ...(result?.missing || []).map(({ label }) => `待填：${label}`)];
+  }
+
+  function prefillProduct(input, selectedProduct, { tab, signal, onStep, approved, useModel, root, resume }) {
+    input.uploadImages = approved;
+    const referenceImage = input.mainImages?.[0] || input.detailImages?.[0] || input.variantImages?.[0];
+    const readSizeChart = useModel && selectedProduct && input.sizeChartImagePath
+      ? async () => (await prepareSizeChartInput({ ...selectedProduct, input }, {
+        root, signal, getSettings: getSettings ? async () => getSettings() : undefined,
+      })).sizeChart
+      : undefined;
+    let imageRead;
+    const readImage = useModel && selectedProduct && referenceImage ? () => imageRead ??= readProductImage({
+      root, folder: selectedProduct.folder, path: referenceImage, asset: "main", signal,
+    }) : undefined;
+    const suggestSizeChart = useModel ? async (product, { sizes, signal }) => suggestTemuSizeChart(product, {
+      sizes, signal, settings: await getSettings?.(), readImage,
+    }) : undefined;
+    const imagePaths = new Set([...(input.mainImages || []), ...(input.detailImages || []), ...(input.variantImages || []), input.sizeChartImagePath]);
+    const call = createTemuListingToolCaller({
+      tabId: tab.id, url: tab.url, signal,
+      confirmUpload: ({ paths }) => approved && paths.every(file => imagePaths.has(file)),
+      ...(resume && { resume: { ...resume, title: input.title, site: input.sites[0],
+        categoryPath: input.categoryPath, categoryId: input.categoryId } }),
+    });
+    return replay({
+      tabId: tab.id, input, call, signal, readSizeChart, suggestSizeChart,
+      ...(resume && { resume: { href: resume.href } }),
+      shouldSuggestField: createTemuSuggestionFilter(input, { useModel, visual: Boolean(readImage) }),
+      suggestFields: (product, schema, { signal }) =>
+        suggestTemuFields(product, schema, { signal, settings: getSettings?.(), useModel, readImage }),
+      onStep,
+    });
+  }
+
+  async function startBatch(active, config) {
+    const { signal, useModel, site, resumeTabs } = config;
+    const jobs = products.slice();
+    const cards = jobs.map(({ title }) => {
+      const item = document.createElement("li");
+      const name = Object.assign(document.createElement("strong"), { textContent: title });
+      const status = Object.assign(document.createElement("p"), { className: "temu-hint", textContent: "待试填" });
+      const details = Object.assign(document.createElement("details"), { hidden: true });
+      const summary = Object.assign(document.createElement("summary"), { textContent: "待核对项" });
+      const issueList = document.createElement("ul");
+      details.append(summary, issueList);
+      const open = Object.assign(document.createElement("button"), {
+        type: "button", className: "temu-listing-action", textContent: "查看商品页", hidden: true, disabled: true,
+      });
+      item.append(name, status, details, open);
+      return { item, status, details, issueList, open };
+    });
+    batchResults.replaceChildren(...cards.map(card => card.item));
+    batchResults.hidden = false;
+    tell(resumeTabs ? "正在续填原商品标签…" : `正在打开 ${jobs.length} 个独立商品标签…`);
+    const receipts = await runBatch({
+      products: jobs, sourceTab: active, signal, resumeTabs,
+      async runProduct(product, context) {
+        const input = { ...product.input, sites: [site] };
+        context.onStep({ label: "核对该商品的站点与类目…" });
+        const result = await suggestCategory(input, { settings: getSettings?.(), signal, fetchImpl, useModel });
+        if (!result.category) throw new Error("当前商品没有匹配的 Temu 类目。");
+        input.categoryPath = result.category.path;
+        input.categoryId = result.category.id;
+        const origin = input.origin && resolveTemuOrigin(await ensureOrigins(), input.origin);
+        input.origin = origin?.country === defaultOrigin.country ? { ...defaultOrigin, ...origin } : origin || { ...defaultOrigin };
+        return prefillProduct(input, product, { ...config, ...context });
+      },
+      onJob(index, job) {
+        const card = cards[index];
+        card.status.textContent = [job.message || (job.status === "opening" ? "正在打开商品页…" : "待试填"),
+          job.receipt?.sizeChart && `已关联尺码表「${job.receipt.sizeChart.name}」`].filter(Boolean).join(" · ");
+        const messages = [...new Set(issueMessages(job.receipt))];
+        card.issueList.replaceChildren(...messages.map(textContent =>
+          Object.assign(document.createElement("li"), { textContent })));
+        card.details.hidden = !messages.length;
+        if (Number.isInteger(job.tabId)) {
+          card.open.hidden = false;
+          card.open.onclick = async () => {
+            if (run) return;
+            try { await activateTab(job.tabId); }
+            catch { tell("此商品标签已关闭。", true); }
+          };
+        }
+      },
+    });
+    const loaded = receipts.filter(job => job.receipt?.draftUrl).length;
+    const completed = receipts.filter(job => job.status === "completed").length;
+    const review = receipts.filter(job => job.status === "needs-review").length;
+    tell(signal.aborted ? `已停止，保留 ${receipts.filter(job => job.tabId).length} 个标签。` :
+      `已进入 ${loaded}/${jobs.length} 个商品表单，${completed} 件试填通过${review ? `，${review} 件待核对` : ""}。`, Boolean(review));
+  }
+
+  async function start(mode = "single") {
+    const all = mode !== "single";
     if (run || directoryRequest || isAgentBusy?.()) return tell("请等当前任务结束后再试。", true);
+    if (all && (products.length < 2 || products.length > TEMU_BATCH_LIMIT)) return;
     const signal = (run = new AbortController()).signal;
     for (const control of [site, category, country, region, productItem]) control.close();
-    source.disabled = action("run").disabled = true;
+    source.disabled = true;
+    syncRunButton();
     action("stop").hidden = false;
     issues.replaceChildren();
     resultDetail.hidden = true;
+    batchResults.hidden = !all;
+    const config = { signal, approved: upload.checked, useModel: find("listing-ai").checked,
+      root: directoryRoot, site: chosenSite };
     try {
-      const input = sourceInput();
-      if (!chosenCategory) throw new Error("请选择完整的商品类目。");
       categoryRequest?.abort();
       clearTimeout(notesTimer);
+      if (all) {
+        const permission = await requireHostUrl(startUrl, { userGesture: true });
+        if (permission) throw new Error(permission);
+        const active = await getTargetTab();
+        signal.throwIfAborted();
+        if (mode === "resume") {
+          if (!Number.isInteger(active?.windowId)) throw new Error("没有找到本次试填的 Chrome 窗口。");
+          tell("正在核对当前窗口已打开的 Temu 商品…");
+          config.resumeTabs = await findResumeTabs(products, active.windowId, signal);
+        }
+        await startBatch(active, config);
+        return;
+      }
+      const input = sourceInput();
+      if (!chosenCategory) throw new Error("请选择完整的商品类目。");
       input.sites = [chosenSite];
       input.categoryPath = chosenCategory.path;
       input.categoryId = chosenCategory.id;
@@ -454,34 +583,8 @@ export function bindTemuListingPanel({
       }
       const tab = await openTab({ tab: active, href: startUrl, accepts: isTemuCategoryPage, signal });
       signal.throwIfAborted();
-      const approved = upload.checked;
-      input.uploadImages = approved;
-      const useModel = find("listing-ai").checked;
-      const selectedProduct = products[productIndex];
-      const referenceImage = input.mainImages?.[0] || input.detailImages?.[0] || input.variantImages?.[0];
-      const readSizeChart = useModel && selectedProduct && input.sizeChartImagePath
-        ? async () => (await prepareSizeChartInput({ ...selectedProduct, input }, {
-          root: directoryRoot, signal, getSettings: getSettings ? async () => getSettings() : undefined,
-        })).sizeChart
-        : undefined;
-      let imageRead;
-      const readImage = useModel && selectedProduct && referenceImage ? () => imageRead ??= readProductImage({
-        root: directoryRoot, folder: selectedProduct.folder, path: referenceImage, asset: "main", signal,
-      }) : undefined;
-      const suggestSizeChart = useModel ? async (product, { sizes, signal }) => suggestTemuSizeChart(product, {
-        sizes, signal, settings: await getSettings?.(), readImage,
-      }) : undefined;
-      const imagePaths = new Set([...(input.mainImages || []), ...(input.detailImages || []), ...(input.variantImages || []), input.sizeChartImagePath]);
-      const call = createTemuListingToolCaller({
-        tabId: tab.id, url: tab.url, signal,
-        confirmUpload: ({ paths }) => approved && paths.every(file => imagePaths.has(file)),
-      });
-      const result = await replay({
-        tabId: tab.id, input, call, signal, readSizeChart, suggestSizeChart,
-        shouldSuggestField: createTemuSuggestionFilter(input, { useModel, visual: Boolean(readImage) }),
-        suggestFields: (product, schema, { signal }) =>
-          suggestTemuFields(product, schema, { signal, settings: getSettings?.(), useModel, readImage }),
-        onStep: ({ label }) => tell(label),
+      const result = await prefillProduct(input, products[productIndex], {
+        ...config, tab, onStep: ({ label }) => tell(label),
       });
       tell(result.status === "cancelled" ? "上品已停止。" : result.status === "needs-review"
         ? "请处理下方待核对事项。" : "商品资料已填写，请在 Temu 核对并发布。", result.status === "needs-review");
@@ -490,7 +593,7 @@ export function bindTemuListingPanel({
         `${result.sizeChart.created ? "已创建并关联" : "已关联"}尺码表「${result.sizeChart.name}」`].filter(Boolean);
       resultDetail.textContent = details.join(" · ");
       resultDetail.hidden = details.length === 0;
-      renderIssues([...result.issues.map(({ label, message }) => `${label}：${message}`), ...result.missing.map(({ label }) => `待填：${label}`)]);
+      renderIssues(issueMessages(result));
     } catch (error) {
       tell(signal.aborted ? "上品已停止。" : error.message || "暂时无法完成 Temu 上品。", !signal.aborted);
     } finally {
@@ -498,8 +601,12 @@ export function bindTemuListingPanel({
       source.disabled = false;
       syncRunButton();
       action("stop").hidden = true;
+      for (const button of batchResults.querySelectorAll("button:not([hidden])")) button.disabled = false;
     }
-  });
+  }
+  action("run").addEventListener("click", () => void start());
+  action("run-all").addEventListener("click", () => void start("batch"));
+  action("resume-all").addEventListener("click", () => void start("resume"));
 
   function cancelPending() {
     for (const control of [site, category, country, region, productItem]) control.close();
