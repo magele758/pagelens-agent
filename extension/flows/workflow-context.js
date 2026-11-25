@@ -58,6 +58,6 @@ export function shortcutsForPage(url) {
     if (feature.id === "temu-campaign-draft") return isTemuEnrollmentPage(url);
     return Boolean(sellerPage && TEMU_SELLER_OPERATIONS[feature.id]?.kind === sellerPage.kind);
   }) ?? [];
-  if (dailySourceForUrl(url)) features.unshift({ id: "daily-operations", name: "每日运营", pageUrl: url });
+  if (dailySourceForUrl(url)) features.unshift({ id: "daily-operations", name: "每日运营数据", pageUrl: url });
   return { page, platform, features };
 }

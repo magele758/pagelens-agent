@@ -1,10 +1,89 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { dailySourceForUrl, dailySources } from "../catalog.js";
+import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources } from "../catalog.js";
 import { readDailyPage } from "../page.js";
-import { addSnapshot, compareSnapshot, dailyScheduleKey, dayInChina } from "../history.js";
-import { handleDailyMessage } from "../runtime.js";
+import { addSnapshot, compareSnapshot, dailyScheduleKey, dailyStateKey, dayInChina } from "../history.js";
+import { dailyReportData } from "../report.js";
+import { handleDailyMessage, onDailyAlarm } from "../runtime.js";
+import { renderDailyChat } from "../../../skill-components/daily-operations/cards.js";
+
+test("the selected plan defaults to all and only keeps checked known sections", () => {
+  assert.equal(Object.values(dailyPlan()).flat().length, 30);
+  assert.deepEqual(dailyPlan({ orders: ["全部", "全部", "unknown"], refunds: [], fake: ["全部"] }), { orders: ["全部"] });
+  assert.deepEqual(dailyPlan({}), {});
+});
+
+test("manual runs and alarms only open selected sources and visit selected tabs", async () => {
+  const previousChrome = globalThis.chrome;
+  const stored = { [dailySelectionKey]: { violations: ["店铺违规"] } };
+  const calls = [];
+  let resolveAlarm;
+  globalThis.chrome = {
+    storage: { local: {
+      get: async keys => Object.fromEntries([keys].flat().map(key => [key, stored[key]])),
+      set: async values => {
+        Object.assign(stored, structuredClone(values));
+        if (values[dailyStateKey]?.running === false) resolveAlarm?.();
+      },
+    } },
+    permissions: { contains: async () => true },
+    tabs: {
+      create: async ({ url }) => { calls.push(url); return { id: 1 }; },
+      get: async () => ({ url: dailySources.violations.url, status: "complete" }),
+      remove: async () => {},
+    },
+    scripting: { executeScript: async ({ args: [{ action, section }] }) => {
+      calls.push([action, section]);
+      return [{ frameId: 0, documentId: "doc", result: {
+        ok: true, records: [], total: 0, next: false, account: "test",
+      } }];
+    } },
+  };
+  try {
+    const completed = await handleDailyMessage({ type: "pl.daily.run", source: "all" });
+    assert.deepEqual(completed.progress, { done: 1, total: 1,
+      last: { id: "violations", section: "店铺违规", count: 0, added: null, complete: true } });
+    const expected = [dailySources.violations.url, ["section", "店铺违规"], ["read", "店铺违规"]];
+    assert.deepEqual(calls.splice(0), expected);
+    const done = new Promise(resolve => { resolveAlarm = resolve; });
+    onDailyAlarm({ name: "pagelens.dailyOperations" });
+    await done;
+    assert.deepEqual(calls, expected);
+  } finally { globalThis.chrome = previousChrome; }
+});
+
+test("the report uses aggregate facts and its cards link to and retry the selected sections", () => {
+  const entry = { section: "待回复消息", complete: true, previousDelta: 1, added: ["secret"],
+    records: [{ id: "secret", fields: { 最新消息: "customer private message" } }] };
+  const state = {
+    startedAt: 1, finishedAt: 2,
+    plan: { chat: ["待回复消息"], funds: ["限制记录"] },
+    results: { chat: { sections: [entry], errors: [] },
+      funds: { sections: [], errors: [{ error: "请登录" }] } },
+    report: { text: "请查看待回复消息。" },
+  };
+  const data = dailyReportData(state);
+  assert.equal(data[0].count, 1);
+  assert.equal(data[1].status, "未完成");
+  assert.doesNotMatch(JSON.stringify(data), /customer private message|secret|请登录/u);
+  const previousDocument = globalThis.document;
+  globalThis.document = new JSDOM("<article></article>").window.document;
+  const action = [];
+  try {
+    const article = document.querySelector("article");
+    renderDailyChat(article, { ...state, running: true, phase: "collect", progress: {
+      current: { id: "chat", section: "待回复消息" }, done: 0, total: 2,
+    } }, {});
+    assert.equal(article.querySelector("progress").max, 2);
+    assert.match(article.textContent, /正在查看 Temu › 客服 › 待回复消息/u);
+    renderDailyChat(article, state, { onOpen: (...args) => action.push(args), onRetry: plan => action.push(plan) });
+    assert.match(article.textContent, /AI 摘要/u);
+    article.querySelector(".daily-issues button").click();
+    [...article.querySelectorAll(".daily-issues button")].find(node => node.textContent === "重试").click();
+    assert.deepEqual(action, [["chat", "待回复消息"], { funds: ["限制记录"] }]);
+  } finally { globalThis.document = previousDocument; }
+});
 
 function fixture(source, html, markupVisible = () => true) {
   const config = dailySources[source];

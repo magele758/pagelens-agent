@@ -440,7 +440,14 @@ function renderMessages() {
   const root = $("msgs");
   if (!root) return;
   const scrollTop = messageScroll?.beforeRender();
+  const dailyReport = root.querySelector(":scope > #daily-chat-run");
   root.innerHTML = "";
+  if (dailyReport && !state.messages.length) {
+    root.appendChild(dailyReport);
+    ensureLiveTick(false);
+    messageScroll?.afterRender(scrollTop);
+    return;
+  }
   if (!state.messages.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
@@ -537,6 +544,7 @@ function renderMessages() {
     }
     root.appendChild(wrap);
   }
+  if (dailyReport) root.appendChild(dailyReport);
   ensureLiveTick(streaming);
   messageScroll?.afterRender(scrollTop);
 }
