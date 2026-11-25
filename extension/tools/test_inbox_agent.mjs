@@ -95,6 +95,27 @@ const { setDelegateManager, TASK_STATUS } = await import("../lib/agent/delegate.
   delete chrome.runtime.getContexts;
 }
 
+// URL fragment only, explicit panel: find the open panel in another window.
+{
+  scopePings = true;
+  panel.windowId = 9;
+  chrome.runtime.getContexts = async () => [{ windowId: 9 }];
+  tabs = [{ id: 11, windowId: 9, url: "http://shop.example/item", status: "complete" }];
+  sent.length = 0;
+  const result = await startAgentPrompt(
+    { prompt: "open shop", runtime: "panel", tabUrlIncludes: "shop.example" },
+    "url-panel",
+  );
+  assert.equal(result.started, true);
+  assert.equal(store.agentPromptActive.windowId, 9);
+  assert.equal(sent.filter(type => type === "pl.agentPrompt.run").length, 1);
+  await takeCompletion({ id: "url-panel", ok: true });
+  panel.windowId = 1;
+  scopePings = false;
+  tabs = [{ id: 7, windowId: 1, url: "http://localhost:8080/", status: "complete" }];
+  delete chrome.runtime.getContexts;
+}
+
 // expiry: cancels in panel and reports TIMEOUT
 {
   store.agentPromptActive = { id: "j3", startedAt: Date.now() - 2000, deadline: Date.now() - 1, metadata: null };
