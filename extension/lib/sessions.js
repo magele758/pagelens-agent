@@ -1,7 +1,8 @@
 /**
  * Conversation history.
  * Index / last-touch active id stay in chrome.storage.local; each window also
- * has `pl.sessions.active.win.<id>`. Session bodies live in IndexedDB
+ * has `pl.sessions.active.win.<id>` plus `pl.sessions.activeEpoch.win.<id>`, the
+ * browser-process epoch it was written in. Session bodies live in IndexedDB
  * (pagelens-data). Legacy pl.sessions.item.* in chrome.storage is migrated on read.
  */
 
@@ -10,6 +11,9 @@ import { idbDel, idbGet, idbGetAll, idbSet, idbSetAll } from "./idb-kv.js";
 export const INDEX_KEY = "pl.sessions.index";
 export const ACTIVE_KEY = "pl.sessions.active";
 export const ACTIVE_WINDOW_PREFIX = "pl.sessions.active.win.";
+export const ACTIVE_EPOCH_PREFIX = "pl.sessions.activeEpoch.win.";
+export const PROCESS_EPOCH_KEY = "pl.sessions.processEpoch";
+export const WINDOW_HINT_PREFIX = "pl.sessions.windowHint.";
 export const ITEM_PREFIX = "pl.sessions.item.";
 export const MAX_SESSIONS = 200;
 export const RUN_STALE_MS = 24 * 3600 * 1000;
@@ -30,6 +34,11 @@ export function windowKey(windowId) {
 export function activeWindowStorageKey(windowId) {
   const key = windowKey(windowId);
   return key ? ACTIVE_WINDOW_PREFIX + key : "";
+}
+
+export function activeEpochStorageKey(windowId) {
+  const key = windowKey(windowId);
+  return key ? ACTIVE_EPOCH_PREFIX + key : "";
 }
 
 export function pageHost(url) {
@@ -549,11 +558,32 @@ async function hasWindowActiveBinding() {
   return Object.entries(all || {}).some(([k, v]) => k.startsWith(ACTIVE_WINDOW_PREFIX) && typeof v === "string" && v);
 }
 
+// Without chrome.storage.session the epoch can only live as long as this document.
+const documentEpoch = crypto.randomUUID();
+
+async function readProcessEpoch() {
+  if (!chrome.storage.session) return documentEpoch;
+  const data = await chrome.storage.session.get(PROCESS_EPOCH_KEY);
+  const epoch = data?.[PROCESS_EPOCH_KEY];
+  return typeof epoch === "string" ? epoch : "";
+}
+
+// Only call under withSessionIndexLock so two panels cannot mint different epochs.
+async function processEpoch() {
+  const epoch = await readProcessEpoch();
+  if (epoch) return epoch;
+  const next = crypto.randomUUID();
+  await chrome.storage.session.set({ [PROCESS_EPOCH_KEY]: next });
+  return next;
+}
+
 export async function getActiveId(windowId) {
   const storeKey = activeWindowStorageKey(windowId);
   if (storeKey) {
-    const data = await localGet(storeKey);
-    return typeof data[storeKey] === "string" ? data[storeKey] : "";
+    const epochKey = activeEpochStorageKey(windowId);
+    const [data, epoch] = await Promise.all([localGet([storeKey, epochKey]), readProcessEpoch()]);
+    const id = typeof data[storeKey] === "string" ? data[storeKey] : "";
+    return id && epoch && data[epochKey] === epoch ? id : "";
   }
   const data = await localGet(ACTIVE_KEY);
   return typeof data[ACTIVE_KEY] === "string" ? data[ACTIVE_KEY] : "";
@@ -572,38 +602,63 @@ export function loadActiveSession(windowId) {
   return withSessionIndexLock(() => readActiveSession(windowId));
 }
 
+// Held by another live window in this browser process, or its interrupted run names another window.
+async function occupiedElsewhere(session, windowId, epoch) {
+  const runWindowId = session.run?.windowId;
+  if (runWindowId != null && runWindowId !== windowId) return true;
+  const windows = await chrome.windows.getAll();
+  const others = windows.map((win) => win.id).filter((id) => id !== windowId && activeWindowStorageKey(id));
+  if (!others.length) return false;
+  const bindings = await localGet(others.flatMap((id) => [activeWindowStorageKey(id), activeEpochStorageKey(id)]));
+  return others.some((id) => (
+    bindings[activeWindowStorageKey(id)] === session.id && bindings[activeEpochStorageKey(id)] === epoch
+  ));
+}
+
+function forkSession(session) {
+  session.id = crypto.randomUUID();
+  session.createdAt = Date.now();
+  delete session.run;
+  delete session.taskGroupId;
+  return session;
+}
+
 // A conversation already open elsewhere, or whose interrupted run still names another window, is copied.
 export function openSessionInWindow(id, windowId) {
   return withSessionIndexLock(async () => {
     const session = await loadSession(id);
     if (!session) return null;
-    const windows = await chrome.windows.getAll();
-    const keys = windows.filter((win) => win.id !== windowId).map((win) => activeWindowStorageKey(win.id));
-    const bindings = await localGet(keys);
-    const runWindowId = session.run?.windowId;
-    const runBelongsElsewhere = runWindowId != null && runWindowId !== windowId;
-    if (Object.values(bindings).includes(id) || runBelongsElsewhere) {
-      session.id = crypto.randomUUID();
-      session.createdAt = Date.now();
-      delete session.run;
-      delete session.taskGroupId;
-    }
+    if (await occupiedElsewhere(session, windowId, await processEpoch())) forkSession(session);
     return storeSession(session, { windowId });
   });
 }
 
+// Pointers from an earlier browser process are dropped: Chrome may hand the same window id to another window.
 async function readActiveSession(windowId) {
   const storeKey = activeWindowStorageKey(windowId);
   if (storeKey) {
-    const data = await localGet([storeKey, ACTIVE_KEY]);
+    const epochKey = activeEpochStorageKey(windowId);
+    const epoch = await processEpoch();
+    const data = await localGet([storeKey, epochKey, ACTIVE_KEY]);
     const own = data[storeKey];
-    if (typeof own === "string") return own ? loadSession(own) : null;
-    const legacy = typeof data[ACTIVE_KEY] === "string" ? data[ACTIVE_KEY] : "";
-    if (legacy && !(await hasWindowActiveBinding())) {
-      await localSet({ [storeKey]: legacy });
-      return loadSession(legacy);
+    let id = "";
+    if (typeof own === "string") {
+      if (!own) return null;
+      if (data[epochKey] !== epoch) {
+        await localSet({ [storeKey]: "" });
+        return null;
+      }
+      id = own;
+    } else {
+      const legacy = typeof data[ACTIVE_KEY] === "string" ? data[ACTIVE_KEY] : "";
+      if (!legacy || (await hasWindowActiveBinding())) return null;
+      id = legacy;
     }
-    return null;
+    const session = await loadSession(id);
+    if (!session) return null;
+    if (await occupiedElsewhere(session, windowId, epoch)) return storeSession(forkSession(session), { windowId });
+    if (id !== own) await localSet({ [storeKey]: id, [epochKey]: epoch });
+    return session;
   }
   const data = await localGet(ACTIVE_KEY);
   return loadSession(data[ACTIVE_KEY]);
@@ -652,7 +707,10 @@ async function storeSession(raw, options) {
   if (!options.keepActive) {
     patch[ACTIVE_KEY] = session.id;
     const storeKey = activeWindowStorageKey(options.windowId);
-    if (storeKey) patch[storeKey] = session.id;
+    if (storeKey) {
+      patch[storeKey] = session.id;
+      patch[activeEpochStorageKey(options.windowId)] = await processEpoch();
+    }
   }
   await writeSessionItem(session.id, session);
   await localSet(patch);
@@ -684,4 +742,21 @@ export async function clearActiveId(windowId) {
     return;
   }
   await localSet({ [ACTIVE_KEY]: "" });
+}
+
+export function stashWindowHint(windowId, text) {
+  const key = windowKey(windowId);
+  if (!key || !text) return Promise.resolve();
+  return chrome.storage.session.set({ [WINDOW_HINT_PREFIX + key]: String(text) });
+}
+
+export async function takeWindowHint(windowId) {
+  const key = windowKey(windowId);
+  if (!key) return "";
+  const storeKey = WINDOW_HINT_PREFIX + key;
+  const data = await chrome.storage.session.get(storeKey);
+  const text = data?.[storeKey];
+  if (text == null) return "";
+  await chrome.storage.session.remove(storeKey);
+  return typeof text === "string" ? text : "";
 }
