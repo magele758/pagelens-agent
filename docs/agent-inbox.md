@@ -2,7 +2,7 @@
 
 Zero-new-daemon bridge: drop a JSON job under `~/.pagelens/agent-inbox/`, PageLens service worker polls it (only when 设置 → “启用文件 inbox” is on, default **off**), executes, writes `~/.pagelens/agent-outbox/<id>.json`, and moves the job to `agent-inbox/processed/`.
 
-Synchronous jobs can target an installed unpacked extension with `--extension-id <id>` on both `enqueue` and `wait`. The CLI puts the job in `agent-inbox/<id>/` and verifies the extension ID in the receipt. Existing clients may keep using the shared inbox. Agent prompts and cancellations use the shared inbox.
+Synchronous jobs can target an installed unpacked extension with `--extension-id <id>` on both `enqueue` and `wait`. The CLI puts the job in `agent-inbox/<id>/` and verifies the extension ID in the receipt. Existing clients may keep using the shared inbox. `agent_prompt` and `agent_cancel` also accept that directory, from `--extension-id`, `PAGELENS_EXTENSION_ID`, or a trimmed `agent-inbox-extension-id` (32 lowercase a–p). With none of those, prompts stay in the shared inbox. `wait` and `status` do not read the id file; `wait --extension-id` requires `consumerExtensionId` on the receipt.
 
 Directed jobs and TikTok PTC jobs require the matching Native Host. The directed inbox can run up to three local TikTok MX draft creates for distinct source IDs in the same poll. Enqueue all source jobs before waiting. Each job owns its Chrome tab group and returns a separate receipt. Check the overlap of the native stage timestamps to confirm parallel execution. Other inbox actions wait for the running creates to finish. The host claims a file in `processing/` before browser work. If the worker stops before writing a receipt, the claim stays on disk for reconciliation. Check the retained editor and draft list before submitting a replacement.
 
@@ -134,13 +134,18 @@ node tools/agent-inbox.mjs enqueue --action agent_prompt \
 node tools/agent-inbox.mjs wait <id> --timeout 300000
 ```
 
+id 文件存在时，同一条命令会写到 `agent-inbox/<id>/`。
+
 Outbox：
 
 ```json
 { "id": "...", "ok": true, "action": "agent_prompt", "finishedAt": "...",
+  "consumerExtensionId": "可选",
   "result": { "summary": "Agent 最终回复原文", "steps": [{ "name": "click", "ok": true, "preview": "..." }] },
   "metadata": {}, "meta": { "action": "agent_prompt", "ms": 41234 } }
 ```
+
+不带 `--extension-id` 的 wait 不要求 `consumerExtensionId`。
 
 失败时 `ok:false` + `error` + `errorCode`：
 
@@ -171,6 +176,8 @@ node tools/agent-inbox.mjs cancel <promptId>   # 停指定任务：排队中直�
 node tools/agent-inbox.mjs cancel              # 停当前正在运行的 agent_prompt（不管 id）
 node tools/agent-inbox.mjs cancel --all        # 同上，并撤销 inbox 里所有排队中的 agent_prompt
 ```
+
+同样的 id 来源（`--extension-id`、`PAGELENS_EXTENSION_ID`，或 trim 后的 `agent-inbox-extension-id`）会把 `agent_cancel` 写进定向目录；都没有时仍写共享根。
 
 - 等价于投递 `{ "action": "agent_cancel", "targetId": "<promptId，可省>" }`；`targetId` 与当前运行的 id 不符时返回 `ID_MISMATCH`，不会误杀别的任务。
 - 运行中的任务在下一轮轮询（解包约 6s，打包安装 30s）内中止，与侧栏「停止」按钮同一路径；被取消任务的 outbox 为 `ok:false, errorCode:"CANCELLED"`，`agent_cancel` 自己的 outbox 为 `{ ok:true, cancelled:true|false }`（没有在跑则 `cancelled:false`）。
