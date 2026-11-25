@@ -47,7 +47,7 @@ export function windowMailTools(from, getCapsule, userMessageId) {
       },
     },
     {
-      name: "list_task_windows", description: "获取本窗口和可通信的普通窗口 ID。", parameters: empty,
+      name: "list_task_windows", description: "获取本窗口和可通信的普通窗口。peers 为 {id, busy} 列表，busy 为 true 表示该窗口正在执行委派任务。", parameters: empty,
       execute: async () => JSON.stringify({ current: from, peers: await listPeerWindows(from) }),
     },
     {
@@ -106,8 +106,13 @@ export function bindWindowMail(windowId) {
     if (current !== peerRevision) return;
     const selected = select.value;
     select.replaceChildren(new Option(peers.length ? "选择接收窗口" : "暂无其他窗口", ""));
-    for (const id of peers) select.add(new Option(`窗口 ${id}`, String(id)));
-    select.value = peers.includes(Number(selected)) ? selected : "";
+    for (const peer of peers) {
+      const option = new Option(peer.busy ? `窗口 ${peer.id}（任务中）` : `窗口 ${peer.id}`, String(peer.id));
+      option.disabled = Boolean(peer.busy);
+      select.add(option);
+    }
+    const chosen = peers.find(peer => String(peer.id) === selected);
+    select.value = chosen && !chosen.busy ? selected : "";
   }
   async function render() {
     const current = ++revision;
@@ -142,7 +147,9 @@ export function bindWindowMail(windowId) {
   }
   const report = err => { status.textContent = err.message; };
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "session" && (changes[mailKey(windowId)] || changes[DELEGATE_STORAGE_KEY])) render().catch(report);
+    if (area !== "session") return;
+    if (changes[mailKey(windowId)] || changes[DELEGATE_STORAGE_KEY]) render().catch(report);
+    if (changes[DELEGATE_STORAGE_KEY]) refreshPeers().catch(report);
   });
   box.addEventListener("toggle", () => { if (box.open) refreshPeers().catch(report); });
   chrome.windows.onCreated.addListener(() => refreshPeers().catch(report));
