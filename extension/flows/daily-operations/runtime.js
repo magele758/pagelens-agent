@@ -1,7 +1,8 @@
-import { dailySourceForUrl, dailySources } from "./catalog.js";
+import { dailyPlan, dailySelectionKey, dailySourceForUrl, dailySources } from "./catalog.js";
 import { getCdp } from "../../lib/cdp.js";
 import { readDailyPage } from "./page.js";
 import { addSnapshot, compareSnapshot, dailyHistoryKey, dailyScheduleKey, dailyStateKey, dayInChina } from "./history.js";
+import { summarizeDailyRun } from "./report.js";
 
 const alarmName = "pagelens.dailyOperations";
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -174,47 +175,85 @@ function collectDaily(request) {
   return running;
 }
 
-async function executeDaily({ source, startDay, endDay, windowId }) {
-  const ids = source === "all" ? Object.keys(dailySources) : [source];
-  if (!ids.every(id => Object.hasOwn(dailySources, id))) throw new Error("未知的每日运营来源。");
-  const filters = ids.includes("orders") ? orderFilters(startDay, endDay) : {};
-  const stored = await chrome.storage.local.get([dailyHistoryKey, dailyStateKey]);
+async function retryDailyReport(startedAt) {
+  const stored = await chrome.storage.local.get(dailyStateKey);
+  const state = stored[dailyStateKey];
+  if (!state?.plan || state.startedAt !== startedAt || state.running) throw new Error("请刷新并打开最新报告。");
+  const save = () => chrome.storage.local.set({ [dailyStateKey]: state });
+  state.running = true;
+  state.phase = "report";
+  await save();
+  try {
+    state.report = await summarizeDailyRun(state);
+  } finally {
+    state.running = false;
+    await save();
+  }
+  return state;
+}
+
+async function executeDaily({ source = "all", selection, startDay, endDay, windowId }) {
+  if (source !== "all" && !Object.hasOwn(dailySources, source)) throw new Error("未知的每日运营来源。");
+  const stored = await chrome.storage.local.get([dailyHistoryKey, dailySelectionKey]);
+  const plan = dailyPlan(selection ?? stored[dailySelectionKey], source);
+  const total = Object.values(plan).reduce((sum, sections) => sum + sections.length, 0);
+  if (!total) throw new Error("请至少选择一项要采集的数据。");
+  const filters = plan.orders ? orderFilters(startDay, endDay) : {};
   const history = stored[dailyHistoryKey] || {};
   const cutoff = Date.now() - 9 * 86400000;
   for (const [key, entries] of Object.entries(history)) {
     if (!entries.length || entries.at(-1).at < cutoff) delete history[key];
   }
-  const prior = stored[dailyStateKey]?.results || {};
-  const state = { startedAt: Date.now(), running: true, results: { ...prior }, pending: ids };
-  const save = () => chrome.storage.local.set({ [dailyStateKey]: state, [dailyHistoryKey]: history });
+  const state = { startedAt: Date.now(), running: true, phase: "collect", plan, results: {},
+    dates: { startDay, endDay }, windowId, progress: { done: 0, total } };
+  const save = (snapshotChanged = false) => chrome.storage.local.set({
+    [dailyStateKey]: state, ...(snapshotChanged && { [dailyHistoryKey]: history }),
+  });
   await save();
   try {
-    for (const id of ids) {
-      const config = dailySources[id];
+    for (const [id, sections] of Object.entries(plan)) {
       const result = state.results[id] = { at: Date.now(), sections: [], errors: [] };
       let collector;
       try {
+        state.progress.current = { id, section: sections[0], opening: true };
+        await save();
         // Fangguo renders its virtual list on animation frames. A background tab can report
         // the new scroll position before its recycled rows update.
         collector = await openCollector(id, windowId, id === "orders");
-        if (id === "orders") await applyOrderFilters(collector, config.sections[0], filters);
-        for (const section of config.sections) {
+        if (id === "orders") await applyOrderFilters(collector, sections[0], filters);
+        for (const section of sections) {
+          state.progress.current = { id, section };
+          await save();
           try {
             const snapshot = { at: Date.now(), section, ...await collectSection(id, collector, section, id === "orders" ? filters : {}) };
             const range = id === "orders" ? [startDay, endDay === dayInChina(snapshot.at) ? null : endDay] : null;
             const key = JSON.stringify([id, snapshot.account, section, range, id === "orders" ? 4 : 1]);
-            result.sections.push(snapshot.complete ? { ...snapshot, ...compareSnapshot(history[key] || [], snapshot) } : snapshot);
+            const entry = snapshot.complete ? { ...snapshot, ...compareSnapshot(history[key] || [], snapshot) } : snapshot;
+            result.sections.push(entry);
             if (snapshot.complete) history[key] = addSnapshot(history[key] || [], snapshot);
-          } catch (error) { result.errors.push({ section, error: error.message }); }
-          await save();
+            state.progress.last = { id, section, count: entry.records.length,
+              added: entry.previousDelta != null ? entry.added.length : null, complete: entry.complete };
+          } catch (error) {
+            result.errors.push({ section, error: error.message });
+            state.progress.last = { id, section, failed: true };
+          }
+          state.progress.done++;
+          await save(true);
         }
-      } catch (error) { result.errors.push({ error: error.message }); }
+      } catch (error) {
+        result.errors.push({ error: error.message });
+        state.progress.last = { id, section: sections[0], failed: true };
+        state.progress.done += sections.length - result.sections.length - result.errors.filter(item => item.section).length;
+      }
       finally {
         if (collector) await chrome.tabs.remove(collector.tabId).catch(() => {});
-        state.pending = state.pending.filter(item => item !== id);
         await save();
       }
     }
+    state.phase = "report";
+    delete state.progress.current;
+    await save();
+    state.report = await summarizeDailyRun(state);
   } finally {
     state.running = false;
     state.finishedAt = Date.now();
@@ -251,6 +290,11 @@ export function onDailyAlarm(alarm) {
 
 export async function handleDailyMessage(message) {
   if (message.type === "pl.daily.run") return await collectDaily(message);
+  if (message.type === "pl.daily.report") {
+    if (running) throw new Error("已经有一个每日运营流程在运行。");
+    running = retryDailyReport(message.startedAt).finally(() => { running = undefined; });
+    return await running;
+  }
   if (message.type === "pl.daily.open") return await openDailyShortcut(message);
   if (message.type !== "pl.daily.schedule" || typeof message.enabled !== "boolean" ||
       !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(message.time)) throw new Error("请输入有效的每日执行时间。");
