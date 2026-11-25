@@ -11,6 +11,11 @@
  * headless: Chrome refuses `chrome.sidePanel.open()` without a user gesture, so the SW can never
  * open the panel by itself. Run state is kept in storage.session so a recycled SW can still
  * finish or time out the job.
+ *
+ * Focusing a tab and starting the run are two separate steps. A per-window handoff lock
+ * (`pagelens-agent-inbox-handoff-<windowId>`) spans both, so a second job for the same window
+ * cannot slip into the gap; the window lock itself still only covers the tab operation, because
+ * Web Locks are not reentrant and both manager.start and the panel take it again.
  */
 
 import { tabInWindow, withWindowTask } from "../window-scope.js";
@@ -25,6 +30,8 @@ const MAX_TIMEOUT_MS = 600000;
 const PANEL_WAIT_MS = 6000;
 const TAB_LOAD_WAIT_MS = 15000;
 const RUNTIMES = Object.freeze(["auto", "panel", "headless"]);
+
+const HANDOFF_LOCK_PREFIX = "pagelens-agent-inbox-handoff-";
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -89,13 +96,38 @@ async function waitTabComplete(tabId) {
 }
 
 /**
- * Activates the requested tab (if any). `windowId` pins the lookup to the side panel's window;
- * headless runs pass null and may use any window.
- * Returns { error } on failure, otherwise { tab } (tab is null when no tab was requested).
+ * Runs `run` while holding the per-window handoff lock. Two jobs bound to the same window resolve
+ * their target read-only first and then race here, so only one of them reaches the tab activation
+ * and the start / dispatch right behind it. The window lock is not part of this span: Web Locks are
+ * not reentrant, and manager.start takes it again. Returns `busy` when another job got here first.
  */
-async function focusTarget(job, windowId) {
+async function withInboxHandoff(windowId, busy, run) {
+  if (!Number.isInteger(windowId) || windowId < 0) return run();
+  let entered = false;
+  const result = await navigator.locks.request(
+    `${HANDOFF_LOCK_PREFIX}${windowId}`,
+    { ifAvailable: true },
+    async (lock) => {
+      if (!lock) return null;
+      entered = true;
+      return run();
+    },
+  );
+  return entered ? result : busy;
+}
+
+/**
+ * Read-only target resolution: no tab created, no tab activated, no lock taken, so two jobs aimed
+ * at the same window can be separated before either of them touches it.
+ * `windowId` pins the lookup to the side panel's window; headless runs pass null and may use any.
+ * Returns { error } on failure, otherwise { tab, windowId, createTab, url }:
+ *  - tab is null when the job requested no tab,
+ *  - windowId is the window the run is bound to (null for a headless run with no tab),
+ *  - createTab says the tab still has to be created from `url`.
+ */
+async function resolveTarget(job, windowId) {
   const wantsTab = Number.isInteger(job.tabId) || job.tabUrlIncludes;
-  if (!wantsTab) return { tab: null };
+  if (!wantsTab) return { tab: null, windowId: windowId ?? null, createTab: false, url: "" };
   const scoped = windowId != null;
   let tab = null;
   if (Number.isInteger(job.tabId)) {
@@ -118,16 +150,28 @@ async function focusTarget(job, windowId) {
     return { error: failure("WRONG_WINDOW", "目标标签页与已打开的侧栏不在同一窗口") };
   }
   const targetWindow = windowId ?? tab?.windowId ?? (await chrome.windows.getLastFocused()).id;
+  return { tab, windowId: targetWindow, createTab: Boolean(createTab), url: createTab ? String(job.url) : "" };
+}
+
+/**
+ * Activates the resolved target inside the window lock: creates the tab when the job asked for
+ * one, otherwise focuses the existing one. The lock is released before returning, so the caller can
+ * hand the window to manager.start / the panel afterwards.
+ * Returns { error } on failure, otherwise { tab } (tab is null when no tab was requested).
+ */
+async function focusTarget(target) {
+  if (!target.tab && !target.createTab) return { tab: null };
+  const windowId = target.windowId;
   try {
-    return await withWindowTask(targetWindow, async () => {
-      if (createTab) {
-        tab = await chrome.tabs.create({ windowId: targetWindow, url: String(job.url), active: true });
+    return await withWindowTask(windowId, async () => {
+      if (target.createTab) {
+        const tab = await chrome.tabs.create({ windowId, url: target.url, active: true });
         await waitTabComplete(tab.id);
-      } else {
-        await tabInWindow(tab.id, targetWindow);
-        await chrome.tabs.update(tab.id, { active: true });
+        return { tab };
       }
-      return { tab };
+      await tabInWindow(target.tab.id, windowId);
+      await chrome.tabs.update(target.tab.id, { active: true });
+      return { tab: target.tab };
     });
   } catch (err) {
     return { error: failure(err.code || "TAB_NOT_FOUND", err.message) };
@@ -161,38 +205,45 @@ async function startHeadless(job, jobId, prompt, settings, auth) {
       }),
     };
   }
-  const focus = await focusTarget(job, null);
-  if (focus.error) return { done: focus.error };
+  const target = await resolveTarget(job, null);
+  if (target.error) return { done: target.error };
 
-  const timeoutMs = clampTimeout(job);
-  const startedAt = Date.now();
-  let task;
-  try {
-    task = await manager.start({
-      prompt,
-      capsule: job.capsule,
-      tabId: focus.tab?.id ?? null,
-      windowId: focus.tab?.windowId,
-      sourceUrl: focus.tab?.url || "",
-      maxSteps: job.maxSteps,
-      model: job.model,
-      session: headlessSession(jobId, settings, auth),
+  const run = async () => {
+    const focus = await focusTarget(target);
+    if (focus.error) return { done: focus.error };
+
+    const timeoutMs = clampTimeout(job);
+    const startedAt = Date.now();
+    let task;
+    try {
+      task = await manager.start({
+        prompt,
+        capsule: job.capsule,
+        tabId: focus.tab?.id ?? null,
+        windowId: focus.tab?.windowId,
+        sourceUrl: focus.tab?.url || "",
+        maxSteps: job.maxSteps,
+        model: job.model,
+        session: headlessSession(jobId, settings, auth),
+      });
+    } catch (err) {
+      if (err?.code === "BUSY") return { queued: true };
+      const code = err?.code === "BAD_ARGS" ? "BAD_JOB" : err?.code || "HEADLESS_FAILED";
+      return { done: failure(code, String(err?.message || err)) };
+    }
+    await setActive({
+      id: jobId,
+      action: "agent_prompt",
+      runtime: "headless",
+      taskId: task.id,
+      startedAt,
+      deadline: startedAt + timeoutMs,
+      metadata: job.metadata ?? null,
     });
-  } catch (err) {
-    if (err?.code === "BUSY") return { queued: true };
-    const code = err?.code === "BAD_ARGS" ? "BAD_JOB" : err?.code || "HEADLESS_FAILED";
-    return { done: failure(code, String(err?.message || err)) };
-  }
-  await setActive({
-    id: jobId,
-    action: "agent_prompt",
-    runtime: "headless",
-    taskId: task.id,
-    startedAt,
-    deadline: startedAt + timeoutMs,
-    metadata: job.metadata ?? null,
-  });
-  return { started: true, runtime: "headless" };
+    return { started: true, runtime: "headless" };
+  };
+  // A headless run without a tab has no window to hand over, so it takes no lock at all.
+  return withInboxHandoff(target.windowId, { queued: true }, run);
 }
 
 /**
@@ -251,28 +302,36 @@ export async function startAgentPrompt(job, jobId, { auth = null } = {}) {
     return { done: failure("AGENT_BUSY", "侧栏 Agent 正在执行其他任务（可能是用户手动对话）") };
   }
 
-  const focus = await focusTarget(job, pong.windowId);
-  if (focus.error) return { done: focus.error };
+  const resolved = await resolveTarget(job, pong.windowId);
+  if (resolved.error) return { done: resolved.error };
 
-  const timeoutMs = clampTimeout(job);
-  const startedAt = Date.now();
-  await setActive({
-    id: jobId,
-    action: "agent_prompt",
-    runtime: "panel",
-    windowId: pong.windowId,
-    startedAt,
-    deadline: startedAt + timeoutMs,
-    metadata: job.metadata ?? null,
-  });
-  const accepted = await sendToPanel({ type: "pl.agentPrompt.run", windowId: pong.windowId, id: jobId, prompt });
-  if (!accepted?.ok) {
-    await setActive(null);
-    return {
-      done: failure(accepted?.code || "RUN_REJECTED", accepted?.error || "侧栏没有接受该任务"),
-    };
-  }
-  return { started: true, runtime: "panel" };
+  const run = async () => {
+    const focus = await focusTarget(resolved);
+    if (focus.error) return { done: focus.error };
+
+    const timeoutMs = clampTimeout(job);
+    const startedAt = Date.now();
+    await setActive({
+      id: jobId,
+      action: "agent_prompt",
+      runtime: "panel",
+      windowId: pong.windowId,
+      startedAt,
+      deadline: startedAt + timeoutMs,
+      metadata: job.metadata ?? null,
+    });
+    const accepted = await sendToPanel({ type: "pl.agentPrompt.run", windowId: pong.windowId, id: jobId, prompt });
+    if (!accepted?.ok) {
+      await setActive(null);
+      return {
+        done: failure(accepted?.code || "RUN_REJECTED", accepted?.error || "侧栏没有接受该任务"),
+      };
+    }
+    return { started: true, runtime: "panel" };
+  };
+  return withInboxHandoff(pong.windowId, {
+    done: failure("AGENT_BUSY", "同一窗口另一条收件箱任务正在交接，请稍后重试。"),
+  }, run);
 }
 
 function buildOutput(active, payload) {

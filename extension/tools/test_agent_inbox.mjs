@@ -1,3 +1,4 @@
+import "./fixtures/web-locks.mjs";
 import assert from "node:assert/strict";
 import { normalizeSettings } from "../lib/storage.js";
 import {
@@ -582,6 +583,138 @@ store.settings = { agentInboxEnabled: true, agentInboxVersion: 1, cdpInput: fals
   await writeRejected;
   assert.ok(received("write-sibling"), "one outbox write failure does not skip a sibling's receipt");
   assert.deepEqual(Object.keys(native.directed[target]), ["processing/write-failure.json"]);
+}
+
+// --- inbox agent: focusing a tab and starting the run are one handoff per window ---
+// The gap between focusTarget() and manager.start / sendToPanel() used to be unlocked: a second
+// agent_prompt aimed at the same window could slip in and start while the first was still handing
+// over. The window lock must stay off that span (Web Locks are not reentrant).
+{
+  const { startAgentPrompt } = await import("../lib/agent/inbox-agent.js");
+  const { setDelegateManager } = await import("../lib/agent/delegate.js");
+  const ACTIVE_KEY = "agentPromptActive";
+  const session = {};
+  const windowTabs = [{ id: 11, windowId: 4, url: "https://handoff.example/", status: "complete" }];
+  const updated = [];
+  const starts = [];
+  const dispatched = [];
+  const held = new Set();
+  const handoffRequests = [];
+  let updateGate = null;
+  let startGate = null;
+  let runGate = null;
+  const yieldToWorker = () => new Promise((resolve) => setImmediate(resolve));
+  const waitFor = async (check, message) => {
+    for (let i = 0; i < 50 && !check(); i++) await yieldToWorker();
+    assert.ok(check(), message);
+  };
+
+  chrome.storage.session = {
+    get: async (key) => ({ [key]: session[key] }),
+    set: async (values) => Object.assign(session, values),
+    remove: async (key) => { delete session[key]; },
+  };
+  chrome.windows = { getLastFocused: async () => ({ id: 4 }) };
+  chrome.tabs.get = async (id) => windowTabs.find((tab) => tab.id === id) || null;
+  chrome.tabs.query = async ({ windowId } = {}) =>
+    windowTabs.filter((tab) => windowId == null || tab.windowId === windowId);
+  chrome.tabs.update = async (id, props) => {
+    updated.push([id, props]);
+    if (updateGate) await updateGate;
+  };
+  chrome.runtime.sendMessage = async (msg) => {
+    if (msg.type === "pl.agentPrompt.ping") return { ok: true, busy: false, windowId: 4 };
+    if (msg.type !== "pl.agentPrompt.run") return { ok: true };
+    dispatched.push({ id: msg.id, windowId: msg.windowId, held: [...held] });
+    if (runGate) await runGate;
+    return { ok: true };
+  };
+  setDelegateManager({
+    async start(args) {
+      starts.push({ ...args, held: [...held] });
+      // Only the first task is held open; a second one would resolve and fail the queue assertion
+      // instead of hanging if the handoff lock ever stops covering this span.
+      if (startGate && starts.length === 1) await startGate;
+      return { id: `task_${starts.length}`, status: "running" };
+    },
+    async status() { return null; },
+    async cancel() { return {}; },
+  });
+
+  // Watch the lock manager itself: which window locks are held while a start or dispatch runs, and
+  // whether a handoff lock was requested at all.
+  const requestLock = navigator.locks.request.bind(navigator.locks);
+  navigator.locks.request = (name, options, run) => {
+    if (typeof options === "function") return requestLock(name, options);
+    const handoff = name.startsWith("pagelens-agent-inbox-handoff-");
+    if (handoff) handoffRequests.push(name);
+    return requestLock(name, options, async (lock) => {
+      if (!lock) return run(lock);
+      const tracked = name.startsWith("pagelens-agent-window-");
+      if (tracked) held.add(name);
+      try {
+        return await run(lock);
+      } finally {
+        if (tracked) held.delete(name);
+      }
+    });
+  };
+
+  // two overlapping headless starts on the same window: the second one queues, one task starts
+  {
+    let release;
+    startGate = new Promise((resolve) => { release = resolve; });
+    const first = startAgentPrompt({ prompt: "one", runtime: "headless", tabUrlIncludes: "handoff.example" }, "h1");
+    await waitFor(() => starts.length === 1, "the first headless start reaches the delegate runner");
+    const second = await startAgentPrompt({ prompt: "two", runtime: "headless", tabUrlIncludes: "handoff.example" }, "h2");
+    assert.deepEqual(second, { queued: true }, "the same-window job queues instead of starting a second task");
+    assert.equal(starts.length, 1, "no second delegate task starts");
+    release();
+    assert.deepEqual(await first, { started: true, runtime: "headless" });
+    assert.equal(starts[0].windowId, 4);
+    assert.equal(starts[0].tabId, 11);
+    assert.deepEqual(starts[0].held, [], "manager.start is called without pagelens-agent-window-* held");
+    startGate = null;
+    delete session[ACTIVE_KEY];
+  }
+
+  // a headless run with no tab has no window to hand over: no handoff lock, no window lock
+  {
+    handoffRequests.length = 0;
+    starts.length = 0;
+    const res = await startAgentPrompt({ prompt: "three", runtime: "headless" }, "h3");
+    assert.deepEqual(res, { started: true, runtime: "headless" });
+    assert.deepEqual(handoffRequests, [], "a tab-less headless run takes no handoff lock");
+    assert.equal(starts[0].windowId, undefined);
+    assert.equal(starts[0].tabId, null);
+    delete session[ACTIVE_KEY];
+  }
+
+  // two overlapping panel dispatches on the same window: the second is refused while the first hands over
+  {
+    let releaseUpdate, releaseRun;
+    updateGate = new Promise((resolve) => { releaseUpdate = resolve; });
+    runGate = new Promise((resolve) => { releaseRun = resolve; });
+    const focused = updated.length;
+    const first = startAgentPrompt({ prompt: "four", runtime: "panel", tabUrlIncludes: "handoff.example" }, "p1");
+    await waitFor(() => updated.length > focused, "the first panel job focuses its tab");
+    assert.deepEqual([...held], ["pagelens-agent-window-4"], "focusing the tab holds the window lock");
+    const second = await startAgentPrompt({ prompt: "five", runtime: "panel", tabUrlIncludes: "handoff.example" }, "p2");
+    assert.equal(second.done?.errorCode, "AGENT_BUSY", "the same-window panel job is refused, not dispatched");
+    releaseUpdate();
+    await waitFor(() => dispatched.length === 1, "the first panel job reaches sendToPanel");
+    assert.deepEqual(dispatched[0].held, [], "sendToPanel runs without pagelens-agent-window-* held");
+    assert.equal(dispatched[0].windowId, 4);
+    releaseRun();
+    assert.deepEqual(await first, { started: true, runtime: "panel" });
+    assert.equal(dispatched.length, 1, "only one prompt reaches the panel");
+    updateGate = null;
+    runGate = null;
+    delete session[ACTIVE_KEY];
+  }
+
+  assert.equal(held.size, 0, "no window lock is left behind");
+  navigator.locks.request = requestLock;
 }
 
 console.log("test_agent_inbox: ok");
