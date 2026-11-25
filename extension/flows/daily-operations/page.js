@@ -1,5 +1,5 @@
 // Serialized into the seller tab. Commands here operate only on the configured list.
-export function readDailyPage({ source, targetUrl, sections, translations, header, allowedFields, action = "read", section, start, end, orderNumber }) {
+export function readDailyPage({ source, targetUrl, sections, translations, header, allowedFields, action = "read", section, start, end, orderNumber, field }) {
   const target = new URL(targetUrl);
   const failure = (code, error) => ({ ok: false, code, error });
   if (window !== window.top || location.origin !== target.origin || location.pathname !== target.pathname) {
@@ -18,7 +18,8 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
 
   if (nodes(document, 'input[type="password"]').length) return failure("login-required", "需要在 Chrome 登录此平台。");
   const dialogSelector = 'dialog[open],[role=dialog],[aria-modal=true],.el-dialog,[data-testid="beast-core-modal-container"],[class*="MDL_inner_"]';
-  const dialogs = nodes(document, dialogSelector).filter(node => !nodes(node, dialogSelector).length);
+  const dialogs = nodes(document, dialogSelector).filter(node =>
+    !(source === "orders" && node.matches(".el-picker__popper")) && !nodes(node, dialogSelector).length);
   if (dialogs.length) {
     if (action !== "dismiss") return failure("dialog-open", "页面上有弹窗，正在核对关闭图标。");
     const popup = dialogs.at(-1);
@@ -61,27 +62,28 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
     return { ok: true };
   }
 
-  if (source === "orders" && action === "filter") {
+  if (source === "orders" && (action === "focus-filter" || action === "search")) {
     const range = nodes(document, ".date-picker input.el-range-input");
     const search = unique(nodes(document, "button").filter(node =>
       /^(?:[\uE000-\uF8FF]\s*)?(?:搜索|search)$/iu.test(text(node)) && enabled(node)));
     const payment = nodes(document, ".el-select__selected-item").some(node => /^(付款时间|Payment time)$/iu.test(text(node)));
     if (!payment || range.length !== 2 || !search) return failure("loading", "还没有定位到付款时间筛选。");
-    const write = (input, value) => {
+    const number = orderNumber && unique(nodes(document, "input").filter(input => /^(订单号，|Order numbers,)/u.test(input.placeholder)));
+    if (orderNumber && !number) return failure("loading", "还没有定位到订单号筛选。");
+    if (action === "focus-filter") {
+      const entry = { start: [range[0], start], end: [range[1], end], orderNumber: [number, orderNumber] }[field];
+      if (!entry?.[0] || !entry?.[1] || entry[0].readOnly || !enabled(entry[0])) return failure("filter-unverified", "付款日期或订单号控件不可用。");
+      const [input, value] = entry;
+      if (input.value === value) return { ok: true, unchanged: true };
+      input.click();
       input.focus();
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.blur();
-    };
-    if (orderNumber) {
-      const number = unique(nodes(document, "input").filter(input => /^(订单号，|Order numbers,)/u.test(input.placeholder)));
-      if (!number) return failure("loading", "还没有定位到订单号筛选。");
-      write(number, orderNumber);
-      if (number.value !== orderNumber) return failure("filter-unverified", "订单号未回显。");
+      input.select();
+      if (document.activeElement !== input || input.selectionStart !== 0 || input.selectionEnd !== input.value.length) {
+        return failure("filter-unverified", "未能核对付款日期或订单号的输入焦点。");
+      }
+      return { ok: true, value };
     }
-    if (range[0].value !== start) write(range[0], start);
-    if (range[1].value !== end) write(range[1], end);
+    if (number && number.value !== orderNumber) return failure("filter-unverified", "订单号未回显。");
     if (range[0].value !== start || range[1].value !== end) return failure("filter-unverified", "付款时间未回显。");
     search.click();
     return { ok: true };
@@ -94,9 +96,27 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
   const nextNodes = nodes(document, source === "orders" ? ".el-pagination button.btn-next"
     : '[data-testid="beast-core-pagination-next"],[data-testid="beast-core-pagination"] button[aria-label="下一页"]');
   const next = unique(nextNodes.filter(enabled));
+  if (action === "order-sort" && source === "orders") {
+    const label = unique(nodes(scroller || document, ".vue-recycle-scroller__slot div").filter(node =>
+      /^(付款时间|Payment time)$/iu.test(text(node)) &&
+      node.querySelector(":scope > p > i.icon-shouqi") &&
+      node.querySelector(":scope > p > i.icon-xiala-baise")));
+    const icons = [label?.querySelector(":scope > p > i.icon-shouqi"), label?.querySelector(":scope > p > i.icon-xiala-baise")];
+    const current = icons.findIndex(icon => icon?.classList.contains("!text-primary"));
+    if (current < 0 || !icons.every(icon => shown(icon) && enabled(icon))) return { ok: true };
+    const index = field === "ascending" ? 0 : field === "descending" ? 1 : 1 - current;
+    if (index !== current) icons[index].click();
+    return { ok: true, previousSort: current === 0 ? "ascending" : "descending" };
+  }
+  if (action === "expand-order-list" && source === "orders") {
+    if (!scroller || scroller.scrollHeight <= scroller.clientHeight) return { ok: true };
+    // Give the virtual list more room in the temporary collector tab so it reuses fewer rows.
+    scroller.style.setProperty("min-height", Math.min(scroller.scrollHeight + 40, 7000) + "px");
+    return { ok: true };
+  }
   if (action === "scroll") {
     if (!scroller) return failure("list-changed", "订单滚动区域已变化。");
-    scroller.scrollTop += Math.max(1, Math.floor(scroller.clientHeight * 0.65));
+    scroller.scrollTop += Math.max(1, Math.floor(scroller.clientHeight * 0.5));
     return { ok: true };
   }
   if (action === "next") {
@@ -131,7 +151,11 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
     const totalMatch = totalLabel.match(/^(?:共(?:有)?|A total of)\s*([\d,]+)\s*(?:条|items)/iu);
     const blank = nodes(document, "div,span").some(n => /^(数据为空|暂无数据|Data is empty)$/iu.test(text(n)));
     if (!scroller && !blank) return failure("loading", "正在等待订单列表。");
-    const records = nodes(scroller || document, ".virtual-table-row-tr").flatMap(row => {
+    const origin = scroller?.getBoundingClientRect().top ?? 0;
+    const rows = nodes(scroller || document, ".virtual-table-row-tr").filter(row =>
+      !scroller || !row.closest(".vue-recycle-scroller__item-view") ||
+      row.getBoundingClientRect().bottom + scroller.scrollTop >= origin);
+    const records = rows.flatMap(row => {
       const cells = nodes(row, ".virtual-table-row-td");
       const id = text(cells[3]).match(/\bPO[-–]\d{2,4}[-–][\d\s]{7,}/iu)?.[0]?.replace(/\s+/gu, "") ||
         text(cells[3]).match(/^\d{8,}(?:-\d{4,})*/u)?.[0];
@@ -139,8 +163,7 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
       return [{ id, fields: { 订单号: id, 店铺: text(cells[2]), 订单状态: text(cells[4]), 付款时间: text(cells[5]) } }];
     });
     // DOM row count excludes virtual spacers and product detail rows.
-    const observed = nodes(scroller || document, ".virtual-table-row-tr").filter(row =>
-      nodes(row, ".virtual-table-row-td").length >= 10).length;
+    const observed = rows.filter(row => nodes(row, ".virtual-table-row-td").length >= 10).length;
     if (!records.length && !blank) return failure("order-unreadable", "订单表已显示，但还未识别到订单号。");
     return { ok: true, account, records, total: totalMatch ? Number(totalMatch[1].replaceAll(",", "")) : blank ? 0 : null,
       page, invalidRows: observed > records.length, next: Boolean(next), more: Boolean(scroller &&
@@ -153,12 +176,12 @@ export function readDailyPage({ source, targetUrl, sections, translations, heade
   if (!head) return failure("loading", "正在等待目标列表的表头。");
   const names = [...head.querySelectorAll("th")].map(text);
   const columns = new RegExp(allowedFields, "u");
-  const tbody = nodes(document, '[data-testid="beast-core-table-middle-body"]');
-  const body = unique(tbody.filter(node => node.closest('[data-testid="beast-core-table"]') ===
-    head.closest('[data-testid="beast-core-table"]'))) || unique(tbody);
+  const table = head.closest('[data-testid="beast-core-table"]');
+  const tbody = unique(nodes(table || document, 'tbody[data-testid="beast-core-table-middle-tbody"]'));
+  const body = tbody || unique(nodes(table || document, '[data-testid="beast-core-table-middle-body"]'));
   if (!body) return failure("loading", "正在等待目标表格的内容。");
-  const empty = nodes(body, 'div,span').some(node => /^(暂无数据|暂无记录)$/u.test(text(node)));
-  const items = nodes(body, "tbody tr").map(row => [...row.children].filter(el => el.tagName === "TD"));
+  const empty = nodes(table || body, 'div,span').some(node => /^(暂无数据|暂无记录)$/u.test(text(node)));
+  const items = nodes(body, "tr").map(row => [...row.children].filter(el => el.tagName === "TD"));
   const records = items.flatMap(cells => {
     if (cells.length !== names.length) return [];
     const fields = Object.fromEntries(names.flatMap((name, i) =>

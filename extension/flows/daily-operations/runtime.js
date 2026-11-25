@@ -1,4 +1,5 @@
 import { dailySourceForUrl, dailySources } from "./catalog.js";
+import { getCdp } from "../../lib/cdp.js";
 import { readDailyPage } from "./page.js";
 import { addSnapshot, compareSnapshot, dailyHistoryKey, dailyScheduleKey, dailyStateKey, dayInChina } from "./history.js";
 
@@ -60,13 +61,72 @@ async function openCollector(id, windowId, visible) {
     }
     throw new Error(last?.ok ? "分页切换后结果未更新。" : last?.error || "读取列表超时。");
   }
-  return { tabId, ready };
+  async function typeFilter(section, filters, field) {
+    const cdp = getCdp();
+    const target = { ...filters, field };
+    if ((await ready("focus-filter", section, target)).unchanged) return;
+    await cdp.ensure(tabId);
+    const focus = await ready("focus-filter", section, target);
+    if (focus.unchanged) return;
+    await cdp.send(tabId, "Input.insertText", { text: focus.value });
+    const key = { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 };
+    await cdp.send(tabId, "Input.dispatchKeyEvent", { type: "rawKeyDown", ...key });
+    await cdp.send(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...key });
+  }
+  return { tabId, ready, typeFilter };
+}
+
+async function applyOrderFilters(collector, section, filters) {
+  try {
+    for (const field of ["start", "end", "orderNumber"]) {
+      if (filters[field]) await collector.typeFilter(section, filters, field);
+    }
+    await pause(360);
+    await collector.ready("search", section, filters);
+  } finally { await getCdp().detach(collector.tabId); }
+  await pause(850);
 }
 
 async function collectSection(id, collector, section, filters) {
   await collector.ready("section", section, filters);
-  await pause(850);
-  let result = await collector.ready("read", section, filters);
+  await pause(id === "orders" ? 1250 : 850);
+  const first = await collectRows(id, collector, section, filters);
+  if (id !== "orders" || first.complete || !(first.total > first.records.length)) return first;
+  // Fangguo can reuse a row with stale content. Read the list in the opposite direction
+  // and reconcile distinct order numbers against the same reported count.
+  const sort = await collector.ready("order-sort", section, filters);
+  if (!sort.previousSort) return first;
+  try {
+    await pause(1450);
+    const second = await collectRows(id, collector, section, filters);
+    if (second.account !== first.account || second.total !== first.total) return first;
+    const records = [...new Map([...first.records, ...second.records].map(row => [row.id, row])).values()];
+    return { ...second, records, complete: records.length === second.total };
+  } catch {
+    return first;
+  } finally {
+    await collector.ready("order-sort", section, { ...filters, field: sort.previousSort }).catch(() => {});
+  }
+}
+
+async function collectRows(id, collector, section, filters) {
+  const read = (accept = () => true) => {
+    let previous;
+    return collector.ready("read", section, filters, state => {
+      if (!accept(state)) return false;
+      if (id !== "orders") return true;
+      const current = JSON.stringify([state.total, state.page, state.more, state.records.map(row => row.id).sort()]);
+      const stable = previous === current;
+      previous = current;
+      return stable;
+    });
+  };
+  let result = await read();
+  if (id === "orders" && result.more) {
+    await collector.ready("expand-order-list", section, filters);
+    await pause(500);
+    result = await read();
+  }
   const account = result.account;
   const rows = new Map();
   let invalidRows = false;
@@ -75,15 +135,18 @@ async function collectSection(id, collector, section, filters) {
     for (const row of result.records) rows.set(row.id, row);
     invalidRows ||= Boolean(result.invalidRows);
     if (id === "orders" && result.more) {
+      const oldRows = result.records.map(row => row.id).join("|");
       await collector.ready("scroll", section, filters);
-      await pause(150);
-      result = await collector.ready("read", section, filters);
+      await pause(250);
+      result = await read(state =>
+        state.records.map(row => row.id).join("|") !== oldRows ||
+        (!state.more && state.total === rows.size));
     } else if (result.next) {
       const oldPage = result.page;
       const first = result.records[0]?.id;
       await collector.ready("next", section, filters);
       await pause(750);
-      result = await collector.ready("read", section, filters, state =>
+      result = await read(state =>
         state.page > oldPage || state.records[0]?.id && state.records[0].id !== first);
     } else {
       const complete = !invalidRows && !result.more && (result.total == null || result.total === rows.size);
@@ -98,7 +161,7 @@ export async function openDailyShortcut({ source, section, startDay, endDay, num
   if (!config?.sections.includes(section)) throw new Error("未知的数据入口。");
   const filters = source === "orders" ? orderFilters(startDay, endDay, number) : {};
   const collector = await openCollector(source, windowId, true);
-  if (source === "orders") await collector.ready("filter", section, filters);
+  if (source === "orders") await applyOrderFilters(collector, section, filters);
   await collector.ready("section", section, filters);
   await pause(850);
   await collector.ready("read", section, filters);
@@ -131,15 +194,15 @@ async function executeDaily({ source, startDay, endDay, windowId }) {
       const result = state.results[id] = { at: Date.now(), sections: [], errors: [] };
       let collector;
       try {
-        collector = await openCollector(id, windowId, false);
-        if (id === "orders") {
-          await collector.ready("filter", config.sections[0], filters);
-          await pause(850);
-        }
+        // Fangguo renders its virtual list on animation frames. A background tab can report
+        // the new scroll position before its recycled rows update.
+        collector = await openCollector(id, windowId, id === "orders");
+        if (id === "orders") await applyOrderFilters(collector, config.sections[0], filters);
         for (const section of config.sections) {
           try {
             const snapshot = { at: Date.now(), section, ...await collectSection(id, collector, section, id === "orders" ? filters : {}) };
-            const key = JSON.stringify([id, snapshot.account, section, id === "orders" ? startDay : null]);
+            const range = id === "orders" ? [startDay, endDay === dayInChina(snapshot.at) ? null : endDay] : null;
+            const key = JSON.stringify([id, snapshot.account, section, range, id === "orders" ? 4 : 1]);
             result.sections.push(snapshot.complete ? { ...snapshot, ...compareSnapshot(history[key] || [], snapshot) } : snapshot);
             if (snapshot.complete) history[key] = addSnapshot(history[key] || [], snapshot);
           } catch (error) { result.errors.push({ section, error: error.message }); }

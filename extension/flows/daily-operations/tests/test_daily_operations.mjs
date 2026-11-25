@@ -3,7 +3,8 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import { dailySourceForUrl, dailySources } from "../catalog.js";
 import { readDailyPage } from "../page.js";
-import { addSnapshot, compareSnapshot } from "../history.js";
+import { addSnapshot, compareSnapshot, dailyScheduleKey, dayInChina } from "../history.js";
+import { handleDailyMessage } from "../runtime.js";
 
 function fixture(source, html, markupVisible = () => true) {
   const config = dailySources[source];
@@ -51,6 +52,18 @@ test("only pending chats are collected even when the all-conversations pane is o
   assert.deepEqual([...reply.records], []);
 });
 
+test("the Fangguo date popper remains available while the range is entered", () => {
+  const { run } = fixture("orders", `
+    <div class="avatar-box"><span class="name-line">account</span></div>
+    <div class="date-picker"><input class="el-range-input"><input class="el-range-input"></div>
+    <span class="el-select__selected-item">付款时间</span><button>搜索</button>
+    <div class="el-picker__popper" role="dialog">日期选择</div>
+  `);
+  const result = run({ action: "focus-filter", field: "start", start: "2026-11-01 00:00:00" });
+  assert.equal(result.ok, true);
+  assert.equal(result.value, "2026-11-01 00:00:00");
+});
+
 test("the Fangguo order parser reads the virtual row and omits recipient data", () => {
   const { run } = fixture("orders", `
     <div class="avatar-box"><span class="name-line">account</span></div>
@@ -69,6 +82,49 @@ test("the Fangguo order parser reads the virtual row and omits recipient data", 
   assert.ok(!JSON.stringify(reply).includes("Private recipient"));
 });
 
+test("Fangguo recovery reverses only the payment-time sort", () => {
+  const { run, doc } = fixture("orders", `
+    <div class="avatar-box"><span class="name-line">account</span></div>
+    <div class="state-wrap"><div class="state active">全部</div></div>
+    <div class="dynamic-scroller-ref vue-recycle-scroller"><div class="vue-recycle-scroller__slot">
+      <div>付款时间<p><i class="icon-shouqi !text-primary"></i><i class="icon-xiala-baise"></i></p></div>
+      <div>发货逾期时间<p><i class="icon-shouqi"></i><i class="icon-xiala-baise" id="other"></i></p></div>
+    </div></div>
+  `);
+  const [ascending, descending] = doc.querySelectorAll(".vue-recycle-scroller__slot > div:first-child i");
+  let clicked = 0;
+  doc.querySelector("#other").onclick = () => assert.fail("The unrelated date sort was clicked");
+  descending.onclick = () => {
+    clicked++;
+    ascending.classList.remove("!text-primary");
+    descending.classList.add("!text-primary");
+  };
+  ascending.onclick = () => clicked++;
+  assert.equal(run({ action: "order-sort", section: "全部" }).previousSort, "ascending");
+  assert.equal(run({ action: "order-sort", section: "全部", field: "ascending" }).previousSort, "descending");
+  assert.equal(clicked, 2);
+});
+
+test("order violations use the middle table and ignore duplicated fixed columns", () => {
+  const { run } = fixture("violations", `
+    <div class="_Wrz4-O9w">shop</div>
+    <div class="TAB_lineLabelActive_123" data-testid="beast-core-tab-itemLabel">订单违规</div>
+    <div data-testid="beast-core-table">
+      <table><thead data-testid="beast-core-table-middle-thead"><tr><th>违规编号</th><th>违规类型</th></tr></thead>
+        <tbody data-testid="beast-core-table-middle-tbody"><tr><td>ABC123</td><td>发货超时</td></tr></tbody></table>
+      <table><thead data-testid="beast-core-table-left-thead"><tr><th>违规编号</th></tr></thead>
+        <tbody data-testid="beast-core-table-left-tbody"><tr><td>ABC123</td></tr></tbody></table>
+      <ul data-testid="beast-core-pagination"><li>共有 2 条</li><li data-testid="beast-core-pagination-next"></li></ul>
+    </div>
+  `);
+  const reply = run({ section: "订单违规" });
+  assert.equal(reply.ok, true);
+  assert.equal(reply.records.length, 1);
+  assert.equal(reply.records[0].fields.违规类型, "发货超时");
+  assert.equal(reply.total, 2);
+  assert.equal(reply.next, true);
+});
+
 test("first runs, repeated same-day runs and yesterday use distinct comparisons", () => {
   const day1 = Date.parse("2026-11-24T16:15:00+08:00");
   const day2 = Date.parse("2026-11-25T08:00:00+08:00");
@@ -85,4 +141,30 @@ test("first runs, repeated same-day runs and yesterday use distinct comparisons"
   assert.equal(next.yesterdayDelta, 1);
   assert.deepEqual(next.added, ["c"]);
   assert.deepEqual(next.trend.at(-1), ["2026-11-25", 2]);
+});
+
+test("daily collection schedules the next Beijing time and clears a disabled alarm", async () => {
+  const previousChrome = globalThis.chrome;
+  const storage = {};
+  const alarms = new Map();
+  globalThis.chrome = {
+    storage: { local: { set: async values => Object.assign(storage, values) } },
+    alarms: {
+      clear: async name => alarms.delete(name),
+      create: async (name, options) => alarms.set(name, options),
+    },
+  };
+  try {
+    const now = Date.now();
+    const time = "08:35";
+    await handleDailyMessage({ type: "pl.daily.schedule", enabled: true, time });
+    const { when, periodInMinutes } = alarms.get("pagelens.dailyOperations");
+    assert.ok(when > now && when - now <= 86400000);
+    assert.equal(when, Date.parse(dayInChina(when) + "T08:35:00+08:00"));
+    assert.equal(periodInMinutes, 1440);
+    assert.deepEqual(storage[dailyScheduleKey], { enabled: true, time });
+    await handleDailyMessage({ type: "pl.daily.schedule", enabled: false, time });
+    assert.equal(alarms.size, 0);
+    assert.equal(storage[dailyScheduleKey].enabled, false);
+  } finally { globalThis.chrome = previousChrome; }
 });
