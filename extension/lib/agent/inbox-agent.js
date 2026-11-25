@@ -68,15 +68,19 @@ async function pingPanel(windowId) {
   return res?.ok ? res : null;
 }
 
-async function ensurePanel(windowId) {
-  let pong = await pingPanel(windowId);
-  if (pong) return pong;
+async function tryOpenPanel(windowId) {
   // sidePanel.open normally needs a user gesture; best effort only.
   try {
     await chrome.sidePanel.open({ windowId });
   } catch {
     /* expected without a user gesture */
   }
+}
+
+async function ensurePanel(windowId) {
+  let pong = await pingPanel(windowId);
+  if (pong) return pong;
+  await tryOpenPanel(windowId);
   const deadline = Date.now() + PANEL_WAIT_MS;
   while (Date.now() < deadline) {
     await sleep(500);
@@ -84,6 +88,56 @@ async function ensurePanel(windowId) {
     if (pong) return pong;
   }
   return null;
+}
+
+function isWindowId(id) {
+  return Number.isInteger(id) && id >= 0;
+}
+
+async function pollPanels(windowId, deadline) {
+  const contexts = await chrome.runtime.getContexts?.({ contextTypes: ["SIDE_PANEL"] });
+  const contextIds = Array.isArray(contexts) ? contexts.map((context) => context?.windowId) : [];
+  const ids = new Set([windowId, ...contextIds].filter(isWindowId));
+  if (Date.now() < deadline && (!contextIds.length || !contextIds.every(isWindowId))) {
+    const windows = (await chrome.windows.getAll?.()) || [];
+    for (const { id } of windows) {
+      if (isWindowId(id)) ids.add(id);
+    }
+  }
+
+  let triedOpen = false;
+  while (Date.now() < deadline) {
+    let pong = null;
+    for (const id of ids) {
+      const reply = await pingPanel(id);
+      if (Date.now() >= deadline) return null;
+      if (!reply) continue;
+      if (pong) return { error: failure("AMBIGUOUS_PANEL", "多个窗口已打开侧栏，请指定目标标签。") };
+      pong = reply;
+    }
+    if (pong) return { pong };
+
+    if (!triedOpen && isWindowId(windowId)) {
+      triedOpen = true;
+      await tryOpenPanel(windowId);
+    }
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await sleep(Math.min(500, remaining));
+  }
+  return null;
+}
+
+async function discoverPanel(windowId) {
+  const deadline = Date.now() + PANEL_WAIT_MS;
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(resolve, PANEL_WAIT_MS, null);
+  });
+  try {
+    return await Promise.race([pollPanels(windowId, deadline), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function waitTabComplete(tabId) {
@@ -277,18 +331,15 @@ export async function startAgentPrompt(job, jobId, { auth = null } = {}) {
   const target = Number.isInteger(job.tabId) ? await chrome.tabs.get(job.tabId).catch(() => null) : null;
   const windowId = target?.windowId ?? (await chrome.windows.getLastFocused()).id;
   let pong = await pingPanel(windowId);
-  if (!pong && runtime === "panel" && job.tabId == null) {
-    // No integer tabId: look for an already-open side panel in another window first.
-    // tabUrlIncludes is still resolved by resolveTarget(job, pong.windowId) in that panel's window.
-    const contexts = await chrome.runtime.getContexts?.({ contextTypes: ["SIDE_PANEL"] });
-    let ids = [...new Set((contexts || []).map(context => context.windowId).filter(id => id >= 0))];
-    if (!ids.length) ids = (await chrome.windows.getAll?.() || []).map(window => window.id);
-    const replies = await Promise.all(ids.filter(id => id !== windowId).map(pingPanel));
-    const panels = replies.filter(Boolean);
-    if (panels.length > 1) return { done: failure("AMBIGUOUS_PANEL", "多个窗口已打开侧栏，请指定目标标签。") };
-    pong = panels[0];
+  if (!pong && runtime === "panel") {
+    if (job.tabId == null) {
+      const discovered = await discoverPanel(windowId);
+      if (discovered?.error) return { done: discovered.error };
+      pong = discovered?.pong;
+    } else {
+      pong = await ensurePanel(windowId);
+    }
   }
-  if (!pong && runtime === "panel") pong = await ensurePanel(windowId);
   if (!pong) {
     if (runtime === "auto") return startHeadless(job, jobId, prompt, settings, auth);
     return {

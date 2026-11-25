@@ -37,6 +37,7 @@ import {
 import { copyText, nativeInstallCommand, paintNativeHostStatus, refreshNativeHost } from "./native-host-ui.js";
 import { bindMessageScroll, bindSettingsPage, messageScroll, settingsPage } from "./panel-refs.js";
 import { initReviewView } from "./review-view.js";
+import { classifyAgentPrompt, continueAgentPrompt } from "./panel-bridge.js";
 import { abortAllSideChats, applySession, downloadText, persistSession, resolveWindowId, setView, startNewSession } from "./session.js";
 import { renderSettingsForm } from "./settings-form.js";
 import { createSettingsPage } from "./settings-page.js";
@@ -117,28 +118,43 @@ async function runExternalPrompt(id, prompt, signal) {
 
 function bindExternalPromptBridge() {
   let externalRun = null;
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (sender?.id !== chrome.runtime.id || state.windowId == null || msg?.windowId !== state.windowId) return false;
+  const reply = (msg, windowId, sendResponse) => {
     if (msg?.type === "pl.agentPrompt.ping") {
-      sendResponse({ ok: true, busy: state.busy || externalRun != null, windowId: state.windowId });
-      return false;
+      sendResponse({ ok: true, busy: state.busy || externalRun != null, windowId });
+      return true;
     }
     if (msg?.type === "pl.agentPrompt.run") {
       if (state.busy || externalRun != null) {
         sendResponse({ ok: false, code: "AGENT_BUSY", error: "侧栏 Agent 正在执行其他任务" });
-        return false;
+        return true;
       }
       sendResponse({ ok: true });
       externalRun = { id: String(msg.id), controller: new AbortController() };
       runExternalPrompt(externalRun.id, String(msg.prompt || ""), externalRun.controller.signal).finally(() => { externalRun = null; });
-      return false;
+      return true;
     }
     if (msg?.type === "pl.agentPrompt.cancel" && externalRun && externalRun.id === msg.id) {
       externalRun.controller.abort();
       sendResponse({ ok: true });
-      return false;
+      return true;
     }
     return false;
+  };
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    const route = classifyAgentPrompt(sender?.id, chrome.runtime.id, state.windowId, msg);
+    if (route === "ignore") return false;
+    if (route === "handle") {
+      reply(msg, state.windowId, sendResponse);
+      return false;
+    }
+    continueAgentPrompt(msg, {
+      resolveWindowId,
+      sendResponse,
+      onMatch(windowId) {
+        if (!reply(msg, windowId, sendResponse)) sendResponse(undefined);
+      },
+    });
+    return true;
   });
 }
 

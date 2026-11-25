@@ -116,8 +116,8 @@ Chrome 不允许扩展在没有用户手势时调用 `chrome.sidePanel.open()`�
 
 | `runtime` | 行为 |
 |---|---|
-| `auto`（默认） | 侧栏已打开 → 在侧栏会话里跑；没打开 → 改在 Service Worker 里后台跑 |
-| `panel` | 只用侧栏；没打开返回 `SIDEPANEL_NOT_OPEN`（旧行为） |
+| `auto`（默认） | 只 ping 优先窗口一次。有应答就使用该侧栏，否则在 Service Worker 里后台跑 |
+| `panel` | 指定 `tabId` 时只探测该标签所在窗口。否则先 ping 当前窗口，有应答就使用它，无应答则在约 6 秒的同一个预算内，按轮顺序 ping 候选窗口（含当前窗口）。`getContexts` 缺失、返回值不是数组、包含非整数或负数 `windowId`，或没有有效窗口 ID 时，合并 `chrome.windows.getAll()` 返回的有效窗口 ID。一轮恰好一个应答就使用该侧栏，多个应答立即返回 `AMBIGUOUS_PANEL`，即使提供了 `tabUrlIncludes` |
 | `headless` | 只在后台跑，即使侧栏开着也不占用它 |
 
 后台运行复用「委托任务」运行器（`lib/agent/delegate.js`），关掉侧栏、最小化窗口都不影响，只要 Chrome 进程在、扩展已启用、「启用文件 inbox」已开。它是**无人值守**的，和侧栏会话的差别：
@@ -151,7 +151,7 @@ Outbox：
 
 | errorCode | 含义 |
 |---|---|
-| `SIDEPANEL_NOT_OPEN` | 仅 `runtime:"panel"`：侧栏没打开。Chrome 不允许后台无手势拉起侧栏；去掉 `runtime`（默认 `auto`）即可后台运行 |
+| `SIDEPANEL_NOT_OPEN` | 仅 `runtime:"panel"` 在约 6 秒后仍未收到应答时返回。无 `tabId` 时，所有候选窗口共享这段发现时间。有 `tabId` 时，只等待该标签所在窗口。去掉 `runtime`（默认 `auto`）即可后台运行 |
 | `HEADLESS_UNAVAILABLE` | 后台运行环境未就绪（SW 刚重启 / 扩展需重载） |
 | `CONFIRMATION_REQUIRED` | 后台运行遇到不可逆动作，已进待批准队列（见 `result.pending`） |
 | `AGENT_BUSY` | 侧栏开着且 Agent 正在跑别的（如用户正在手动对话）。不会打断它；要避开这类冲突用 `runtime:"headless"` |
