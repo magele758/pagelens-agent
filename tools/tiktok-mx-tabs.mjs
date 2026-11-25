@@ -105,7 +105,8 @@ export class DraftTabs {
     }
     for (const id of ids) this.owned.delete(id);
     this.tabs.clear();
-    if (this.pendingForm != null) console.error("Unconfirmed draft: kept editor tab " + this.pendingForm);
-    else if (ids.length) console.error("PageLens group cleared (" + ids.length + " work tabs)");
+    // The extension closes its own automation window afterwards, including a lone editor tab, so never claim the editor stays open.
+    if (ids.length) console.error("PageLens group cleared (" + ids.length + " work tabs)");
+    if (this.pendingForm != null) console.error("Unconfirmed draft: editor tab " + this.pendingForm + " was not closed by the host");
   }
 }

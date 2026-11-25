@@ -1,5 +1,6 @@
 import { NATIVE_HOST_NAME } from "../../lib/native-host.js";
 import { runMxDraftRead } from "./tiktok-mx-editor.mjs";
+import { closeOwnedAutomation } from "./tiktok-mx-native.mjs";
 
 export async function inspectDraftJob(job, bridge) {
   const { sourceId, draftId } = job;
@@ -40,26 +41,10 @@ export async function inspectDraftJob(job, bridge) {
     clearTimeout(timer);
     port.disconnect();
     await read?.catch(() => {});
+    // Cleanup never throws: a close failure must not mask a successful read, and a read failure keeps its own error.
     if (tabId) {
-      const closed = await dispatch("close_tab", { tabId });
-      if (!closed.ok) throw Error(closed.error?.message || "Could not close inspection tab");
-    }
-    if (windowId != null) {
-      try {
-        const win = await chrome.windows?.get?.(windowId, { populate: true });
-        const tabs = win?.tabs || [];
-        const onlyAutomation = tabs.every(t => {
-          const u = String(t.url || t.pendingUrl || "");
-          return t.id === tabId || !u || u === "about:blank" || u.startsWith("chrome://newtab");
-        });
-        if (win && onlyAutomation) {
-          const groupedIds = tabs.filter(t => t.groupId != null && t.groupId >= 0).map(t => t.id);
-          if (groupedIds.length && typeof chrome.tabs?.ungroup === "function") {
-            await chrome.tabs.ungroup(groupedIds).catch(() => {});
-          }
-          await chrome.windows.remove(windowId).catch(() => {});
-        }
-      } catch {}
+      await closeOwnedAutomation({ ownedIds: new Set([tabId]), windowIds: windowId != null ? [windowId] : [],
+        closeTab: id => dispatch("close_tab", { tabId: id }) });
     }
   }
 }
