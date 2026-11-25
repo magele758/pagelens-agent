@@ -83,7 +83,10 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
     const feed = document.getElementById("msgs");
     if (!feed) return;
     attached = true;
-    if (!article.isConnected) feed.append(article);
+    if (!article.isConnected) {
+      feed.querySelectorAll(":scope > .empty, :scope > .big-actions").forEach(node => node.remove());
+      feed.append(article);
+    }
     if (scroll) article.scrollIntoView?.({ block: "end" });
   }
 
@@ -132,6 +135,18 @@ export function bindDailyOperations({ getTargetTab, onBack } = {}) {
     if (attached && state) renderDailyChat(article, state, {
       onOpen: openSource,
       onRetry: plan => void run(plan, state.dates || dates()),
+      onSummarize: async event => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+          state = await send("pl.daily.report", { startedAt: state.startedAt });
+          renderReport();
+        } catch (error) {
+          const status = article.querySelector("[data-daily-action-status]");
+          if (status) status.textContent = error.message;
+          if (button.isConnected) button.disabled = false;
+        }
+      },
     });
     updateControls();
   }

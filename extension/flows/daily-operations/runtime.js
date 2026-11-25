@@ -175,6 +175,23 @@ function collectDaily(request) {
   return running;
 }
 
+async function retryDailyReport(startedAt) {
+  const stored = await chrome.storage.local.get(dailyStateKey);
+  const state = stored[dailyStateKey];
+  if (!state?.plan || state.startedAt !== startedAt || state.running) throw new Error("请刷新并打开最新报告。");
+  const save = () => chrome.storage.local.set({ [dailyStateKey]: state });
+  state.running = true;
+  state.phase = "report";
+  await save();
+  try {
+    state.report = await summarizeDailyRun(state);
+  } finally {
+    state.running = false;
+    await save();
+  }
+  return state;
+}
+
 async function executeDaily({ source = "all", selection, startDay, endDay, windowId }) {
   if (source !== "all" && !Object.hasOwn(dailySources, source)) throw new Error("未知的每日运营来源。");
   const stored = await chrome.storage.local.get([dailyHistoryKey, dailySelectionKey]);
@@ -273,6 +290,11 @@ export function onDailyAlarm(alarm) {
 
 export async function handleDailyMessage(message) {
   if (message.type === "pl.daily.run") return await collectDaily(message);
+  if (message.type === "pl.daily.report") {
+    if (running) throw new Error("已经有一个每日运营流程在运行。");
+    running = retryDailyReport(message.startedAt).finally(() => { running = undefined; });
+    return await running;
+  }
   if (message.type === "pl.daily.open") return await openDailyShortcut(message);
   if (message.type !== "pl.daily.schedule" || typeof message.enabled !== "boolean" ||
       !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(message.time)) throw new Error("请输入有效的每日执行时间。");

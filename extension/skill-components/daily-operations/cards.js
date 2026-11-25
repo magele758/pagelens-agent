@@ -82,7 +82,7 @@ function countText(last) {
   return last.added > 0 ? `发现 ${last.added} 条新增 · 共 ${last.count} 条` : `读取 ${last.count} 条 · 无新增`;
 }
 
-export function renderDailyChat(article, state, { onOpen, onRetry }) {
+export function renderDailyChat(article, state, { onOpen, onRetry, onSummarize }) {
   const header = element("header", undefined, "daily-chat-header");
   header.append(element("h3", "每日运营数据"),
     element("span", state.running ? "进行中" : state.interrupted ? "已中断" : "已完成", "daily-chat-state"));
@@ -168,6 +168,9 @@ export function renderDailyChat(article, state, { onOpen, onRetry }) {
     body.append(summary);
   } else if (state.report?.note || state.interrupted) {
     body.append(element("p", state.report?.note || "本次采集中断，可以开始新的采集。", "daily-hint"));
+    if (state.report?.note && groups.some(([, result]) => result.sections.length)) {
+      body.append(button("重试 AI 摘要", onSummarize));
+    }
   }
   if (issues.childElementCount) body.append(element("h4", "需要关注"), issues);
   if (detail.childElementCount > 1) body.append(detail);

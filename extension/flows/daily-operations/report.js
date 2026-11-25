@@ -1,5 +1,5 @@
 import { dailySources } from "./catalog.js";
-import { completeChat } from "../../lib/openai.js";
+import { streamChat } from "../../lib/openai.js";
 import { isModelReady, loadSettings, resolveModel } from "../../lib/storage.js";
 
 export function dailyReportData(state) {
@@ -28,15 +28,24 @@ export async function summarizeDailyRun(state) {
   try {
     const model = resolveModel(await loadSettings(), "text");
     if (!isModelReady(model)) return { note: "配置文本模型后，可生成 AI 摘要。" };
-    const text = await completeChat(model, {
-      maxTokens: 600, signal: AbortSignal.timeout(40000),
+    const stats = dailyReportData(state);
+    const empty = stats.filter(row => row.status === "已核对" && row.count === 0 && !(row.previousDelta || row.yesterdayDelta));
+    const facts = stats.filter(row => !empty.includes(row)).map(row =>
+      [row.platform, row.module, row.section, row.status, row.count, row.added, row.updated, row.previousDelta, row.yesterdayDelta]);
+    const text = await streamChat(model, {
+      temperature: 0.1, lowLatency: true, signal: AbortSignal.timeout(60000),
       messages: [
-        { role: "system", content: "为跨境运营人员用简体中文生成简短报告。给出最多三条需要关注的事实或下一步建议，优先关注待处理、待回复、违规、资金限制和采集失败。各状态可能重叠，不能将其相加当作订单总量。区分总数和新增，null 代表没有基线或未读取，部分读取不能代表总量。不要虚构内容、日期、身份或原因。输出纯文本，每条一行，不加标题。" },
-        { role: "user", content: JSON.stringify(dailyReportData(state)) },
+        { role: "system", content: "用简体中文给跨境运营人员列出最多三条需要关注的事实或建议，优先待处理、待回复、违规、资金限制和采集失败。每条一行，纯文本。状态可能重叠，不能相加当作总量。区分总数和新增。null 表示无基线或未读取，部分读取不是总量。只依据给定事实。" },
+        { role: "user", content: JSON.stringify({
+          列: ["平台", "模块", "页签", "状态", "条数", "新增", "更新", "较上次", "较昨日"],
+          结果: facts, 已核对无记录的页签: empty.map(row => [row.platform, row.module, row.section].join("›")),
+        }) },
       ],
-    });
+    }, () => {});
     return text?.trim() ? { text: text.trim().slice(0, 1800) } : { note: "模型没有返回摘要。" };
-  } catch {
-    return { note: "模型暂时不可用，采集结果可继续查看。" };
+  } catch (error) {
+    const status = error.message?.match(/^[45]\d\d\b/u)?.[0];
+    const note = error.name === "TimeoutError" ? "模型响应超时。" : status ? `模型请求失败（${status}）。` : "无法连接当前模型。";
+    return { note };
   }
 }
