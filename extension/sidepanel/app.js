@@ -39,7 +39,7 @@ import { bindMessageScroll, bindSettingsPage, messageScroll, settingsPage } from
 import { initReviewView } from "./review-view.js";
 import { classifyAgentPrompt, continueAgentPrompt } from "./panel-bridge.js";
 import { abortAllSideChats, applySession, downloadText, persistSession, resolveWindowId, setView, startNewSession } from "./session.js";
-import { renderSettingsForm } from "./settings-form.js";
+import { renderMultimodalFields, renderSettingsForm } from "./settings-form.js";
 import { createSettingsPage } from "./settings-page.js";
 import { initSideChat } from "./sidechat-ui.js";
 import { applyFolderPathsFromInputs, paintSkillFolderStatus } from "./skill-folder-ui.js";
@@ -87,6 +87,11 @@ import {
   normalizeSettings,
   resolveModel,
 } from "../lib/storage.js";
+import {
+  hasCustomMultimodal,
+  multimodalSlotFromRef,
+  pickSuggestedMultimodalRef,
+} from "../lib/text-providers.js";
 
 const NEW_WINDOW_HINT = "这是新任务窗口，这里的对话与原窗口分开保存。";
 
@@ -185,6 +190,38 @@ function wire() {
       const select = $("text-model-pick");
       select.value = value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+    onMultimodalChange: async (value) => {
+      const raw = String(value || "");
+      if (raw === "__custom__") {
+        state.settings.multimodalRef = null;
+        renderMultimodalFields();
+        if ($("mm-fields")) $("mm-fields").hidden = Boolean(state.settings.multimodalSameAsText);
+        renderModelLine();
+        return;
+      }
+      const sep = raw.indexOf("::");
+      if (sep < 0) return;
+      const picked = { providerId: raw.slice(0, sep), modelId: raw.slice(sep + 2) };
+      state.settings.multimodalSameAsText = false;
+      state.settings.multimodalRef = picked;
+      const slot = multimodalSlotFromRef(state.settings.textProviders, picked, state.settings.multimodal);
+      if (slot) state.settings.multimodal = slot;
+      if ($("mm-same")) $("mm-same").checked = false;
+      if ($("mm-fields")) $("mm-fields").hidden = true;
+      try {
+        const saved = await modifySettings((latest) => ({
+          ...latest,
+          multimodalSameAsText: false,
+          multimodalRef: picked,
+        }));
+        state.settings.multimodalSameAsText = saved.multimodalSameAsText;
+        state.settings.multimodalRef = saved.multimodalRef;
+        state.settings.multimodal = saved.multimodal;
+      } catch {
+        /* keep local selection */
+      }
+      renderModelLine();
     },
   }));
   if (!messageScroll) bindMessageScroll(createMessageScroll($("msgs"), $("btn-messages-bottom")));
@@ -503,6 +540,7 @@ function wire() {
         answerLanguage: state.settings.answerLanguage,
         uiFont: state.settings.uiFont,
         multimodalSameAsText: state.settings.multimodalSameAsText,
+        multimodalRef: state.settings.multimodalRef,
         multimodal: state.settings.multimodal,
         jev: state.settings.jev,
         nativeShell: state.settings.nativeShell,
@@ -528,6 +566,7 @@ function wire() {
         answerLanguage: form.answerLanguage,
         uiFont: form.uiFont,
         multimodalSameAsText: form.multimodalSameAsText,
+        multimodalRef: form.multimodalRef,
         multimodal: form.multimodal,
         jev: form.jev,
         nativeShell: form.nativeShell,
@@ -587,9 +626,32 @@ function wire() {
     status.textContent = res.message;
     status.className = res.ok ? "status ok" : "status bad";
   });
-  on("mm-same", "change", (e) => {
-    state.settings.multimodalSameAsText = e.target.checked;
-    $("mm-fields").hidden = e.target.checked;
+  on("mm-same", "change", async (e) => {
+    const same = e.target.checked;
+    state.settings.multimodalSameAsText = same;
+    if (!same && !state.settings.multimodalRef && !hasCustomMultimodal(state.settings.multimodal)) {
+      const suggested = pickSuggestedMultimodalRef(state.settings.textProviders, state.settings.textRef);
+      if (suggested) {
+        state.settings.multimodalRef = suggested;
+        const slot = multimodalSlotFromRef(state.settings.textProviders, suggested, state.settings.multimodal);
+        if (slot) state.settings.multimodal = slot;
+      }
+    }
+    const nextRef = state.settings.multimodalRef;
+    renderModelLine();
+    try {
+      const saved = await modifySettings((latest) => ({
+        ...latest,
+        multimodalSameAsText: same,
+        multimodalRef: nextRef,
+      }));
+      state.settings.multimodalSameAsText = saved.multimodalSameAsText;
+      state.settings.multimodalRef = saved.multimodalRef;
+      state.settings.multimodal = saved.multimodal;
+      renderModelLine();
+    } catch {
+      /* keep local selection */
+    }
   });
   on("answer-lang", "change", (e) => {
     state.settings.answerLanguage = e.target.value;

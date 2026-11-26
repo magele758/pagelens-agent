@@ -1,7 +1,9 @@
-import { enabledModelOptions } from "../lib/text-providers.js";
+import { enabledModelOptions, hasCustomMultimodal } from "../lib/text-providers.js";
 import { isCookieProxyModel } from "../lib/cookie-proxy.js";
 import { isModelReady } from "../lib/storage.js";
 import { normalizeJevSettings, isJevConfigured, testJevConnection } from "../lib/jev.js";
+
+const CUSTOM_MULTIMODAL_VALUE = "__custom__";
 
 const SETTINGS_DISCLOSURE_PREFIX = "pagelens.settingsDisclosure.";
 
@@ -20,7 +22,7 @@ function rememberDisclosures(root) {
 }
 
 /** Grouping is presentational: never recreate forms when switching tabs. */
-export function createSettingsPage({ root, getSettings, onModelChange }) {
+export function createSettingsPage({ root, getSettings, onModelChange, onMultimodalChange }) {
   const find = (id) => root.querySelector(`#${id}`);
   const tabs = [...root.querySelectorAll("[data-settings-tab]")];
   const scroll = find("settings-scroll");
@@ -28,6 +30,7 @@ export function createSettingsPage({ root, getSettings, onModelChange }) {
   const positions = { basic: 0, advanced: 0 };
   let active = "basic";
   let modelPreviouslyAvailable;
+  let customMultimodal = false;
   const setText = (id, text) => { find(id).textContent = text; };
 
   function showTab(name, focus = false) {
@@ -95,11 +98,43 @@ export function createSettingsPage({ root, getSettings, onModelChange }) {
         : "尚未配置模型服务";
     }
 
+    const mmSelect = find("settings-mm-model");
+    const mmField = find("mm-model-field");
+    const mmFields = find("mm-fields");
+    if (mmSelect) {
+      const ref = settings.multimodalRef;
+      const refKey = ref?.providerId && ref?.modelId ? `${ref.providerId}::${ref.modelId}` : "";
+      const hasRefOption = Boolean(refKey && options.some((o) => `${o.providerId}::${o.modelId}` === refKey));
+      if (hasRefOption) customMultimodal = false;
+      const showCustom = customMultimodal || (!hasRefOption && hasCustomMultimodal(settings.multimodal));
+      mmSelect.replaceChildren();
+      if (!options.length) {
+        const placeholder = new Option("请先在上方添加服务商和模型", "");
+        placeholder.disabled = true;
+        mmSelect.append(placeholder);
+      } else if (!hasRefOption && !showCustom) {
+        const placeholder = new Option("请选择已配置的模型", "");
+        placeholder.disabled = true;
+        mmSelect.append(placeholder);
+      }
+      for (const option of options) {
+        mmSelect.append(new Option(`${option.providerName} · ${option.modelId}`, `${option.providerId}::${option.modelId}`));
+      }
+      mmSelect.append(new Option("独立连接配置（手动填写）", CUSTOM_MULTIMODAL_VALUE));
+      if (hasRefOption) mmSelect.value = refKey;
+      else if (showCustom) mmSelect.value = CUSTOM_MULTIMODAL_VALUE;
+      else mmSelect.value = "";
+      const sameAsText = Boolean(settings.multimodalSameAsText);
+      if (mmField) mmField.hidden = sameAsText;
+      if (mmFields) mmFields.hidden = sameAsText || mmSelect.value !== CUSTOM_MULTIMODAL_VALUE;
+    }
+
     refreshSummary();
   }
 
   function render() {
     const settings = getSettings();
+    customMultimodal = !settings.multimodalRef && hasCustomMultimodal(settings.multimodal);
     const jev = normalizeJevSettings(settings.jev);
     find("jev-enabled").checked = jev.enabled;
     find("jev-model").value = jev.model;
@@ -121,6 +156,10 @@ export function createSettingsPage({ root, getSettings, onModelChange }) {
     button.addEventListener("click", () => reveal(button.dataset.settingsLink));
   });
   find("settings-text-model").addEventListener("change", (event) => onModelChange(event.target.value));
+  find("settings-mm-model")?.addEventListener("change", (event) => {
+    customMultimodal = event.target.value === CUSTOM_MULTIMODAL_VALUE;
+    onMultimodalChange?.(event.target.value);
+  });
 
   function writeJev() {
     const settings = getSettings();

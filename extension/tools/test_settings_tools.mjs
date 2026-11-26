@@ -237,4 +237,19 @@ assert(!maskSecret(SECRET).includes(SECRET.slice(0, 10)), "mask hides the key bo
   assert(/已保存并生效/.test(out));
 }
 
+// multimodalModel selects from configured providers and manual multimodal.* clears multimodalRef.
+{
+  const store = makeStore();
+  const t = tool(createSettingsTools(store.ctx()), "update_settings");
+  let out = await t.execute({ changes: [{ key: "multimodalModel", value: "p1::m-b" }] });
+  assert.deepEqual(store.stored.multimodalRef, { providerId: "p1", modelId: "m-b" });
+  assert.equal(store.stored.multimodal.model, "m-b");
+  assert.equal(store.stored.multimodal.baseUrl, "https://one.example/v1");
+  assert(/已保存并生效/.test(out));
+
+  out = await t.execute({ changes: [{ key: "multimodal.model", value: "manual-vl" }] });
+  assert.equal(store.stored.multimodalRef, null, "manual multimodal override detaches multimodalRef");
+  assert.equal(store.stored.multimodal.model, "manual-vl");
+}
+
 console.log("test_settings_tools: ok");

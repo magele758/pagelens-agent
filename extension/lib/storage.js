@@ -1,5 +1,5 @@
 import { normalizeUiTheme, normalizeThemeColors } from "./ui-theme.js";
-import { hydrateTextCatalog } from "./text-providers.js";
+import { hydrateTextCatalog, multimodalSlotFromRef, pickMultimodalRef } from "./text-providers.js";
 import { normalizeJevSettings } from "./jev.js";
 import { normalizeBridgeSettings } from "./bridge/policy.js";
 import { defaultIrreversibleActions, normalizeIrreversibleActions } from "./agent/trust/irreversible.js";
@@ -117,6 +117,7 @@ export function defaultSettings() {
     shortcuts: [],
     textProviders: [],
     textRef: null,
+    multimodalRef: null,
   };
 }
 
@@ -135,13 +136,18 @@ export function normalizeSettings(raw) {
   // catalog.text already copied prev fields and stripped cookie keys for api-key providers.
   merged.text = catalog.text;
   merged.text.summaryInputTokens = normalizeSummaryInputTokens(merged.text.summaryInputTokens);
-  merged.multimodal = { ...base.multimodal, ...(raw?.multimodal || {}) };
-  if (normalizeAuthMode(raw?.multimodal?.authMode) === "cookie-proxy") {
-    merged.multimodal.authMode = "cookie-proxy";
-    merged.multimodal.cookieUrl = String(raw?.multimodal?.cookieUrl || "").trim();
+  merged.multimodalRef = pickMultimodalRef(merged.textProviders, raw?.multimodalRef);
+  if (merged.multimodalRef) {
+    merged.multimodal = multimodalSlotFromRef(merged.textProviders, merged.multimodalRef, raw?.multimodal) || emptyModel();
   } else {
-    delete merged.multimodal.authMode;
-    delete merged.multimodal.cookieUrl;
+    merged.multimodal = { ...base.multimodal, ...(raw?.multimodal || {}) };
+    if (normalizeAuthMode(raw?.multimodal?.authMode) === "cookie-proxy") {
+      merged.multimodal.authMode = "cookie-proxy";
+      merged.multimodal.cookieUrl = String(raw?.multimodal?.cookieUrl || "").trim();
+    } else {
+      delete merged.multimodal.authMode;
+      delete merged.multimodal.cookieUrl;
+    }
   }
   merged.asr = { ...base.asr, ...(raw?.asr || {}) };
   merged.tts = { ...base.tts, ...(raw?.tts || {}) };
@@ -262,6 +268,10 @@ export async function saveSettings(settings) {
 export function resolveModel(settings, kind) {
   if (kind === "multimodal" && settings.multimodalSameAsText) {
     return settings.text;
+  }
+  if (kind === "multimodal" && settings?.multimodalRef) {
+    const slot = multimodalSlotFromRef(settings.textProviders, settings.multimodalRef, settings.multimodal);
+    if (slot) return slot;
   }
   return kind === "multimodal" ? settings.multimodal : settings.text;
 }
