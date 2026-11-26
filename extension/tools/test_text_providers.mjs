@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
-import { PRESETS, isModelReady, normalizeSettings } from "../lib/storage.js";
+import { readFile } from "node:fs/promises";
+import { JSDOM } from "jsdom";
+import { PRESETS, isModelReady, normalizeSettings, resolveModel } from "../lib/storage.js";
+import { createSettingsPage } from "../sidepanel/settings-page.js";
 import {
   addProviderModel,
   enabledModelOptions,
+  hasCustomMultimodal,
   hydrateTextCatalog,
   mergeScannedModels,
   modelsUrl,
+  multimodalSlotFromRef,
   normalizeProvider,
   parseRemoteModelList,
   pickDefaultRef,
+  pickMultimodalRef,
+  pickSuggestedMultimodalRef,
   providerFromLegacyText,
   invertProviderModelsEnabled,
   setAllProviderModelsEnabled,
@@ -205,5 +212,148 @@ assert.equal(Object.hasOwn(switched.text, "authMode"), false);
 assert.equal(Object.hasOwn(switched.text, "cookieUrl"), false);
 assert.equal(Object.hasOwn(switched.multimodal, "authMode"), false);
 assert.equal(Object.hasOwn(switched.multimodal, "cookieUrl"), false);
+
+// Provider-backed multimodal selection (multimodalRef)
+const proxyCatalog = [
+  normalizeProvider({
+    id: "proxy-p1",
+    name: "ai-agent-node",
+    preset: "ai-agent-node",
+    authMode: "cookie-proxy",
+    baseUrl: "http://127.0.0.1:8811/api/model-proxy/v1",
+    cookieUrl: "https://tango.example.com",
+    apiKey: "",
+    models: [
+      { id: "deepseek-v4-flash", enabled: true },
+      { id: "kimi-k3", enabled: true },
+      { id: "disabled-vl", enabled: false },
+    ],
+  }),
+  apiKeyProvider,
+];
+
+assert.deepEqual(
+  pickSuggestedMultimodalRef(proxyCatalog, { providerId: "proxy-p1", modelId: "deepseek-v4-flash" }),
+  { providerId: "proxy-p1", modelId: "kimi-k3" },
+  "suggests a vision-capable model when unchecking multimodalSameAsText",
+);
+assert.deepEqual(
+  pickMultimodalRef(proxyCatalog, { providerId: "proxy-p1", modelId: "kimi-k3" }),
+  { providerId: "proxy-p1", modelId: "kimi-k3" },
+);
+assert.equal(pickMultimodalRef(proxyCatalog, { providerId: "proxy-p1", modelId: "disabled-vl" }), null);
+assert.equal(hasCustomMultimodal({ baseUrl: "", model: "", apiKey: "" }), false);
+assert.equal(hasCustomMultimodal({ baseUrl: "https://v.example/v1", model: "" }), true);
+
+const mmBound = normalizeSettings({
+  textProviders: proxyCatalog,
+  textRef: { providerId: "proxy-p1", modelId: "deepseek-v4-flash" },
+  multimodalSameAsText: false,
+  multimodalRef: { providerId: "proxy-p1", modelId: "kimi-k3" },
+});
+assert.deepEqual(mmBound.multimodalRef, { providerId: "proxy-p1", modelId: "kimi-k3" });
+assert.equal(mmBound.multimodal.model, "kimi-k3");
+assert.equal(mmBound.multimodal.baseUrl, "http://127.0.0.1:8811/api/model-proxy/v1");
+assert.equal(mmBound.multimodal.authMode, "cookie-proxy");
+assert.equal(mmBound.multimodal.cookieUrl, "https://tango.example.com");
+assert.equal(resolveModel(mmBound, "multimodal").model, "kimi-k3");
+assert.equal(resolveModel({ ...mmBound, multimodalSameAsText: true }, "multimodal").model, "deepseek-v4-flash");
+
+const mmSwitchedToApiKey = normalizeSettings({
+  ...mmBound,
+  multimodalRef: { providerId: "openai-key", modelId: "gpt-4o-mini" },
+});
+assert.equal(mmSwitchedToApiKey.multimodal.model, "gpt-4o-mini");
+assert.equal(mmSwitchedToApiKey.multimodal.apiKey, "sk-x");
+assert.equal(Object.hasOwn(mmSwitchedToApiKey.multimodal, "authMode"), false);
+assert.equal(Object.hasOwn(mmSwitchedToApiKey.multimodal, "cookieUrl"), false);
+
+const mmProviderUpdated = normalizeSettings({
+  ...mmBound,
+  textProviders: [
+    { ...proxyCatalog[0], cookieUrl: "https://tango-new.example.com" },
+    apiKeyProvider,
+  ],
+});
+assert.equal(mmProviderUpdated.multimodal.cookieUrl, "https://tango-new.example.com", "multimodal stays synced with provider edits");
+
+const mmProviderDeleted = normalizeSettings({
+  ...mmBound,
+  textProviders: [apiKeyProvider],
+});
+assert.equal(mmProviderDeleted.multimodalRef, null, "deleting referenced provider clears multimodalRef");
+
+assert.equal(multimodalSlotFromRef(proxyCatalog, { providerId: "missing", modelId: "x" }), null);
+
+// Settings page UI: multimodal model dropdown hides manual #mm-fields unless __custom__ is selected
+{
+  const html = await readFile(new URL("../sidepanel/index.html", import.meta.url), "utf8");
+  const dom = new JSDOM(html, { url: "https://fixture.invalid/" });
+  const prevDoc = globalThis.document;
+  const prevOption = globalThis.Option;
+  const prevStorage = globalThis.localStorage;
+  globalThis.document = dom.window.document;
+  globalThis.Option = dom.window.Option;
+  globalThis.localStorage = dom.window.localStorage;
+  try {
+    const root = dom.window.document.getElementById("view-settings");
+    let currentSettings = structuredClone(mmBound);
+    const changes = [];
+    const page = createSettingsPage({
+      root,
+      getSettings: () => currentSettings,
+      onModelChange() {},
+      onMultimodalChange(value) {
+        changes.push(value);
+        if (value === "__custom__") {
+          currentSettings = { ...currentSettings, multimodalRef: null };
+        } else if (value.includes("::")) {
+          const [providerId, modelId] = value.split("::");
+          currentSettings = normalizeSettings({ ...currentSettings, multimodalRef: { providerId, modelId } });
+        }
+        page.refreshModels();
+      },
+    });
+    const mmField = root.querySelector("#mm-model-field");
+    const mmSelect = root.querySelector("#settings-mm-model");
+    const mmFields = root.querySelector("#mm-fields");
+    assert.equal(mmField.hidden, false);
+    assert.equal(mmSelect.value, "proxy-p1::kimi-k3");
+    assert.equal(mmFields.hidden, true, "manual multimodal form stays hidden when picking from configured providers");
+    assert.ok([...mmSelect.options].some((o) => o.value === "proxy-p1::deepseek-v4-flash"));
+    assert.ok([...mmSelect.options].some((o) => o.value === "__custom__"));
+
+    mmSelect.value = "__custom__";
+    mmSelect.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    assert.deepEqual(changes, ["__custom__"]);
+    assert.equal(mmFields.hidden, false, "manual multimodal form appears when switching to custom mode");
+
+    mmSelect.value = "openai-key::gpt-4o-mini";
+    mmSelect.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    assert.equal(mmSelect.value, "openai-key::gpt-4o-mini");
+    assert.equal(mmFields.hidden, true, "manual form hides again after selecting a provider model");
+
+    currentSettings = { ...currentSettings, multimodalSameAsText: true };
+    page.refreshModels();
+    assert.equal(mmField.hidden, true);
+    assert.equal(mmFields.hidden, true);
+
+    currentSettings = normalizeSettings({
+      textProviders: proxyCatalog,
+      multimodalSameAsText: false,
+      multimodalRef: null,
+      multimodal: { preset: "custom", baseUrl: "https://legacy.example/v1", model: "legacy-vl", apiKey: "k" },
+    });
+    page.render();
+    assert.equal(mmField.hidden, false);
+    assert.equal(mmSelect.value, "__custom__", "legacy standalone multimodal stays selected as custom");
+    assert.equal(mmFields.hidden, false);
+  } finally {
+    globalThis.document = prevDoc;
+    globalThis.Option = prevOption;
+    globalThis.localStorage = prevStorage;
+    dom.window.close();
+  }
+}
 
 console.log("PASS text-providers");

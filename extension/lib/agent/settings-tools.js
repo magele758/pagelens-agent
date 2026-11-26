@@ -17,6 +17,7 @@ export const AGENT_SETTINGS_SCHEMA = [
   { key: "textModel", label: "对话模型（providerId::modelId 或模型名）", type: "textModel" },
   { key: "text.summaryInputTokens", label: "总结输入上限（token）", type: "number", min: 1000, max: 2000000, integer: true },
   { key: "multimodalSameAsText", label: "多模态与对话模型相同", type: "boolean" },
+  { key: "multimodalModel", label: "图片理解模型（providerId::modelId 或模型名）", type: "textModel" },
   { key: "multimodal.model", label: "多模态模型名", type: "string", max: 200 },
   { key: "multimodal.baseUrl", label: "多模态服务地址", type: "url", sensitive: true },
   { key: "multimodal.apiKey", label: "多模态 API Key", type: "string", secret: true, sensitive: true },
@@ -84,13 +85,13 @@ function writePath(obj, key, value) {
   cur[parts[parts.length - 1]] = value;
 }
 
-function textModelValue(settings) {
-  const ref = settings?.textRef;
+function modelRefValue(ref) {
   return ref?.providerId && ref?.modelId ? `${ref.providerId}::${ref.modelId}` : "";
 }
 
 function currentValue(settings, field) {
-  if (field.type === "textModel") return textModelValue(settings);
+  if (field.key === "textModel") return modelRefValue(settings?.textRef);
+  if (field.key === "multimodalModel") return modelRefValue(settings?.multimodalRef);
   return readPath(settings, field.key);
 }
 
@@ -211,10 +212,14 @@ export function planSettingsChange(current, changes) {
     }
     const before = currentValue(base, field);
     if (sameValue(before, res.value)) continue;
-    if (field.type === "textModel") {
+    if (field.key === "textModel") {
       const sep = res.value.indexOf("::");
       next.textRef = { providerId: res.value.slice(0, sep), modelId: res.value.slice(sep + 2) };
+    } else if (field.key === "multimodalModel") {
+      const sep = res.value.indexOf("::");
+      next.multimodalRef = { providerId: res.value.slice(0, sep), modelId: res.value.slice(sep + 2) };
     } else {
+      if (key.startsWith("multimodal.")) next.multimodalRef = null;
       writePath(next, key, res.value);
     }
     diff.push({

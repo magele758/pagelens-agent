@@ -178,6 +178,56 @@ export function pickDefaultRef(providers, preferred) {
   return first ? { providerId: first.providerId, modelId: first.modelId } : null;
 }
 
+const VISION_MODEL_HINT = /(?:^|[/:._-])(vl|vision|omni|kimi-k3|gpt-4o|gpt-4\.1|gpt-5|claude-3|claude-4|gemini|qwen[\d.]*-?max|multimodal)/i;
+
+export function pickMultimodalRef(providers, preferred) {
+  const parsed = parseModelRef(preferred);
+  if (!parsed) return null;
+  const matched = (providers || []).some(
+    (p) => p.id === parsed.providerId && (p.models || []).some((m) => m.id === parsed.modelId && m.enabled),
+  );
+  return matched ? parsed : null;
+}
+
+export function pickSuggestedMultimodalRef(providers, textRef = null) {
+  const options = enabledModelOptions(providers);
+  if (!options.length) return null;
+  const vision = options.find((opt) => VISION_MODEL_HINT.test(opt.modelId));
+  if (vision) return { providerId: vision.providerId, modelId: vision.modelId };
+  const parsedText = parseModelRef(textRef);
+  if (parsedText && options.some((opt) => opt.providerId === parsedText.providerId && opt.modelId === parsedText.modelId)) {
+    return parsedText;
+  }
+  return { providerId: options[0].providerId, modelId: options[0].modelId };
+}
+
+export function hasCustomMultimodal(multimodal) {
+  if (!multimodal || typeof multimodal !== "object") return false;
+  return Boolean(
+    String(multimodal.baseUrl || "").trim()
+    || String(multimodal.model || "").trim()
+    || String(multimodal.apiKey || "").trim()
+    || String(multimodal.cookieUrl || "").trim(),
+  );
+}
+
+export function multimodalSlotFromRef(providers, ref, prevMultimodal = {}) {
+  const parsed = parseModelRef(ref);
+  const provider = parsed ? (providers || []).find((p) => p.id === parsed.providerId) : null;
+  if (!provider) return null;
+  const out = {
+    preset: provider.preset || prevMultimodal.preset || "custom",
+    baseUrl: provider.baseUrl || "",
+    model: parsed.modelId,
+    apiKey: provider.apiKey || "",
+  };
+  if (isCookieProxyModel(provider)) {
+    out.authMode = "cookie-proxy";
+    out.cookieUrl = String(provider.cookieUrl || "").trim();
+  }
+  return out;
+}
+
 export function textSlotFromRef(providers, ref, prevText = {}) {
   const provider = (providers || []).find((p) => p.id === ref?.providerId);
   const out = {

@@ -34,11 +34,18 @@ function renderIrreversibleList() {
   );
 }
 
+function renderMultimodalFields() {
+  const box = $("mm-fields");
+  if (!box) return;
+  box.innerHTML = fieldBlock("multimodal", state.settings.multimodal);
+  bindSettingFields();
+}
+
 function renderSettingsForm() {
   renderTextProviders();
   $("mm-same").checked = state.settings.multimodalSameAsText;
   $("mm-fields").innerHTML = fieldBlock("multimodal", state.settings.multimodal);
-  $("mm-fields").hidden = state.settings.multimodalSameAsText;
+  $("mm-fields").hidden = state.settings.multimodalSameAsText || Boolean(state.settings.multimodalRef);
   $("answer-lang").value = state.settings.answerLanguage;
   $("ui-font").value = state.settings.uiFont || "md";
   applyUiTheme(state.settings.uiTheme, state.settings.uiThemeColors);
@@ -99,6 +106,7 @@ function writeField(el) {
   const [group, key] = el.dataset.k.split(".");
   const prevPreset = state.settings[group]?.preset;
   if (!state.settings[group]) state.settings[group] = {};
+  if (group === "multimodal") state.settings.multimodalRef = null;
   if (key === "durationFactor") state.settings[group][key] = Number(el.value) || 1;
   else if (key === "summaryInputTokens") state.settings[group][key] = Number(el.value) || 200000;
   else if (key === "bufferSegments" || key === "bufferSeconds") state.settings[group][key] = Number(el.value) || 5;
@@ -170,6 +178,7 @@ async function runTest(group) {
 
 export {
   renderIrreversibleList,
+  renderMultimodalFields,
   renderSettingsForm,
   bindSettingFields,
   writeField,

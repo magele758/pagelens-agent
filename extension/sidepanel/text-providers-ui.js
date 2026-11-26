@@ -195,6 +195,8 @@ function persistTextCatalog(baseRef = state.settings.textRef ? { ...state.settin
     state.settings.textProviders = saved.textProviders;
     state.settings.textRef = saved.textRef;
     state.settings.text = saved.text;
+    state.settings.multimodalRef = saved.multimodalRef;
+    state.settings.multimodal = saved.multimodal;
     state.settings.agentBridgeOrigins = saved.agentBridgeOrigins;
     renderTextProviders();
     renderModelLine();
