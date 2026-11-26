@@ -52,6 +52,7 @@ const INSTALL_API = [
   "alarms",
   "contextMenus",
   "debugger",
+  "declarativeNetRequestWithHostAccess",
   "offscreen",
   "scripting",
   "sidePanel",
@@ -93,6 +94,8 @@ assert.deepEqual(manifest.optional_permissions || [], []);
 assert.deepEqual([...(manifest.host_permissions || [])].sort(), [...PREVIOUS_HOSTS].sort());
 assert.deepEqual(manifest.optional_host_permissions || [], []);
 assert.equal(manifest.permissions.includes("cookies"), true, "cookies is granted at install");
+assert.equal(manifest.permissions.includes("declarativeNetRequestWithHostAccess"), true, "declarativeNetRequestWithHostAccess is granted at install");
+assert.equal((manifest.optional_permissions || []).includes("declarativeNetRequestWithHostAccess"), false);
 assert.equal(manifest.permissions.includes("nativeMessaging"), true, "native messaging is granted at install");
 assert.equal(manifest.permissions.includes("debugger"), true, "Chrome cannot make debugger optional");
 assert.equal((manifest.optional_permissions || []).includes("debugger"), false);

@@ -1,9 +1,12 @@
+import { isCookieProxyModel, normalizeAuthMode } from "./cookie-proxy.js";
+
 export function newProviderId() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
   return `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function suggestProviderName(baseUrl, preset) {
+  if (String(preset || "").trim() === "ai-agent-node") return "ai-agent-node";
   const raw = String(baseUrl || "").trim();
   if (raw) {
     try {
@@ -105,6 +108,8 @@ export function normalizeProvider(raw) {
     preset,
     baseUrl,
     apiKey: String(raw.apiKey || ""),
+    authMode: normalizeAuthMode(raw.authMode),
+    cookieUrl: String(raw.cookieUrl || "").trim(),
     models,
     scannedAt: String(raw.scannedAt || ""),
     scanError: String(raw.scanError || ""),
@@ -143,6 +148,8 @@ export function providerFromLegacyText(text) {
     preset: text?.preset || "custom",
     baseUrl: text?.baseUrl || "",
     apiKey: text?.apiKey || "",
+    authMode: text?.authMode,
+    cookieUrl: text?.cookieUrl,
     models: model ? [{ id: model, enabled: true }] : [],
   });
 }
@@ -173,13 +180,22 @@ export function pickDefaultRef(providers, preferred) {
 
 export function textSlotFromRef(providers, ref, prevText = {}) {
   const provider = (providers || []).find((p) => p.id === ref?.providerId);
-  return {
+  const out = {
     ...prevText,
     preset: provider?.preset || prevText.preset || "custom",
     baseUrl: provider?.baseUrl || "",
     apiKey: provider ? provider.apiKey : "",
     model: ref?.modelId || "",
   };
+  // Drop leftover cookie fields when the selected provider is a normal API-key slot.
+  if (provider && isCookieProxyModel(provider)) {
+    out.authMode = "cookie-proxy";
+    out.cookieUrl = String(provider.cookieUrl || "").trim();
+  } else {
+    delete out.authMode;
+    delete out.cookieUrl;
+  }
+  return out;
 }
 
 export function hydrateTextCatalog(raw, text = {}) {

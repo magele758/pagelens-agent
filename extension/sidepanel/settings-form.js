@@ -6,10 +6,11 @@ import { settingsPage } from "./panel-refs.js";
 import { renderSkillFolderStatus } from "./skill-folder-ui.js";
 import { hydrateSkillFolderStatus, renderShortcutList } from "./slash-menu.js";
 import { state } from "./state.js";
-import { fieldBlock, renderTextProviders } from "./text-providers-ui.js";
+import { apiKeyLabel, fieldBlock, renderTextProviders, runCookieProbe } from "./text-providers-ui.js";
 import { applyUiTheme } from "./theme.js";
 import { LOOP_ENGINE_ID } from "../lib/agent/loop-kernel.js";
 import { IRREVERSIBLE_ITEMS, normalizeIrreversibleActions } from "../lib/agent/trust/irreversible.js";
+import { isCookieProxyModel, normalizeAuthMode } from "../lib/cookie-proxy.js";
 import { testConnection } from "../lib/openai.js";
 import { isModelReady, presetsFor } from "../lib/storage.js";
 
@@ -77,6 +78,16 @@ function bindSettingFields() {
     el.addEventListener("change", () => writeField(el));
     el.addEventListener("input", () => writeField(el));
   });
+  document.querySelectorAll("[data-probe-cookie]").forEach((btn) => {
+    if (btn.dataset.settingBound) return;
+    btn.dataset.settingBound = "true";
+    btn.addEventListener("click", () => {
+      const group = btn.dataset.probeCookie;
+      const model = state.settings[group] || {};
+      const status = document.querySelector(`[data-probe-status="${group}"]`);
+      runCookieProbe(String(model.cookieUrl || "").trim() || String(model.baseUrl || "").trim(), status, btn);
+    });
+  });
   document.querySelectorAll("[data-test]").forEach((btn) => {
     if (btn.dataset.settingBound) return;
     btn.dataset.settingBound = "true";
@@ -86,19 +97,50 @@ function bindSettingFields() {
 
 function writeField(el) {
   const [group, key] = el.dataset.k.split(".");
+  const prevPreset = state.settings[group]?.preset;
   if (!state.settings[group]) state.settings[group] = {};
   if (key === "durationFactor") state.settings[group][key] = Number(el.value) || 1;
   else if (key === "summaryInputTokens") state.settings[group][key] = Number(el.value) || 200000;
   else if (key === "bufferSegments" || key === "bufferSeconds") state.settings[group][key] = Number(el.value) || 5;
+  else if (key === "authMode") state.settings[group][key] = normalizeAuthMode(el.value);
   else state.settings[group][key] = el.value;
   if (key === "preset") {
-    const preset = presetsFor(group).find((p) => p.id === el.value);
+    const presets = presetsFor(group);
+    const preset = presets.find((p) => p.id === el.value);
     if (preset) {
       state.settings[group].baseUrl = preset.baseUrl || "";
       const input = document.querySelector(`[data-k="${group}.baseUrl"]`);
       if (input) input.value = preset.baseUrl || "";
+      if (preset.authMode) setGroupAuthMode(group, preset.authMode);
+      else if (isCookieProxyModel(state.settings[group]) && presets.find((p) => p.id === prevPreset)?.authMode) {
+        setGroupAuthMode(group, "api-key");
+      }
     }
   }
+  if (key === "authMode") syncCookieFields(group);
+}
+
+function syncCookieFields(group) {
+  const model = state.settings[group];
+  const cookie = isCookieProxyModel(model);
+  if (!cookie && model.cookieUrl) {
+    model.cookieUrl = "";
+    const input = document.querySelector(`[data-k="${group}.cookieUrl"]`);
+    if (input) input.value = "";
+  }
+  const box = document.querySelector(`[data-cookie-proxy-fields="${group}"]`);
+  if (box) box.hidden = !cookie;
+  const label = document.querySelector(`[data-key-label="${group}"]`);
+  if (label) label.textContent = apiKeyLabel(cookie);
+  const status = document.querySelector(`[data-probe-status="${group}"]`);
+  if (status) status.textContent = "";
+}
+
+function setGroupAuthMode(group, raw) {
+  state.settings[group].authMode = normalizeAuthMode(raw);
+  const select = document.querySelector(`[data-k="${group}.authMode"]`);
+  if (select) select.value = state.settings[group].authMode;
+  syncCookieFields(group);
 }
 
 async function runTest(group) {
@@ -107,7 +149,9 @@ async function runTest(group) {
     ? state.settings.text
     : state.settings[group];
   if (!isModelReady(model)) {
-    status.textContent = "请先填写接口地址、模型 ID 和 API 密钥";
+    status.textContent = isCookieProxyModel(model)
+      ? "请先填写有效的接口地址、模型 ID（及可选的 Cookie 提取地址）"
+      : "请先填写接口地址、模型 ID 和 API 密钥";
     status.className = "status bad";
     return;
   }

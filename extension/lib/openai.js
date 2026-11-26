@@ -1,6 +1,7 @@
 import { modelsUrl, parseRemoteModelList } from "./text-providers.js";
 import { debugLog } from "./debug-log.js";
 import { requireHostUrl } from "./optional-permissions.js";
+import { isCookieProxyModel, fetchWithCookieProxy } from "./cookie-proxy.js";
 
 function trimSlash(url) {
   return String(url || "").trim().replace(/\/+$/, "");
@@ -13,15 +14,27 @@ export function chatCompletionsUrl(baseUrl) {
   return `${raw}/chat/completions`;
 }
 
+function authHeadersFor(model) {
+  const key = String(model?.apiKey || "").trim();
+  if (!key && isCookieProxyModel(model)) return {};
+  return { Authorization: `Bearer ${key || "local"}` };
+}
+
 function headersFor(model) {
-  const key = String(model?.apiKey || "").trim() || "local";
-  const headers = {
+  return {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${key}`,
+    ...authHeadersFor(model),
     "HTTP-Referer": "https://pagelens.local",
     "X-Title": "PageLens",
   };
-  return headers;
+}
+
+async function fetchModelEndpoint(model, url, init) {
+  const denied = await requireHostUrl(url);
+  if (denied) throw new Error(denied);
+  // Timed requests start their timeout after permission checks.
+  if (isCookieProxyModel(model)) return fetchWithCookieProxy(model, url, init);
+  return fetch(url, typeof init === "function" ? init() : init);
 }
 
 export function normalizeContent(raw) {
@@ -207,9 +220,7 @@ async function readError(response) {
 }
 
 async function postChat(model, body, signal) {
-  const denied = await requireHostUrl(model.baseUrl);
-  if (denied) throw new Error(denied);
-  const response = await fetch(chatCompletionsUrl(model.baseUrl), {
+  const response = await fetchModelEndpoint(model, chatCompletionsUrl(model.baseUrl), {
     method: "POST",
     headers: headersFor(model),
     signal,
@@ -275,22 +286,24 @@ export async function completeChat(model, { messages, temperature = 0.2, maxToke
 
 export async function testConnection(model) {
   const url = chatCompletionsUrl(model.baseUrl);
-  const denied = await requireHostUrl(url);
-  if (denied) throw new Error(denied);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
-  const started = Date.now();
+  let timer;
+  let started;
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: headersFor(model),
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: model.model.trim(),
-        stream: false,
-        max_tokens: 8,
-        messages: [{ role: "user", content: "ping" }],
-      }),
+    const response = await fetchModelEndpoint(model, url, () => {
+      timer = setTimeout(() => controller.abort(), 20000);
+      started = Date.now();
+      return {
+        method: "POST",
+        headers: headersFor(model),
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: model.model.trim(),
+          stream: false,
+          max_tokens: 8,
+          messages: [{ role: "user", content: "ping" }],
+        }),
+      };
     });
     if (!response.ok) throw new Error(await readError(response));
     const json = await response.json();
@@ -306,19 +319,18 @@ export async function testConnection(model) {
 
 export async function listRemoteModels(model, { timeoutMs = 15000 } = {}) {
   const url = modelsUrl(model.baseUrl);
-  const denied = await requireHostUrl(url);
-  if (denied) throw new Error(denied);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const started = Date.now();
+  let timer;
+  let started;
   try {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        Authorization: headersFor(model).Authorization,
-      },
-      signal: controller.signal,
+    const response = await fetchModelEndpoint(model, url, () => {
+      timer = setTimeout(() => controller.abort(), timeoutMs);
+      started = Date.now();
+      return {
+        method: "GET",
+        headers: { Accept: "application/json", ...authHeadersFor(model) },
+        signal: controller.signal,
+      };
     });
     const body = await response.text();
     if (!response.ok) throw new Error(body.slice(0, 240) || `HTTP ${response.status}`);
@@ -400,8 +412,6 @@ export async function streamTurn(model, input, onTextDelta) {
     messages: input.messages?.length || 0,
   });
   const url = chatCompletionsUrl(model.baseUrl);
-  const denied = await requireHostUrl(url);
-  if (denied) throw new Error(denied);
   const body = {
     model: model.model.trim(),
     stream: true,
@@ -414,7 +424,7 @@ export async function streamTurn(model, input, onTextDelta) {
     body.tool_choice = "auto";
   }
 
-  let response = await fetch(url, {
+  let response = await fetchModelEndpoint(model, url, {
     method: "POST",
     headers: headersFor(model),
     signal: input.signal,
@@ -425,7 +435,7 @@ export async function streamTurn(model, input, onTextDelta) {
     const errText = await readError(response);
     if (/stream_options|extra_forbidden|unrecognized_field/i.test(errText)) {
       delete body.stream_options;
-      response = await fetch(url, {
+      response = await fetchModelEndpoint(model, url, {
         method: "POST",
         headers: headersFor(model),
         signal: input.signal,
@@ -433,7 +443,7 @@ export async function streamTurn(model, input, onTextDelta) {
       });
       if (!response.ok) throw new Error(await readError(response));
     } else {
-      debugLog("model.error", { errorMessage: errText });
+      debugLog("model.error", { status: response.status, errorMessage: errText });
       throw new Error(errText);
     }
   }

@@ -54,8 +54,11 @@ function makeStore(overrides = {}) {
 const tool = (tools, name) => tools.find((t) => t.name === name);
 
 // Schema: safety settings are flagged; secrets are masked.
-for (const key of ["hitlMode", "hitlTimeoutSeconds", "nativeShell", "cdpInput", "agentInboxEnabled", "agentBridgeEnabled", "agentBridgeOrigins", "multimodal.apiKey", "jev.baseUrl", "langfuse.secretKey", "langfuse.enabled"]) {
+for (const key of ["hitlMode", "hitlTimeoutSeconds", "nativeShell", "cdpInput", "agentInboxEnabled", "agentBridgeEnabled", "agentBridgeOrigins", "multimodal.apiKey", "multimodal.authMode", "multimodal.cookieUrl", "jev.baseUrl", "langfuse.secretKey", "langfuse.enabled"]) {
   assert(isSensitiveSetting(key), `${key} must be sensitive`);
+}
+for (const key of ["multimodal.authMode", "multimodal.cookieUrl"]) {
+  assert.equal(AGENT_SETTINGS_SCHEMA.find((field) => field.key === key)?.sensitive, true, `${key} schema is sensitive`);
 }
 assert(!isSensitiveSetting("uiTheme"), "uiTheme is not sensitive");
 assert(isSensitiveSetting("someFutureApiKey"), "unknown key-like names are flagged by pattern");
@@ -211,6 +214,27 @@ assert(!maskSecret(SECRET).includes(SECRET.slice(0, 10)), "mask hides the key bo
   const meta = tool(all, "request_toolsets");
   assert(meta.parameters.properties.toolsets.items.enum.includes("settings"));
   assert(/update_settings/.test(systemPrompt(defaultSettings())));
+}
+
+// Cookie proxy fields are sensitive, reject script URLs, and persist after confirmation.
+{
+  const store = makeStore();
+  const t = tool(createSettingsTools(store.ctx()), "update_settings");
+  let out = await t.execute({ changes: [{ key: "multimodal.cookieUrl", value: "javascript:alert(1)" }] });
+  assert(/http/.test(out), "javascript cookieUrl rejected");
+  assert.equal(store.calls.confirms.length, 0);
+  assert.equal(store.calls.saves, 0);
+  out = await t.execute({
+    changes: [
+      { key: "multimodal.authMode", value: "cookie-proxy" },
+      { key: "multimodal.cookieUrl", value: "https://tango.example.com/session" },
+    ],
+  });
+  assert.equal(store.calls.confirms.length, 1, "cookie proxy settings ask the user");
+  assert.equal(store.calls.confirms[0].sensitive, true);
+  assert.equal(store.stored.multimodal.authMode, "cookie-proxy");
+  assert.equal(store.stored.multimodal.cookieUrl, "https://tango.example.com/session");
+  assert(/已保存并生效/.test(out));
 }
 
 console.log("test_settings_tools: ok");
