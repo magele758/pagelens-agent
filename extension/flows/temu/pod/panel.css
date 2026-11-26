@@ -93,7 +93,31 @@
   min-height: 32px;
   padding: 4px;
 }
-.pod-reference-preview { display: flex; align-items: center; gap: 8px; }
-.pod-reference-label { flex: 1; }
 .pod-reference-label span, .pod-reference-label small { display: block; }
 .pod-zoom figcaption { overflow-wrap: anywhere; }
+
+.pod-body, .pod-body > section, .pod-form, .pod-reference { min-inline-size: 0; }
+.pod-form, .pod-reference { grid-template-columns: minmax(0, 1fr); }
+.pod-form .field, .pod-form button { max-inline-size: 100%; }
+.pod-reference-preview {
+  display: grid;
+  grid-template-columns: 60px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-inline-size: 0;
+}
+.pod-reference-label { min-inline-size: 0; overflow: hidden; }
+.pod-reference-label > span { max-inline-size: 100%; }
+.pod-kit-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.pod-kit-switches { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.pod-kit-switches input { width: 32px; }
+.pod-kit-photos { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 6px 0; }
+.pod-kit-photos figure { min-width: 0; margin: 0; }
+.pod-kit-photos figcaption { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pod-kit-size-scroll { overflow: auto; margin: 6px 0; }
+.pod-kit-size-scroll table { border-collapse: collapse; white-space: nowrap; }
+.pod-kit-size-scroll :is(th, td) { padding: 4px 6px; border: 1px solid var(--line); text-align: left; }
+.pod-progress { display: grid; gap: 3px; margin-bottom: 5px; }
+.pod-progress progress { width: 100%; height: 8px; accent-color: var(--accent); }
+.pod-card:has(.pod-kit-photos) { grid-column: 1 / -1; }
+.pod-artwork .hint { overflow-wrap: anywhere; }

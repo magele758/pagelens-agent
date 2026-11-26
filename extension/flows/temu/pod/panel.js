@@ -4,7 +4,9 @@ import { requestGeekbi } from "../../../integrations/geekbi/runtime.js";
 import { europeanSites, sourcingParams, imageSearchParams, normalizeCandidates, podKeywords, reviewPod,
   candidateReviewPrompt, imageCheckPrompt, readPodCdn, resizePodImage, podImageData, productForCandidate, saveCandidate, mapPodJobs } from "./service.js";
 import { generatePodImage, imageChoices, podImagePreference, resolvePodImageModel } from "./image-model.js";
-import { readPodDirectory, saveArtwork } from "./directory.js";
+import { readPodDirectory, saveArtwork, saveProductKit } from "./directory.js";
+import { createKit, estimatedPodProgress, kitTasks, kitViews, makeKitPlan, runKitTasks } from "./product-kit.js";
+import { resolveSizeChartModel } from "../../../lib/size-chart.mjs";
 
 function el(tag, label, className) {
   const node = document.createElement(tag);
@@ -116,22 +118,46 @@ export function bindTemuPod({ getSettings, onBack }) {
         <div class="pod-form">
           <label class="field">富图模型<select data-part="models"></select></label>
           <div class="pod-reference" data-part="reference"></div>
-          <label class="field">编辑方式<select data-part="mode"><option value="print">新增或替换印花</option><option value="plain">去掉印花，生成纯色底图</option></select></label>
+          <label class="field">编辑方式<select data-part="mode"><option value="print">新增或替换印花</option><option value="plain">去掉印花，生成纯色底图</option><option value="kit">生成商品套图与 SKC</option></select></label>
           <label class="field" data-part="strengthField">印花裂变幅度<select data-part="strength"><option value="standard">标准 · 保留原印花构图</option><option value="advanced">进阶 · 重新设计印花</option></select></label>
           <label class="field" data-part="themesField">原创印花主题（每行一个）
             <textarea rows="2" data-part="themes" maxlength="600" placeholder="例如伦敦河岸地图、纽约天际线"></textarea></label>
           <label class="field" data-part="referenceNotesField" hidden>参考图补充要求（可选）
             <textarea rows="2" data-part="referenceNotes" maxlength="600" placeholder="例如保留横向拼色，浅蓝色块放在胸口"></textarea></label>
+          <div class="pod-kit-form" data-part="kitSettings" hidden>
+            <div class="pod-grid">
+              <label class="field">已有图的角度<select data-part="sourceView"></select></label>
+              <label class="field">SKC 数量<input type="number" min="1" max="12" value="3" data-part="skcCount"></label>
+            </div>
+            <div class="pod-kit-switches">
+              <label class="settings-switch"><input type="checkbox" role="switch" data-part="recolor" checked>改变颜色</label>
+              <label class="settings-switch"><input type="checkbox" role="switch" data-part="redesign" checked>改变印花</label>
+            </div>
+            <label class="field" data-part="colorField">颜色（逗号分隔，可选）
+              <input data-part="kitColors" maxlength="180" placeholder="例如黑色、浅粉色；留空自动配色"></label>
+            <label class="field" data-part="baseColorField" hidden>底图颜色（可选）
+              <input data-part="baseColor" maxlength="12" placeholder="例如黑色"></label>
+            <label class="field" data-part="designField">印花（逗号分隔，可选）
+              <input data-part="kitDesigns" maxlength="360" placeholder="例如伦敦、纽约；留空使用内置主题"></label>
+            <label class="field">尺码（无尺码表时使用，可选）
+              <input data-part="kitSizes" maxlength="150" placeholder="沿用商品尺码，缺失时默认 S、M、L、XL"></label>
+          </div>
           <button type="button" class="primary" data-part="generate">批量富图</button>
         </div>
         <div data-part="localList" class="pod-list"></div>
       </section>
-    </main><footer class="pod-footer"><p role="status" data-part="status"></p></footer>`;
+    </main><footer class="pod-footer">
+      <div class="pod-progress" data-part="progressArea" hidden>
+        <label for="pod-estimated-progress" data-part="progressText"></label>
+        <progress id="pod-estimated-progress" data-part="progress" max="100"></progress>
+      </div><p role="status" data-part="status"></p>
+    </footer>`;
   const zoom = el("dialog", null, "pod-zoom");
   zoom.setAttribute("aria-label", "图片核对");
   document.body.append(dialog, zoom);
   const find = name => dialog.querySelector(`[data-part="${name}"]`);
   const search = find("search");
+  for (const [value, label] of Object.entries(kitViews)) find("sourceView").append(new Option(label, value));
   for (const word of podKeywords) dialog.querySelector("datalist").append(new Option(word, word));
   const setStatus = value => { find("status").textContent = value; };
   let providerReady = false;
@@ -237,6 +263,27 @@ export function bindTemuPod({ getSettings, onBack }) {
     } finally { busy = false; render(); }
   }
 
+  async function trackGeneration(label, tasks, run) {
+    const running = new Map();
+    let done = 0;
+    const update = () => {
+      const percent = estimatedPodProgress(done, [...running.values()], tasks.length, Date.now());
+      find("progress").value = percent;
+      find("progressText").textContent = `${label} · 预计 ${percent}% · 已处理 ${done}/${tasks.length}`;
+    };
+    const tracked = tasks.map((task, index) => ({ ...task, run: async () => {
+      running.set(index, Date.now());
+      update();
+      try { return await task.run(); }
+      finally { running.delete(index); done++; update(); }
+    } }));
+    find("progressArea").hidden = false;
+    update();
+    const timer = setInterval(update, 750);
+    try { return await run(tracked); }
+    finally { clearInterval(timer); find("progressArea").hidden = true; }
+  }
+
   function listSearch(data, site, origin, cached) {
     candidates = normalizeCandidates(data.list, site).map(item => ({ ...item, selected: true }));
     searchLabel = origin;
@@ -326,6 +373,7 @@ export function bindTemuPod({ getSettings, onBack }) {
   }
 
   function generate(items) {
+    if (find("mode").value === "kit") return generateKits(items);
     return execute("正在开始富图…", async () => {
       const mode = find("mode").value;
       const trend = mode === "print" && styleReference;
@@ -341,20 +389,131 @@ export function bindTemuPod({ getSettings, onBack }) {
         id: trend.id, title: trend.title, site: trend.site.cnName, weekSold: trend.raw.weekSold,
         weekSoldRate: trend.raw.weekSoldRate, url: trend.url || productForCandidate(trend).source.url,
       } : undefined;
-      const tasks = items.flatMap(item => themes.map(theme => ({ item, theme })));
-      const results = await mapPodJobs(tasks, 3, async ({ item, theme }) => {
-        const photo = await generatePodImage(model, await resizePodImage(item.photo), theme, mode,
-          { strength, referencePhoto });
+      const tasks = items.flatMap(item => themes.map(theme => ({ run: async () => {
+        const photo = await generatePodImage(model, await resizePodImage(item.photo), theme, mode, { strength, referencePhoto });
         const artwork = { photo, theme: theme || "参考图富图", model: model.model, approved: false, evidence, referencePhoto };
         item.artworks.push(artwork);
         try { artwork.check = await compare(item, artwork); }
         catch (error) { artwork.error = error.message; }
         return artwork;
-      }, (done, total) => setStatus(`富图与核对 ${done}/${total}`));
+      } })));
+      const results = await trackGeneration("富图与核对", tasks, tracked => mapPodJobs(tracked, 3, task => task.run()));
       const failed = results.filter(result => result.error);
       return `已生成 ${results.length - failed.length} 张，待人工核对。${failed.length ? ` ${failed.length} 张失败：${failed[0].error}` : ""}`;
     });
   }
+  function generateKits(items, retry = false) {
+    return execute(retry ? "正在重试未完成素材…" : "正在准备商品套图…", async () => {
+      const model = activeModel();
+      await requirePodHost(model.baseUrl);
+      const settings = getSettings();
+      const vision = resolveSizeChartModel(settings) ?? settings.text;
+      const plan = retry ? null : makeKitPlan({
+        source: find("sourceView").value, count: Number(find("skcCount").value),
+        recolor: find("recolor").checked, redesign: find("redesign").checked,
+        originalColor: find("baseColor").value, colorList: find("kitColors").value,
+        designList: find("kitDesigns").value, sizeList: find("kitSizes").value,
+      });
+      if (vision?.baseUrl) await requireHostUrl(vision.baseUrl, { interactive: false });
+      const tasks = items.flatMap(item => {
+        if (!retry) item.kit = createKit(item, plan);
+        item.kit.reviewed = false;
+        return kitTasks(item, item.kit, model, settings);
+      });
+      if (!tasks.length) return "图片和尺码表都已生成。";
+      const results = await trackGeneration("生成套图与尺码", tasks, runKitTasks);
+      const failed = results.filter(result => result.error).length;
+      return `已处理 ${items.length} 件商品 · 完成 ${results.length - failed}/${results.length} 项${failed ? ` · ${failed} 项待重试` : " · 请核对套图与尺码"}。`;
+    });
+  }
+
+  function chooseKitSize(item) {
+    const file = el("input");
+    file.type = "file";
+    file.accept = "image/*";
+    file.onchange = () => {
+      const photo = file.files[0];
+      if (!photo) return;
+      item.size = photo;
+      item.sizeOverride = true;
+      item.kit.size = undefined;
+      item.kit.sizesReviewed = false;
+      void generateKits([item], true);
+    };
+    file.click();
+  }
+
+  function saveKit(item) {
+    return execute("请选择套图保存目录…", async () => {
+      const folder = await window.showDirectoryPicker({ id: "pagelens-pod-output", mode: "readwrite" });
+      const name = await saveProductKit(folder, item, item.kit);
+      return `已保存到 ${folder.name}/${name}。${item.kit.size ? "" : "尺码表仍待补充。"}`;
+    });
+  }
+
+  function renderKit(item) {
+    const kit = item.kit;
+    const area = el("div", null, "pod-artwork");
+    area.append(el("strong", "商品套图"));
+    const images = el("div", null, "pod-kit-photos");
+    for (const [key, label] of Object.entries(kitViews)) {
+      const tile = el("figure");
+      tile.append(thumb(kit.photos[key], label, undefined, true), el("figcaption", label));
+      images.append(tile);
+    }
+    area.append(images, el("strong", `SKC · ${kit.variants.length} 款`));
+    const variants = el("div", null, "pod-kit-photos");
+    for (const variant of kit.variants) {
+      const tile = el("figure");
+      const name = el("figcaption", variant.label);
+      name.title = variant.label;
+      tile.append(thumb(variant.photo, variant.label, undefined, true), name);
+      variants.append(tile);
+    }
+    area.append(variants, el("p", "除 SKC 主图外，其余三张共用原款图。生成的未见角度及细节需对照实物。", "hint"));
+    if (new Set(kit.variants.map(variant => variant.color)).size !== kit.variants.length) {
+      area.append(el("p", "同色印花保留为独立 SKC。Temu 类目若要求色值唯一，试填时需先为这些款式分配不同的有效规格。", "hint"));
+    }
+    if (kit.size) {
+      const details = el("details");
+      const { chart, source } = kit.size;
+      const label = { structured: "商品资料", image: "AI 解析", estimated: "AI 估算 · 待核" }[source];
+      details.append(el("summary", `尺码表 · ${label} · ${chart.unit} · ${chart.rows.length} 行`));
+      const scroll = el("div", null, "pod-kit-size-scroll");
+      const table = el("table");
+      const head = el("thead");
+      const headings = el("tr");
+      for (const column of chart.columns) headings.append(el("th", column));
+      head.append(headings);
+      const body = el("tbody");
+      for (const values of chart.rows) {
+        const row = el("tr");
+        for (const column of chart.columns) row.append(el("td", values[column]));
+        body.append(row);
+      }
+      table.append(head, body);
+      scroll.append(table);
+      details.append(scroll);
+      if (source === "estimated") details.append(check("已核对估算尺码", kit.sizesReviewed, value => {
+        kit.sizesReviewed = value;
+        updateSave();
+      }));
+      area.append(details);
+    } else area.append(el("p", "尺码表待补充。", "hint"));
+    for (const [key, error] of Object.entries(kit.errors)) area.append(el("p", `${kitViews[key] || (key === "size" ? "尺码表" : key.toUpperCase())} · ${error}`, "hint"));
+    const controls = el("div", null, "pod-actions");
+    const complete = Object.keys(kitViews).every(key => kit.photos[key]) && kit.variants.every(variant => variant.photo);
+    const save = iconAction("save", "保存商品套图", () => void saveKit(item), { primary: true });
+    const updateSave = () => { save.disabled = busy || !complete || !kit.reviewed || kit.size?.source === "estimated" && !kit.sizesReviewed; };
+    updateSave();
+    if (Object.keys(kit.errors).length) controls.append(action("重试缺项", () => void generateKits([item], true), { disabled: busy }));
+    controls.append(action("选择尺码图", () => chooseKitSize(item), { disabled: busy }));
+    if (complete) controls.append(check("已核对套图", kit.reviewed, value => { kit.reviewed = value; updateSave(); }));
+    controls.append(save);
+    area.append(controls);
+    return area;
+  }
+
   async function compare(item, artwork) {
     const sources = [item.photo, artwork.photo];
     if (artwork.referencePhoto) sources.push(artwork.referencePhoto);
@@ -415,6 +574,7 @@ export function bindTemuPod({ getSettings, onBack }) {
         }), { disabled: busy }));
       }
       card.append(head, options);
+      if (item.kit) card.append(renderKit(item));
       for (const image of item.artworks) {
         const area = el("div", null, "pod-artwork");
         const title = el("div", null, "pod-card-head");
@@ -461,10 +621,19 @@ export function bindTemuPod({ getSettings, onBack }) {
         iconAction("clear", "清除参考", () => { styleReference = undefined; render(); }, { disabled: busy }));
       reference.append(preview);
     } else reference.append(el("small", "可以在市场选品结果中指定一件参考款。"));
-    const plain = find("mode").value === "plain";
-    for (const key of ["reference", "strengthField"]) find(key).hidden = plain;
-    find("themesField").hidden = plain || Boolean(styleReference);
-    find("referenceNotesField").hidden = plain || !styleReference;
+    const mode = find("mode").value;
+    for (const key of ["reference", "strengthField"]) find(key).hidden = mode !== "print";
+    find("themesField").hidden = mode !== "print" || Boolean(styleReference);
+    find("referenceNotesField").hidden = mode !== "print" || !styleReference;
+    find("kitSettings").hidden = mode !== "kit";
+    find("generate").textContent = mode === "kit" ? "批量生成商品套图" : "批量富图";
+    find("colorField").hidden = !find("recolor").checked;
+    find("baseColorField").hidden = find("recolor").checked;
+    find("designField").hidden = !find("redesign").checked;
+    find("skcCount").disabled = busy || !find("recolor").checked && !find("redesign").checked;
+    for (const key of ["mode", "models", "sourceView", "recolor", "redesign", "kitColors", "baseColor", "kitDesigns", "kitSizes"]) {
+      find(key).disabled = busy;
+    }
     refreshLimits();
     renderCandidates();
     renderLocal();
@@ -508,7 +677,8 @@ export function bindTemuPod({ getSettings, onBack }) {
   find("choose").onclick = () => void execute("请选择参考图或商品目录…", async () => {
     const folder = await window.showDirectoryPicker({ id: "pagelens-pod-input", mode: "read" });
     const items = await readPodDirectory(folder);
-    for (const item of local) for (const photo of [item.photo, ...item.artworks.map(artwork => artwork.photo)]) {
+    for (const item of local) for (const photo of [item.photo, ...item.artworks.map(artwork => artwork.photo),
+      ...Object.values(item.kit?.photos || {}), ...(item.kit?.variants || []).map(variant => variant.photo)]) {
       if (previews.has(photo)) { URL.revokeObjectURL(previews.get(photo)); previews.delete(photo); }
     }
     local = items.map(item => ({ ...item, selected: true, artworks: [] }));
@@ -516,6 +686,8 @@ export function bindTemuPod({ getSettings, onBack }) {
     return local.length ? "" : "目录没有可读的商品图。";
   });
   find("mode").onchange = render;
+  find("recolor").onchange = render;
+  find("redesign").onchange = render;
   find("models").onchange = () => {
     const value = find("models").value;
     void chrome.storage.local.set({ [podImagePreference]: value });

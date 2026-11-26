@@ -49,16 +49,18 @@ export function artworkPrompt(theme, mode, { strength = "standard", hasStylePhot
   return [fixed, edit, "输出一张可核对的商品照片。"].join("\n");
 }
 
-export async function generatePodImage(model, reference, theme, mode, {
-  fetcher = fetch, referencePhoto, strength,
-} = {}) {
+export function generatePodImage(model, reference, theme, mode, { fetcher, referencePhoto, strength } = {}) {
+  const stylePhoto = mode === "plain" ? null : referencePhoto;
+  const prompt = artworkPrompt(theme, mode, { strength, hasStylePhoto: Boolean(stylePhoto) });
+  return editPodImage(model, reference, prompt, { fetcher, stylePhoto });
+}
+
+export async function editPodImage(model, reference, prompt, { fetcher = fetch, stylePhoto } = {}) {
   if (!isModelReady(model)) throw new Error("请从已配置模型中选择支持参考图编辑的模型。");
   const base = new URL(model.baseUrl);
   if (!["https:", "http:"].includes(base.protocol) || base.username || base.password) throw new Error("图像模型服务地址无效。");
   base.pathname = base.pathname.replace(/\/(?:chat\/completions|responses|models|images\/(?:generations|edits))\/?$/u, "").replace(/\/$/u, "");
   const ark = isSeedream(model.model);
-  const stylePhoto = mode === "plain" ? null : referencePhoto;
-  const prompt = artworkPrompt(theme, mode, { strength, hasStylePhoto: Boolean(stylePhoto) });
   const headers = model.apiKey ? { Authorization: "Bearer " + model.apiKey.trim() } : {};
   let body;
   if (ark) {
