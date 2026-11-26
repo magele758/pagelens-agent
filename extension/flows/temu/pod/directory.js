@@ -64,7 +64,7 @@ async function put(directory, name, contents) {
   }
 }
 
-const simple = value => String(value || "").replace(/[\\/:*?"<>|\x00-\x1f]/gu, "-").slice(0, 90).trim();
+const simple = value => Array.from(String(value || "").replace(/[\\/:*?"<>|\x00-\x1f]/gu, "-").trim()).slice(0, 27).join("");
 const withoutImage = ({ image, imagePath, ...fields }) => fields;
 
 export async function saveArtwork(root, item, artwork) {

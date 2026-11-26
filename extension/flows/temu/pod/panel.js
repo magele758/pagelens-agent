@@ -307,6 +307,24 @@ export function bindTemuPod({ getSettings, onBack }) {
     return reviewPod(getSettings(), { prompt: imageCheckPrompt(artwork.theme), photos });
   }
 
+  function checkExisting(item) {
+    const file = el("input");
+    file.type = "file";
+    file.accept = "image/*";
+    file.onchange = () => {
+      const photo = file.files[0];
+      if (!photo) return;
+      void execute("正在核对已有图…", async () => {
+        const artwork = { photo, theme: photo.name.replace(/\.[^.]+$/u, ""), approved: false };
+        item.artworks.push(artwork);
+        try { artwork.check = await compare(item, artwork); }
+        catch (error) { artwork.error = error.message; }
+        return "请核对原图和对照图。";
+      });
+    };
+    file.click();
+  }
+
   function saveArt(item, artwork) {
     return execute("请选择保存目录…", async () => {
       const folder = await window.showDirectoryPicker({ id: "pagelens-pod-output", mode: "readwrite" });
@@ -327,7 +345,8 @@ export function bindTemuPod({ getSettings, onBack }) {
       head.append(thumb(item.photo, item.name), check(item.name, item.selected, value => { item.selected = value; }));
       const options = el("div", null, "pod-actions");
       options.append(action("富图", () => void generate([item]), { disabled: busy || !activeModel()?.model }),
-        action("原图找同款", () => void photoSearch(item.photo, item.name), { disabled: busy || !providerReady }));
+        action("原图找同款", () => void photoSearch(item.photo, item.name), { disabled: busy || !providerReady }),
+        action("检查已有图", () => checkExisting(item), { disabled: busy }));
       card.append(head, options);
       for (const image of item.artworks) {
         const area = el("div", null, "pod-artwork");
