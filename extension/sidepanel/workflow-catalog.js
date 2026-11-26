@@ -10,6 +10,7 @@ export async function launchWorkflowFeature(feature, platform, handlers) {
     "product-listing": handlers.openProductListing,
     "shein-product-listing": handlers.openSheinListing,
     "temu-product-listing": handlers.openTemuListing,
+    "temu-pod": handlers.openTemuPod,
     "product-capture": handlers.openProductCapture,
     "tiktok-mx-draft": handlers.openTiktokDraft,
   };

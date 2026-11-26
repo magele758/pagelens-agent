@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="../skill-components/daily-operations/panel.css" />
   <link rel="stylesheet" href="product-capture.css" />
   <link rel="stylesheet" href="../flows/shein/product-listing/sidepanel/listing-panel.css" />
+  <link rel="stylesheet" href="../flows/temu/pod/panel.css" />
   <link rel="stylesheet" href="temu-listing.css" />
   <link rel="stylesheet" href="../flows/shopee/marketing-panel.css" />
   <link rel="stylesheet" href="../vendor/katex/katex.min.css" />
@@ -507,6 +508,20 @@
                 </div>
               </details>
             </section>
+
+            <details class="accordion settings-group" id="settings-group-geekbi">
+              <summary><span class="group-text"><strong>极鲸云</strong><small>Temu 男装选品与图搜</small></span>
+                <span class="state settings-state" data-state>未启用</span></summary>
+              <div class="pod-settings">
+                <label class="settings-switch"><span>启用数据源</span><input name="enabled" type="checkbox" role="switch" /></label>
+                <label class="field">调用标识<input name="appKey" type="text" autocomplete="off" spellcheck="false" /></label>
+                <label class="field">应用密钥<input name="appSecret" type="password" autocomplete="off" /></label>
+                <p class="hint">查询结果缓存 12 小时。商品搜索、图搜、详情各最多发起 2 次请求。</p>
+                <div class="pod-actions"><button class="secondary" type="button" data-clear>清除缓存</button>
+                  <button class="primary" type="button" data-save>保存极鲸云配置</button></div>
+                <p role="status" class="hint"></p>
+              </div>
+            </details>
 
             <div class="group-label">模型</div>
             <details class="accordion settings-group" id="settings-group-parameters">
