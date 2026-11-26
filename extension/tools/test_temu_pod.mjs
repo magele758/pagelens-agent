@@ -84,10 +84,18 @@ test("image edits use an existing model provider and approved product directorie
     text: { model: "text-only" },
     textProviders: [{ id: "ark", name: "Ark", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", apiKey: "test", models: [] }],
   }, { providerId: "ark", modelId: arkImageModel });
-  const generated = await generatePodImage(model, image, "London", "print", async (url, req) => {
-    assert.ok(url.endsWith("/images/generations"));
-    assert.equal(JSON.parse(req.body).model, arkImageModel);
-    return Response.json({ data: [{ b64_json: Buffer.from(await image.arrayBuffer()).toString("base64") }] });
+  const generated = await generatePodImage(model, image, "玄武岩迷彩", "print", {
+    market: "德国站市场参考", strength: "advanced", referencePhoto: image,
+    fetcher: async (url, req) => {
+      assert.ok(url.endsWith("/images/generations"));
+      const body = JSON.parse(req.body);
+      assert.equal(body.model, arkImageModel);
+      assert.equal(body.image.length, 2);
+      assert.match(body.prompt, /图1是唯一商品底图/u);
+      assert.match(body.prompt, /图2是市场风格参考/u);
+      assert.match(body.prompt, /进阶印花裂变/u);
+      return Response.json({ data: [{ b64_json: Buffer.from(await image.arrayBuffer()).toString("base64") }] });
+    },
   });
   const base = await mkdtemp(join(tmpdir(), "pagelens-pod-"));
   const item = { name: "Hoodie", photo: image, product: { skus: [{ id: "5", imagePath: "old.jpg", options: { Size: "M" } }] } };

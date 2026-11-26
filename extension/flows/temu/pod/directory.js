@@ -96,7 +96,7 @@ export async function saveArtwork(root, item, artwork) {
     ...(sizeChartImagePath && { sizeChartImagePath }),
     variantGroups: (previous.variantGroups || []).map(group => ({ ...group, options: (group.options || []).map(withoutImage) })),
     skus: (previous.skus || []).map(withoutImage),
-    pod: { theme: artwork.theme, model: artwork.model, check: artwork.check, approved: true },
+    pod: { theme: artwork.theme, model: artwork.model, check: artwork.check, trend: artwork.evidence, approved: true },
   };
   await put(dir, "product.json", JSON.stringify(product, null, 2) + "\n");
   return dir.name;

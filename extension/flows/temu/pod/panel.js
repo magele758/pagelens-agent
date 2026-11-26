@@ -92,7 +92,9 @@ export function bindTemuPod({ getSettings, onBack }) {
           <span data-part="directoryName" class="hint">未选择</span></div>
         <div class="pod-form">
           <label class="field">富图模型<select data-part="models"></select></label>
+          <div class="pod-reference" data-part="reference"></div>
           <label class="field">编辑方式<select data-part="mode"><option value="print">新增或替换印花</option><option value="plain">去掉印花，生成纯色底图</option></select></label>
+          <label class="field" data-part="strengthField">印花裂变幅度<select data-part="strength"><option value="standard">标准 · 保留原印花构图</option><option value="advanced">进阶 · 重新设计印花</option></select></label>
           <label class="field" data-part="themesField">原创印花主题（每行一个）
             <textarea rows="2" data-part="themes" maxlength="600" placeholder="例如伦敦河岸地图、纽约天际线"></textarea></label>
           <button type="button" class="primary" data-part="generate">批量富图</button>
@@ -112,6 +114,7 @@ export function bindTemuPod({ getSettings, onBack }) {
   let candidates = [];
   let local = [];
   let searchLabel = "候选商品";
+  let styleReference;
   let busy = false;
   let view = "market";
   const previews = new WeakMap();
@@ -268,7 +271,12 @@ export function bindTemuPod({ getSettings, onBack }) {
         }
         card.append(details);
       } else options.append(action("查看详情", () => void detail(item), { disabled: busy || !providerReady }));
-      if (item.image) options.append(action("加入富图", () => void execute("正在加载参考图…", async () => {
+      if (item.image) options.append(action("设为印花参考", () => void execute("正在读取市场参考图…", async () => {
+        await requirePodHost(item.image);
+        const photo = await resizePodImage(await readPodCdn(item.image), 900);
+        styleReference = { ...item, photo };
+        switchView("directory");
+      }), { disabled: busy }), action("加为商品底图", () => void execute("正在加载参考图…", async () => {
         const product = productForCandidate(item);
         await requirePodHost(item.image);
         const photo = await readPodCdn(item.image);
@@ -285,14 +293,25 @@ export function bindTemuPod({ getSettings, onBack }) {
   function generate(items) {
     return execute("正在开始富图…", async () => {
       const mode = find("mode").value;
-      const themes = mode === "plain" ? ["纯色底图"] : [...new Set(find("themes").value.split(/\n/u).map(value => value.trim()).filter(Boolean))].slice(0, 5);
-      if (!themes.length) throw new Error("请输入至少一个原创印花主题。");
+      const trend = mode === "print" && styleReference;
+      let themes = mode === "plain" ? ["纯色底图"] :
+        [...new Set(find("themes").value.split(/\n/u).map(value => value.trim()).filter(Boolean))].slice(0, 5);
+      if (!themes.length && trend) themes = [trend.review?.design || "结合参考款印花布局，生成不同的原创图案"];
+      if (!themes.length) throw new Error("请选择一个市场印花参考，或输入原创印花主题。");
       const model = activeModel();
+      const strength = find("strength").value;
       await requirePodHost(model.baseUrl);
+      const referencePhoto = trend?.photo;
+      const market = trend ? `${trend.title}${trend.review?.evidence ? "；" + trend.review.evidence : ""}` : undefined;
+      const evidence = trend ? {
+        id: trend.id, title: trend.title, site: trend.site.cnName, weekSold: trend.raw.weekSold,
+        weekSoldRate: trend.raw.weekSoldRate, url: trend.url || productForCandidate(trend).source.url,
+      } : undefined;
       const tasks = items.flatMap(item => themes.map(theme => ({ item, theme })));
       const results = await mapPodJobs(tasks, 3, async ({ item, theme }) => {
-        const photo = await generatePodImage(model, await resizePodImage(item.photo), theme, mode);
-        const artwork = { photo, theme, model: model.model, approved: false };
+        const photo = await generatePodImage(model, await resizePodImage(item.photo), theme, mode,
+          { market, strength, referencePhoto });
+        const artwork = { photo, theme, model: model.model, approved: false, evidence };
         item.artworks.push(artwork);
         try { artwork.check = await compare(item, artwork); }
         catch (error) { artwork.error = error.message; }
@@ -347,6 +366,15 @@ export function bindTemuPod({ getSettings, onBack }) {
       options.append(action("富图", () => void generate([item]), { disabled: busy || !activeModel()?.model }),
         action("原图找同款", () => void photoSearch(item.photo, item.name), { disabled: busy || !providerReady }),
         action("检查已有图", () => checkExisting(item), { disabled: busy }));
+      const evidence = item.product?.marketResearch;
+      if (evidence?.site?.cnName && evidence.market?.goodsId) {
+        options.append(action("设为印花参考", () => void execute("正在准备本地市场参考…", async () => {
+          styleReference = { id: evidence.market.goodsId, title: item.name, site: evidence.site, raw: evidence.market,
+            image: item.photo, photo: await resizePodImage(item.photo, 900), review: evidence.candidate,
+            url: item.product.source?.url };
+          item.selected = false;
+        }), { disabled: busy }));
+      }
       card.append(head, options);
       for (const image of item.artworks) {
         const area = el("div", null, "pod-artwork");
@@ -354,6 +382,7 @@ export function bindTemuPod({ getSettings, onBack }) {
         title.append(thumb(image.photo, image.theme, () => magnify([["原图", item.photo], [image.theme, image.photo]])),
           el("strong", image.theme));
         area.append(title);
+        if (image.evidence) area.append(el("p", `市场依据 · ${image.evidence.site} · 周销量 ${format(image.evidence.weekSold)}`, "hint"));
         if (image.check) area.append(el("p", [image.check.result, image.check.evidence].join(" · "), "pod-review"));
         if (image.error) area.append(el("p", image.error, "hint"));
         const controls = el("div", null, "pod-actions");
@@ -379,6 +408,14 @@ export function bindTemuPod({ getSettings, onBack }) {
 
   function render() {
     find("connection").textContent = providerReady ? "" : "极鲸云未启用，搜索、图搜和详情不可用。可在高级配置中启用。";
+    const reference = find("reference");
+    reference.replaceChildren(el("strong", "市场印花参考"));
+    if (styleReference) {
+      const item = styleReference;
+      reference.append(el("small", `${item.site.cnName} · 周销量 ${format(item.raw.weekSold)} · 周增长 ${pct(item.raw.weekSoldRate)}`),
+        thumb(item.image, item.title), el("p", item.title),
+        action("清除参考", () => { styleReference = undefined; render(); }, { disabled: busy }));
+    } else reference.append(el("small", "可以在市场选品结果中指定一件参考款。"));
     refreshLimits();
     renderCandidates();
     renderLocal();
@@ -429,7 +466,10 @@ export function bindTemuPod({ getSettings, onBack }) {
     find("directoryName").textContent = `${folder.name} · ${local.length} 件`;
     return local.length ? "" : "目录没有可读的商品图。";
   });
-  find("mode").onchange = () => { find("themesField").hidden = find("mode").value === "plain"; };
+  find("mode").onchange = () => {
+    const plain = find("mode").value === "plain";
+    for (const key of ["reference", "themesField", "strengthField"]) find(key).hidden = plain;
+  };
   find("models").onchange = () => {
     const value = find("models").value;
     void chrome.storage.local.set({ [podImagePreference]: value });

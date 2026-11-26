@@ -54,3 +54,7 @@
 .pod-zoom figure { margin: 8px 0; }
 .pod-zoom img { display: block; width: 100%; max-height: 72vh; object-fit: contain; margin-top: 4px; }
 .pod-zoom figcaption { font-size: 12px; color: var(--muted); }
+.pod-reference { display: grid; gap: 5px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; }
+.pod-reference small { color: var(--muted); }
+.pod-reference p { margin: 0; overflow-wrap: anywhere; }
+.pod-reference button { justify-self: start; }

@@ -25,32 +25,49 @@ export function resolvePodImageModel(settings, ref) {
   return resolveModel(settings, "text");
 }
 
-export function artworkPrompt(theme, mode) {
-  const task = mode === "plain"
-    ? "移除参考衣服上所有印花和印刷文字，恢复同材质同颜色的连续纯色面料。"
-    : `只把印花改为这一原创主题：${theme}。若参考图是纯色，只在可见的主要服装面板加印花。移除原图文，避免商标及球队符号。`;
-  return task + "保持参考照片不变，包括人体、相机视角、背景、帽子、裤腰、口袋的数量位置和形状、拉链、缝线、尺寸比例、布料色彩和纹理。只编辑衣服印花区域，不改版型，不增添装饰物。输出单张商品照片。";
+export function artworkPrompt(theme, mode, { market, strength = "standard", hasStylePhoto = false } = {}) {
+  const fixed = "图1是唯一商品底图。锁定拍摄角度、人物、背景和裁切范围。锁定服装底色、版型、比例与材质，按图1原样保留口袋数量、开口位置、形状、拉链、腰头、抽绳、缝线、袖口和下摆。已有的实物标签原样保留，禁止新增贴标、徽章或五金。只有平面印花区域允许改动。";
+  const marketNote = market ? `Temu 市场参考的款式特征：${market}。这是风格依据，不能移植参考款的服装结构。` : "";
+  const styleImage = hasStylePhoto ? "图2是市场风格参考。只提取印花布局、覆盖率、色彩关系和图案密度。以图1为唯一照片底稿，不复制图2的原始图案、文字、商标、人物或背景。" : "";
+  const edit = mode === "plain"
+    ? "去除原有印花和印刷文字，用同一面料的干净纯色无痕补齐，保留原有高光、阴影和褶皱。"
+    : [
+      strength === "advanced" ? "进阶印花裂变。新设计可改变印花布局、节奏与配色，但仍只修改印花。" :
+        "标准印花裂变。已有印花时保留大致位置和覆盖范围，改成不同的原创画面。纯色底图按指定位置增加印花。",
+      marketNote, styleImage, `原创设计要求：${theme}。`,
+      "所有图案沿真实面料的褶皱走向融合；避开袋口、拉链缝隙、拉绳和皮肤。要求为原创平面印花，不增加立体配件、口袋或织造结构。"
+    ].filter(Boolean).join("\n");
+  return [fixed, edit, "输出一张可核对的商品照片。"].join("\n");
 }
 
-export async function generatePodImage(model, reference, theme, mode, fetcher = fetch) {
+export async function generatePodImage(model, reference, theme, mode, {
+  fetcher = fetch, referencePhoto, market, strength,
+} = {}) {
   if (!isModelReady(model)) throw new Error("请从已配置模型中选择支持参考图编辑的模型。");
   const base = new URL(model.baseUrl);
   if (!["https:", "http:"].includes(base.protocol) || base.username || base.password) throw new Error("图像模型服务地址无效。");
   base.pathname = base.pathname.replace(/\/(?:chat\/completions|responses|models|images\/(?:generations|edits))\/?$/u, "").replace(/\/$/u, "");
   const ark = isSeedream(model.model);
-  const prompt = artworkPrompt(theme, mode);
+  const stylePhoto = mode === "plain" ? null : referencePhoto;
+  const prompt = artworkPrompt(theme, mode, { market, strength, hasStylePhoto: Boolean(stylePhoto) });
   const headers = model.apiKey ? { Authorization: "Bearer " + model.apiKey.trim() } : {};
   let body;
   if (ark) {
     headers["Content-Type"] = "application/json";
-    body = JSON.stringify({ model: model.model, prompt, image: await podImageData(reference),
+    const images = await Promise.all([reference, stylePhoto].filter(Boolean).map(podImageData));
+    body = JSON.stringify({ model: model.model, prompt, image: stylePhoto ? images : images[0],
       size: "2K", response_format: "b64_json", watermark: false });
   } else {
     const { bytes, type } = await imageBytes(reference);
     body = new FormData();
     body.set("model", model.model);
     body.set("prompt", prompt);
-    body.set("image", new Blob([bytes], { type }), `reference.${type.split("/")[1]}`);
+    const field = stylePhoto ? "image[]" : "image";
+    body.append(field, new Blob([bytes], { type }), `product.${type.split("/")[1]}`);
+    if (stylePhoto) {
+      const style = await imageBytes(stylePhoto);
+      body.append(field, new Blob([style.bytes], { type: style.type }), `style.${style.type.split("/")[1]}`);
+    }
   }
   const response = await fetcher(base.origin + base.pathname + (ark ? "/images/generations" : "/images/edits"), {
     method: "POST", headers, body, redirect: "error", credentials: "omit", signal: AbortSignal.timeout(130000),
