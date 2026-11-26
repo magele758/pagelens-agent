@@ -21,11 +21,24 @@ test("SKC switches, counts, and prompts keep the original face and requested cha
   assert.equal(defaults.variants.length, 3);
   assert.equal(new Set(defaults.variants.map(row => row.color)).size, 3);
   assert.equal(new Set(defaults.variants.map(row => row.print)).size, 3);
+  for (const variant of makeKitPlan({ count: 12 }).variants) {
+    const prompt = kitPrompt("front", "front", variant);
+    assert.match(prompt, /实际可见的印花为唯一依据/u);
+    assert.match(prompt, /不要加入参考图中没有的主题/u);
+    assert.match(prompt, /纯色底图保持纯色/u);
+    assert.doesNotMatch(prompt, /城市|建筑|街景|海报|山脉/u);
+  }
   const pairs = makeKitPlan({ source: "back", count: 4, colorList: "黑色、粉色", designList: "伦敦、纽约" });
   assert.deepEqual(new Set(pairs.variants.map(row => row.label)), new Set(["黑色 伦敦", "黑色 纽约", "粉色 伦敦", "粉色 纽约"]));
+  for (const variant of pairs.variants) {
+    const prompt = kitPrompt("back", "back", variant);
+    assert.ok(prompt.includes(variant.print));
+    assert.match(prompt, /清除与新主题无关的旧印花/u);
+    assert.doesNotMatch(prompt, /实际可见的印花为唯一依据/u);
+  }
   const onlyPrint = makeKitPlan({ recolor: false, originalColor: "黑色" });
   assert.match(kitPrompt("back", "back", onlyPrint.variants[0]), /服装底色与配饰颜色保持不变/u);
-  assert.match(kitPrompt("back", "back", onlyPrint.variants[0]), /不要保留原图的副标题或标语/u);
+  assert.match(kitPrompt("back", "back", onlyPrint.variants[0]), /本款只做这一项微调/u);
   const onlyColor = makeKitPlan({ redesign: false });
   assert.match(kitPrompt("front", "front", onlyColor.variants[0]), /保留现有印花/u);
   assert.equal(makeKitPlan({ recolor: false, redesign: false }).variants.length, 1);
