@@ -14,8 +14,20 @@ const viewDirections = {
 };
 const colors = ["蓝色", "粉色", "绿色", "黑色", "灰色", "白色", "棕色", "紫色", "红色",
   "黄色", "橙色", "卡其色"];
-const designs = ["几何线条", "复古山脉", "城市建筑", "黑白摄影风", "自然等高线", "复古字母", "抽象波纹",
-  "公路风景", "简约植物", "手绘山景", "复古海报", "手绘海岸"];
+const printAdjustments = [
+  ["疏密微调", "仅略微拉开原有重复图案的间距，覆盖区域保持不变"],
+  ["比例微调", "仅略微缩小原有的重复图案，保留布局与留白"],
+  ["对比度微调", "仅略微降低非文字印花的对比度，让图案与底色自然融合"],
+  ["纹样间距微调", "仅略微收紧现有纹样的重复间距"],
+  ["细线微调", "仅略微减细已有纹样的线条，保留其轮廓"],
+  ["做旧微调", "如果原印花有做旧效果，仅略微弱化现有磨损"],
+  ["边缘微调", "仅略微柔化原印花的边缘"],
+  ["面积微调", "仅略微调整现有图案单元的大小，整体覆盖区域不变"],
+  ["色阶微调", "仅略微调整现有印花的深浅，保持色系一致"],
+  ["饱和度微调", "仅略微降低现有印花的饱和度"],
+  ["重复节奏微调", "仅略微调整已有纹样的重复节奏，保持原有方向"],
+  ["层次微调", "仅略微减弱现有纹样的次要细节"],
+];
 const split = value => [...new Set(String(value ?? "").split(/[,，、\n]/u).map(s => s.trim()).filter(Boolean))].slice(0, 12);
 const defaultSizes = ["S", "M", "L", "XL"];
 
@@ -33,13 +45,15 @@ export function makeKitPlan({ source = "front", count = 3, recolor = true, redes
 
   // Rotate print assignments so the first variants differ in both dimensions.
   const colorChoices = recolor ? tones.length ? tones : colors : [base];
-  const printChoices = redesign ? prints.length ? prints : designs : [""];
+  const printChoices = !redesign ? [{ print: "" }] : prints.length
+    ? prints.map(print => ({ print }))
+    : printAdjustments.map(([print, adjustment]) => ({ print, adjustment }));
   for (let offset = 0; offset < printChoices.length; offset++) {
     for (const [index, color] of colorChoices.entries()) {
-      const print = printChoices[(index + offset) % printChoices.length];
-      const label = [color.slice(0, 12), print.slice(0, 16)].filter(Boolean).join(" ");
+      const choice = printChoices[(index + offset) % printChoices.length];
+      const label = [color.slice(0, 12), choice.print.slice(0, 16)].filter(Boolean).join(" ");
       if (variants.some(variant => variant.label === label)) continue;
-      variants.push({ label, color, recolor: Boolean(recolor), print });
+      variants.push({ label, color, recolor: Boolean(recolor), ...choice });
       if (variants.length === count) return { source, sizes, variants };
     }
   }
@@ -52,8 +66,16 @@ export function kitPrompt(slot, source, variant) {
     `参考图是${kitViews[source]}。制作同一件商品的${kitViews[slot]}，只输出一张照片。`,
     visuallyLocked, original, viewDirections[slot],
   ].join("\n");
-  const changePrint = variant.print ? `在参考原印花所在面，用「${variant.print}」替换原主题，保持原有印花区域、布局和大致比例；原图无印花时只在当前展示面增加一个平面原创图案。禁止把背面图案迁移到正面。替换区域内先完整移除旧印花，包括上方小字、原副标题、底部标语、旧商标、地名、标识、街景或异地文字。城市款只印新城市的正确名称和本地街景，留空其余文字区域；不要补写任何口号，不要保留原图的副标题或标语。` :
-    "保留现有印花的文字、位置、比例和颜色。";
+  let changePrint = "保留现有印花的文字、位置、比例和颜色。";
+  if (variant.adjustment) {
+    changePrint = [
+      "以参考照片中实际可见的印花为唯一依据，做同款小幅变体。保留原有图案类型、主要元素、覆盖位置和视觉比例。底图有格纹、条纹或做旧印花时，保持其原有风格和搭配关系。",
+      `本款只做这一项微调：${variant.adjustment}。只调整适用的部分，原图没有可调整的对应特征时保留原样。`,
+      "不要加入参考图中没有的主题、具象图景、文字、标语、标志或装饰。原图文字有则保留，不要补写、重绘或替换难辨字样。纯色底图保持纯色，不新增印花。印花贴合面料褶皱，不移到其他面或实物部件上。",
+    ].join("\n");
+  } else if (variant.print) {
+    changePrint = `按用户指定的「${variant.print}」替换原主题。沿用现有印花的覆盖位置、布局、相对比例和面料融合方式，无原印花时只在当前展示面加入指定图案。清除与新主题无关的旧印花、小字、副标题、标语及标志；保留实物标签和配件。仅表现用户指定主题，所需文字须正确，其他地方留空。印花只在当前服装表面，不跨越口袋开口、拉链及车缝。`;
+  }
   return [
     `用参考的${kitViews[source]}作为 SKC 主图，保留拍摄角度、人、姿势、裁切和背景，只编辑这一件服装。`,
     visuallyLocked,

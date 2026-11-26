@@ -138,7 +138,7 @@ export function bindTemuPod({ getSettings, onBack }) {
             <label class="field" data-part="baseColorField" hidden>底图颜色（可选）
               <input data-part="baseColor" maxlength="12" placeholder="例如黑色"></label>
             <label class="field" data-part="designField">印花（逗号分隔，可选）
-              <input data-part="kitDesigns" maxlength="360" placeholder="例如伦敦、纽约；留空使用内置主题"></label>
+              <input data-part="kitDesigns" maxlength="360" placeholder="留空按原图微调；填写后按指定主题改印花"></label>
             <label class="field">尺码（无尺码表时使用，可选）
               <input data-part="kitSizes" maxlength="150" placeholder="沿用商品尺码，缺失时默认 S、M、L、XL"></label>
           </div>
