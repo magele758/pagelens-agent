@@ -20,6 +20,8 @@ export const AGENT_SETTINGS_SCHEMA = [
   { key: "multimodal.model", label: "多模态模型名", type: "string", max: 200 },
   { key: "multimodal.baseUrl", label: "多模态服务地址", type: "url", sensitive: true },
   { key: "multimodal.apiKey", label: "多模态 API Key", type: "string", secret: true, sensitive: true },
+  { key: "multimodal.authMode", label: "多模态认证方式", type: "enum", values: ["api-key", "cookie-proxy"], sensitive: true },
+  { key: "multimodal.cookieUrl", label: "多模态 Cookie 提取地址", type: "url", sensitive: true },
   { key: "jev.enabled", label: "启用 JEV", type: "boolean" },
   { key: "jev.model", label: "JEV 模型名", type: "string", max: 200 },
   { key: "jev.baseUrl", label: "JEV 服务地址", type: "url", sensitive: true },
@@ -47,7 +49,7 @@ const SCHEMA_BY_KEY = new Map(AGENT_SETTINGS_SCHEMA.map((f) => [f.key, f]));
 export const AGENT_HIDDEN_SETTINGS = Object.freeze(["agentGatewayEnabled", "agentTokens"]);
 
 // Defence in depth: a future schema entry that forgets `sensitive` still gets flagged.
-const SENSITIVE_KEY = /key|secret|token|password|baseurl|endpoint|origin|allow|inbox|hitl|bridge|shell|cdp|irreversible|langfuse\.enabled/i;
+const SENSITIVE_KEY = /key|secret|token|password|cookie|authmode|baseurl|endpoint|origin|allow|inbox|hitl|bridge|shell|cdp|irreversible|langfuse\.enabled/i;
 
 /**
  * Safety settings the chat agent may never change, not even with confirmation: they decide what needs

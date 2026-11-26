@@ -1,4 +1,5 @@
 import { enabledModelOptions } from "../lib/text-providers.js";
+import { isCookieProxyModel } from "../lib/cookie-proxy.js";
 import { isModelReady } from "../lib/storage.js";
 import { normalizeJevSettings, isJevConfigured, testJevConnection } from "../lib/jev.js";
 
@@ -88,7 +89,9 @@ export function createSettingsPage({ root, getSettings, onModelChange }) {
     }
     if (find("settings-provider-type")) {
       find("settings-provider-type").textContent = isModelReady(settings.text)
-        ? (activeProvider?.preset === "custom" ? "OpenAI 兼容服务" : (activeProvider?.name ? `${activeProvider.name} · 服务` : "OpenAI 兼容服务"))
+        ? (isCookieProxyModel(activeProvider)
+          ? (activeProvider.preset === "ai-agent-node" ? "ai-agent-node · Cookie 代理" : "Cookie 代理转发")
+          : activeProvider?.preset === "custom" ? "OpenAI 兼容服务" : (activeProvider?.name ? `${activeProvider.name} · 服务` : "OpenAI 兼容服务"))
         : "尚未配置模型服务";
     }
 

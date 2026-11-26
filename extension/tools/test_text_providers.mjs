@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { isModelReady, normalizeSettings } from "../lib/storage.js";
+import { PRESETS, isModelReady, normalizeSettings } from "../lib/storage.js";
 import {
   addProviderModel,
   enabledModelOptions,
   hydrateTextCatalog,
   mergeScannedModels,
   modelsUrl,
+  normalizeProvider,
   parseRemoteModelList,
   pickDefaultRef,
   providerFromLegacyText,
@@ -13,6 +14,7 @@ import {
   setAllProviderModelsEnabled,
   setProviderModelEnabled,
   suggestProviderName,
+  textSlotFromRef,
 } from "../lib/text-providers.js";
 
 assert.equal(modelsUrl("https://api.openai.com/v1"), "https://api.openai.com/v1/models");
@@ -101,5 +103,107 @@ assert.equal(isModelReady({ ...saved.text, apiKey: " " }), false);
 const empty = normalizeSettings({});
 assert.equal(empty.textProviders.length, 0);
 assert.equal(empty.textRef, null);
+
+const agentNode = PRESETS.find((preset) => preset.id === "ai-agent-node");
+assert.ok(agentNode, "ai-agent-node preset exists");
+assert.equal(agentNode.authMode, "cookie-proxy");
+assert.equal(agentNode.baseUrl, "http://127.0.0.1:8811/api/model-proxy/v1");
+assert.equal(suggestProviderName(agentNode.baseUrl, "ai-agent-node"), "ai-agent-node");
+
+const cookieProvider = normalizeProvider({
+  id: "cookie-node",
+  preset: "ai-agent-node",
+  authMode: "cookie-proxy",
+  cookieUrl: " https://tango.example.com/session ",
+  baseUrl: agentNode.baseUrl,
+  models: ["proxy-model"],
+});
+assert.equal(cookieProvider.authMode, "cookie-proxy");
+assert.equal(cookieProvider.cookieUrl, "https://tango.example.com/session");
+assert.equal(cookieProvider.models[0].id, "proxy-model");
+
+const apiKeyProvider = normalizeProvider({
+  id: "openai-key",
+  preset: "openai",
+  authMode: "api-key",
+  cookieUrl: "https://tango.example.com/session",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "sk-x",
+  models: [{ id: "gpt-4o-mini", enabled: true }],
+});
+assert.equal(apiKeyProvider.authMode, "api-key");
+
+const hydratedCookie = hydrateTextCatalog({}, {
+  preset: "ai-agent-node",
+  baseUrl: agentNode.baseUrl,
+  model: "proxy-model",
+  apiKey: "",
+  authMode: "cookie-proxy",
+  cookieUrl: "https://tango.example.com/session",
+});
+assert.equal(hydratedCookie.textProviders[0].preset, "ai-agent-node");
+assert.equal(hydratedCookie.text.authMode, "cookie-proxy");
+assert.equal(hydratedCookie.text.cookieUrl, "https://tango.example.com/session");
+assert.equal(hydratedCookie.textRef.modelId, "proxy-model");
+
+const cookieSlot = textSlotFromRef(
+  [cookieProvider, apiKeyProvider],
+  { providerId: "cookie-node", modelId: "proxy-model" },
+  {},
+);
+assert.equal(cookieSlot.authMode, "cookie-proxy");
+assert.equal(cookieSlot.cookieUrl, "https://tango.example.com/session");
+const apiKeySlot = textSlotFromRef(
+  [cookieProvider, apiKeyProvider],
+  { providerId: "openai-key", modelId: "gpt-4o-mini" },
+  cookieSlot,
+);
+assert.equal(Object.hasOwn(apiKeySlot, "authMode"), false, "switching back to an API-key provider clears authMode");
+assert.equal(Object.hasOwn(apiKeySlot, "cookieUrl"), false, "switching back to an API-key provider clears cookieUrl");
+
+const cookieSettings = normalizeSettings({
+  textProviders: [cookieProvider, apiKeyProvider],
+  textRef: { providerId: "cookie-node", modelId: "proxy-model" },
+  multimodal: {
+    baseUrl: "https://vision.example/v1",
+    model: "vl",
+    authMode: "cookie-proxy",
+    cookieUrl: "https://tango.example.com/session",
+  },
+});
+assert.equal(cookieSettings.text.authMode, "cookie-proxy");
+assert.equal(cookieSettings.text.cookieUrl, "https://tango.example.com/session");
+assert.equal(cookieSettings.multimodal.authMode, "cookie-proxy");
+assert.equal(cookieSettings.multimodal.cookieUrl, "https://tango.example.com/session");
+assert.equal(isModelReady({
+  authMode: "cookie-proxy",
+  baseUrl: "https://gateway.example/v1",
+  model: "remote-model",
+  apiKey: "",
+}), true, "remote https cookie-proxy is ready without an API key");
+assert.equal(isModelReady({
+  authMode: "cookie-proxy",
+  baseUrl: "https://gateway.example/v1",
+  cookieUrl: "https://tango.example.com/session",
+  model: "remote-model",
+  apiKey: "",
+}), true);
+assert.equal(isModelReady({
+  authMode: "cookie-proxy",
+  baseUrl: "https://gateway.example/v1",
+  cookieUrl: "javascript:alert(1)",
+  model: "remote-model",
+}), false, "invalid cookieUrl is not ready");
+assert.equal(isModelReady(cookieSettings.text), true);
+
+const switched = normalizeSettings({
+  ...cookieSettings,
+  textRef: { providerId: "openai-key", modelId: "gpt-4o-mini" },
+  multimodal: { ...cookieSettings.multimodal, authMode: "api-key", cookieUrl: "https://tango.example.com/session" },
+});
+assert.equal(Object.hasOwn(switched.text, "authMode"), false);
+assert.equal(Object.hasOwn(switched.text, "cookieUrl"), false);
+assert.equal(Object.hasOwn(switched.multimodal, "authMode"), false);
+assert.equal(Object.hasOwn(switched.multimodal, "cookieUrl"), false);
 
 console.log("PASS text-providers");

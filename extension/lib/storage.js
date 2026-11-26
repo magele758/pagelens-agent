@@ -3,9 +3,11 @@ import { hydrateTextCatalog } from "./text-providers.js";
 import { normalizeJevSettings } from "./jev.js";
 import { normalizeBridgeSettings } from "./bridge/policy.js";
 import { defaultIrreversibleActions, normalizeIrreversibleActions } from "./agent/trust/irreversible.js";
+import { isCookieProxyModel, isValidHttpUrl, normalizeAuthMode } from "./cookie-proxy.js";
 
 export const PRESETS = [
   { id: "custom", name: "自定义", baseUrl: "" },
+  { id: "ai-agent-node", name: "ai-agent-node 代理（Cookie）", baseUrl: "http://127.0.0.1:8811/api/model-proxy/v1", authMode: "cookie-proxy" },
   { id: "local-mock", name: "本地 Mock（开发）", baseUrl: "http://127.0.0.1:18787/v1" },
   { id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
@@ -130,9 +132,17 @@ export function normalizeSettings(raw) {
   const catalog = hydrateTextCatalog(raw || merged, merged.text);
   merged.textProviders = catalog.textProviders;
   merged.textRef = catalog.textRef;
-  merged.text = { ...merged.text, ...catalog.text };
+  // catalog.text already copied prev fields and stripped cookie keys for api-key providers.
+  merged.text = catalog.text;
   merged.text.summaryInputTokens = normalizeSummaryInputTokens(merged.text.summaryInputTokens);
   merged.multimodal = { ...base.multimodal, ...(raw?.multimodal || {}) };
+  if (normalizeAuthMode(raw?.multimodal?.authMode) === "cookie-proxy") {
+    merged.multimodal.authMode = "cookie-proxy";
+    merged.multimodal.cookieUrl = String(raw?.multimodal?.cookieUrl || "").trim();
+  } else {
+    delete merged.multimodal.authMode;
+    delete merged.multimodal.cookieUrl;
+  }
   merged.asr = { ...base.asr, ...(raw?.asr || {}) };
   merged.tts = { ...base.tts, ...(raw?.tts || {}) };
   const factor = Number(merged.tts.durationFactor);
@@ -258,6 +268,12 @@ export function resolveModel(settings, kind) {
 
 export function isModelReady(model) {
   if (!model?.baseUrl?.trim() || !model?.model?.trim()) return false;
+  if (isCookieProxyModel(model)) {
+    if (!isValidHttpUrl(model.baseUrl)) return false;
+    const cookieUrl = String(model.cookieUrl || "").trim();
+    if (cookieUrl && !isValidHttpUrl(cookieUrl)) return false;
+    return true;
+  }
   if (model.apiKey?.trim()) return true;
   try {
     const url = new URL(model.baseUrl);

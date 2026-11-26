@@ -10,6 +10,7 @@ const INSTALL_PERMISSIONS = new Set([
   "alarms",
   "contextMenus",
   "debugger",
+  "declarativeNetRequestWithHostAccess",
   "offscreen",
   "scripting",
   "sidePanel",

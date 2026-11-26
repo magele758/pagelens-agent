@@ -49,7 +49,8 @@
     "clipboardRead",
     "nativeMessaging",
     "webNavigation",
-    "favicon"
+    "favicon",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "<all_urls>",

@@ -2,6 +2,7 @@ import { $ } from "./dom.js";
 import { renderModelLine } from "./model-line.js";
 import { settingsPage } from "./panel-refs.js";
 import { state } from "./state.js";
+import { isCookieProxyModel, normalizeAuthMode, probeCookiesForUrl } from "../lib/cookie-proxy.js";
 import { listRemoteModels } from "../lib/openai.js";
 import { modifySettings, presetsFor } from "../lib/storage.js";
 import {
@@ -21,9 +22,13 @@ function fieldBlock(prefix, model, hints = {}) {
   const presetOpts = presetsFor(prefix).map(
     (p) => `<option value="${p.id}" ${p.id === model.preset ? "selected" : ""}>${p.name}</option>`,
   ).join("");
+  const cookieProxy = isCookieProxyModel(model);
   return `
     <label class="field">预设
       <select data-k="${prefix}.preset">${presetOpts}</select>
+    </label>
+    <label class="field">认证方式
+      <select data-k="${prefix}.authMode">${authModeOptions(cookieProxy ? "cookie-proxy" : "api-key")}</select>
     </label>
     <label class="field">接口地址
       <input data-k="${prefix}.baseUrl" type="url" value="${escapeAttr(model.baseUrl)}" placeholder="${escapeAttr(hints.baseUrl || "https://api.example.com/v1")}" />
@@ -31,7 +36,15 @@ function fieldBlock(prefix, model, hints = {}) {
     <label class="field">模型 ID
       <input data-k="${prefix}.model" value="${escapeAttr(model.model)}" placeholder="${escapeAttr(hints.model || "gpt-4o-mini")}" />
     </label>
-    <label class="field">API 密钥
+    ${cookieFields({
+      wrapperAttr: `data-cookie-proxy-fields="${prefix}"`,
+      inputAttr: `data-k="${prefix}.cookieUrl"`,
+      buttonAttr: `data-probe-cookie="${prefix}"`,
+      statusAttr: `data-probe-status="${prefix}"`,
+      value: model.cookieUrl,
+      hidden: !cookieProxy,
+    })}
+    <label class="field"><span data-key-label="${prefix}">${apiKeyLabel(cookieProxy)}</span>
       <input data-k="${prefix}.apiKey" type="password" value="${escapeAttr(model.apiKey)}" placeholder="${escapeAttr(hints.key || "sk-…")}" autocomplete="off" />
     </label>
     ${prefix === 'text' ? `<label class="field">视频总结：单次正文上限（token）
@@ -43,6 +56,66 @@ function fieldBlock(prefix, model, hints = {}) {
       <span class="status" data-test-status="${prefix}"></span>
     </div>
   `;
+}
+
+function authModeOptions(selected) {
+  return [
+    ["api-key", "API 密钥（Bearer）"],
+    ["cookie-proxy", "Cookie 代理转发（ai-agent-node 等）"],
+  ].map(([id, label]) => `<option value="${id}" ${id === selected ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function apiKeyLabel(cookieProxy) {
+  return cookieProxy ? "API 密钥（选填，Cookie 代理通常留空）" : "API 密钥";
+}
+
+function cookieFields({ wrapperAttr, inputAttr, buttonAttr, statusAttr, value, hidden }) {
+  return `<div class="cookie-proxy-fields" ${wrapperAttr} ${hidden ? "hidden" : ""}>
+      <label class="field">Cookie 提取地址（选填，留空同接口地址）
+        <input ${inputAttr} type="url" value="${escapeAttr(value)}" placeholder="https://your-site.example.com" autocomplete="off" />
+        <small>提取浏览器在该地址已登录的 Cookie 并注入转发到代理接口</small>
+      </label>
+      <div class="cookie-probe-row">
+        <button type="button" class="secondary" ${buttonAttr}>检测 Cookie</button>
+        <span class="status" ${statusAttr} role="status"></span>
+      </div>
+    </div>`;
+}
+
+/** 只展示 Cookie 数量与名称，绝不展示值。 */
+async function runCookieProbe(url, statusEl, button) {
+  if (!statusEl) return;
+  const target = String(url || "").trim();
+  if (!target) {
+    statusEl.textContent = "请先填写 Cookie 提取地址或接口地址";
+    statusEl.className = "status bad";
+    return;
+  }
+  statusEl.textContent = "检测中…";
+  statusEl.className = "status";
+  if (button) button.disabled = true;
+  try {
+    const result = await probeCookiesForUrl(target);
+    if (result?.ok) {
+      const names = (result.cookieNames || []).map(String);
+      const shown = names.slice(0, 3).join(", ");
+      const more = names.length > 3 || result.cookieCount > names.length ? ", …" : "";
+      statusEl.textContent = `已检测到 ${result.cookieCount} 个 Cookie${shown ? `（${shown}${more}）` : ""}`;
+      statusEl.className = "status ok";
+    } else {
+      statusEl.textContent = result?.error || "未检测到 Cookie，请先在浏览器登录该站点";
+      statusEl.className = "status bad";
+    }
+  } catch (err) {
+    statusEl.textContent = err?.message || String(err);
+    statusEl.className = "status bad";
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function cookieOrigin(raw) {
+  try { return new URL(raw).origin; } catch { return ""; }
 }
 
 function escapeAttr(value) {
@@ -103,16 +176,18 @@ function persistTextCatalog(baseRef = state.settings.textRef ? { ...state.settin
       ? textProviders
       : providersKeepingRef(textProviders, latest.textProviders, textRef);
     const slot = textSlotFromRef(providers, textRef, latest.text);
+    const { authMode: _authMode, cookieUrl: _cookieUrl, ...latestText } = latest.text || {};
     return {
       ...latest,
       textProviders: providers,
       textRef,
       text: {
-        ...latest.text,
+        ...latestText,
         preset: slot.preset,
         baseUrl: slot.baseUrl,
         apiKey: slot.apiKey,
         model: slot.model,
+        ...(isCookieProxyModel(slot) ? { authMode: "cookie-proxy", cookieUrl: slot.cookieUrl || "" } : {}),
         summaryInputTokens: latest.text?.summaryInputTokens,
       },
     };
@@ -170,9 +245,12 @@ function renderTextProviders() {
   const providers = state.settings.textProviders || [];
   const ui = state.textProviderUi;
   const current = state.settings.textRef;
+  const draftCookie = normalizeAuthMode(ui.draftAuthMode) === "cookie-proxy";
   const presetOpts = presetsFor("text").map((p) => `<option value="${escapeAttr(p.id)}">${escapeAttr(p.name)}</option>`).join("");
   const cards = providers.map((p) => {
     const editing = ui.editingId === p.id;
+    const cookieProxy = isCookieProxyModel(p);
+    const cookieSource = p.cookieUrl ? cookieOrigin(p.cookieUrl) || p.cookieUrl : "";
     const modelInputId = `provider-model-${escapeAttr(p.id)}`;
     const modelRows = p.models.map((m) => {
       const isCurrent = current?.providerId === p.id && current?.modelId === m.id;
@@ -187,9 +265,9 @@ function renderTextProviders() {
     return `<article class="provider-card" data-tp-provider="${escapeAttr(p.id)}">
       <div class="provider-head">
         <strong>${escapeAttr(p.name)}</strong>
-        <span class="muted">${escapeAttr(p.preset)} · ${p.apiKey ? "已填密钥" : "无密钥"}</span>
+        <span class="muted">${escapeAttr(p.preset)} · ${cookieProxy ? '<span class="cookie-badge">Cookie 代理</span>' : (p.apiKey ? "已填密钥" : "无密钥")}</span>
       </div>
-      <div class="muted provider-url">${escapeAttr(p.baseUrl || "—")}${p.scannedAt ? ` · 扫描于 ${escapeAttr(p.scannedAt.slice(0, 19).replace("T", " "))}` : ""}</div>
+      <div class="muted provider-url">${escapeAttr(p.baseUrl || "—")}${cookieProxy && cookieSource ? `<br>Cookie 来源：${escapeAttr(cookieSource)}` : ""}${p.scannedAt ? ` · 扫描于 ${escapeAttr(p.scannedAt.slice(0, 19).replace("T", " "))}` : ""}</div>
       ${p.scanError ? `<div class="status bad">${escapeAttr(p.scanError)}</div>` : ""}
       <div class="row-btns provider-actions">
         <button type="button" class="secondary" data-tp="scan" data-id="${escapeAttr(p.id)}">扫描模型</button>
@@ -198,7 +276,16 @@ function renderTextProviders() {
       </div>
       ${editing ? `<div class="provider-edit">
         <label class="field">接口地址<input data-tp-edit="baseUrl" data-id="${escapeAttr(p.id)}" type="url" value="${escapeAttr(p.baseUrl)}" /></label>
-        <label class="field">API 密钥<input data-tp-edit="apiKey" data-id="${escapeAttr(p.id)}" type="password" value="" placeholder="留空则不改" autocomplete="off" /></label>
+        <label class="field">认证方式<select data-tp-edit="authMode" data-id="${escapeAttr(p.id)}">${authModeOptions(cookieProxy ? "cookie-proxy" : "api-key")}</select></label>
+        ${cookieFields({
+          wrapperAttr: `data-tp-edit-cookie="${escapeAttr(p.id)}"`,
+          inputAttr: `data-tp-edit="cookieUrl" data-id="${escapeAttr(p.id)}"`,
+          buttonAttr: `data-tp="probe-edit-cookie" data-id="${escapeAttr(p.id)}"`,
+          statusAttr: `data-tp-probe-status="edit" data-id="${escapeAttr(p.id)}"`,
+          value: p.cookieUrl,
+          hidden: !cookieProxy,
+        })}
+        <label class="field">${cookieProxy ? "API 密钥（选填，Cookie 代理通常留空）" : "API 密钥"}<input data-tp-edit="apiKey" data-id="${escapeAttr(p.id)}" type="password" value="" placeholder="留空则不改" autocomplete="off" /></label>
         <div class="row-btns">
           <button type="button" class="primary provider-submit" data-tp="save-edit" data-id="${escapeAttr(p.id)}">保存并扫描</button>
         </div>
@@ -229,9 +316,18 @@ function renderTextProviders() {
     ${ui.err ? `<p class="status bad" role="alert">${escapeAttr(ui.err)}</p>` : ""}
     ${ui.adding ? `<div class="provider-add">
       <label class="field">预设<select data-tp-draft="preset">${presetOpts}</select></label>
+      <label class="field">认证方式<select data-tp-draft="authMode">${authModeOptions(draftCookie ? "cookie-proxy" : "api-key")}</select></label>
       <label class="field">服务商名称（选填）<input data-tp-draft="name" placeholder="默认使用接口域名" /></label>
       <label class="field">接口地址<input data-tp-draft="baseUrl" type="url" placeholder="https://api.example.com/v1" required /></label>
-      <label class="field">API 密钥<input data-tp-draft="apiKey" type="password" placeholder="sk-…" autocomplete="off" /></label>
+      ${cookieFields({
+        wrapperAttr: "data-tp-draft-cookie",
+        inputAttr: 'data-tp-draft="cookieUrl"',
+        buttonAttr: 'data-tp="probe-draft-cookie"',
+        statusAttr: 'data-tp-probe-status="draft"',
+        value: "",
+        hidden: !draftCookie,
+      })}
+      <label class="field"><span data-tp-draft-key-label>${apiKeyLabel(draftCookie)}</span><input data-tp-draft="apiKey" type="password" placeholder="sk-…" autocomplete="off" /></label>
       <label class="field">模型 ID（选填）<input data-tp-draft="model" placeholder="gpt-4o-mini" /></label>
       <div class="row-btns">
         <button type="button" class="primary provider-submit" data-tp="add">添加并扫描</button>
@@ -243,6 +339,18 @@ function renderTextProviders() {
   if (draftPreset && ui.draftPreset) draftPreset.value = ui.draftPreset;
   refreshProviderFilter(root);
   settingsPage?.refreshModels();
+}
+
+function setDraftAuthMode(root, raw) {
+  const mode = normalizeAuthMode(raw);
+  const cookie = mode === "cookie-proxy";
+  state.textProviderUi.draftAuthMode = mode;
+  const select = root.querySelector("[data-tp-draft=authMode]");
+  if (select && select.value !== mode) select.value = mode;
+  const box = root.querySelector("[data-tp-draft-cookie]");
+  if (box) box.hidden = !cookie;
+  const label = root.querySelector("[data-tp-draft-key-label]");
+  if (label) label.textContent = apiKeyLabel(cookie);
 }
 
 function bindTextProvidersOnce() {
@@ -267,12 +375,25 @@ function bindTextProvidersOnce() {
     }
     const draft = e.target.closest("[data-tp-draft=preset]");
     if (draft) {
-      const preset = presetsFor("text").find((p) => p.id === draft.value);
-      state.textProviderUi.draftPreset = draft.value;
+      const ui = state.textProviderUi;
+      const presets = presetsFor("text");
+      const preset = presets.find((p) => p.id === draft.value);
+      const prevAuth = presets.find((p) => p.id === ui.draftPreset)?.authMode;
+      ui.draftPreset = draft.value;
       if (preset) {
         const url = root.querySelector("[data-tp-draft=baseUrl]");
         if (url) url.value = preset.baseUrl || "";
+        if (preset.authMode) setDraftAuthMode(root, preset.authMode);
+        else if (normalizeAuthMode(prevAuth) === "cookie-proxy") setDraftAuthMode(root, "api-key");
       }
+    }
+    if (e.target.closest("[data-tp-draft=authMode]")) setDraftAuthMode(root, e.target.value);
+    const edit = e.target.closest("[data-tp-edit=authMode]");
+    if (edit) {
+      const cookie = normalizeAuthMode(edit.value) === "cookie-proxy";
+      const card = edit.closest(".provider-edit");
+      const box = card?.querySelector("[data-tp-edit-cookie]");
+      if (box) box.hidden = !cookie;
     }
   });
   root.addEventListener("input", (e) => {
@@ -299,7 +420,12 @@ async function scanTextProvider(id) {
   const provider = providerById(id);
   if (!provider) throw new Error("找不到服务商");
   if (!provider.baseUrl.trim()) throw new Error("请填写接口地址");
-  const result = await listRemoteModels({ baseUrl: provider.baseUrl, apiKey: provider.apiKey });
+  const result = await listRemoteModels({
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
+    authMode: provider.authMode,
+    cookieUrl: provider.cookieUrl,
+  });
   replaceProvider({
     ...provider,
     models: mergeScannedModels(provider.models, result.models),
@@ -317,8 +443,25 @@ async function handleTextProviderAction(action, id, modelId, enabled) {
   if (action === "toggle-add") {
     ui.adding = !ui.adding;
     ui.err = "";
+    ui.draftAuthMode = "";
+    ui.draftPreset = "";
     renderTextProviders();
     root.querySelector(ui.adding ? "[data-tp-draft=preset]" : "[data-tp=toggle-add]")?.focus();
+    return;
+  }
+  if (action === "probe-draft-cookie") {
+    const cookieUrl = root.querySelector("[data-tp-draft=cookieUrl]")?.value.trim();
+    const baseUrl = root.querySelector("[data-tp-draft=baseUrl]")?.value.trim();
+    const status = root.querySelector("[data-tp-probe-status=draft]");
+    await runCookieProbe(cookieUrl || baseUrl, status, root.querySelector("[data-tp=probe-draft-cookie]"));
+    return;
+  }
+  if (action === "probe-edit-cookie") {
+    const sel = (name) => root.querySelector(`[data-tp-edit=${name}][data-id="${CSS.escape(id)}"]`);
+    const status = root.querySelector(`[data-tp-probe-status=edit][data-id="${CSS.escape(id)}"]`);
+    const cookieUrl = sel("cookieUrl")?.value.trim();
+    const baseUrl = sel("baseUrl")?.value.trim() || providerById(id)?.baseUrl;
+    await runCookieProbe(cookieUrl || baseUrl, status, root.querySelector(`[data-tp=probe-edit-cookie][data-id="${CSS.escape(id)}"]`));
     return;
   }
   if (action === "add") {
@@ -330,6 +473,10 @@ async function handleTextProviderAction(action, id, modelId, enabled) {
       return;
     }
     const apiKey = root.querySelector("[data-tp-draft=apiKey]")?.value || "";
+    const authMode = normalizeAuthMode(root.querySelector("[data-tp-draft=authMode]")?.value);
+    const cookieUrl = authMode === "cookie-proxy"
+      ? root.querySelector("[data-tp-draft=cookieUrl]")?.value.trim() || ""
+      : "";
     const model = root.querySelector("[data-tp-draft=model]")?.value.trim() || "";
     const name = root.querySelector("[data-tp-draft=name]")?.value.trim() || suggestProviderName(baseUrl, preset);
     const provider = normalizeProvider({
@@ -338,11 +485,15 @@ async function handleTextProviderAction(action, id, modelId, enabled) {
       preset,
       baseUrl,
       apiKey,
+      authMode,
+      cookieUrl,
       models: model ? [{ id: model, enabled: true }] : [],
     });
     state.settings.textProviders = [...(state.settings.textProviders || []), provider];
     if (model) state.settings.textRef = { providerId: provider.id, modelId: model };
     ui.adding = false;
+    ui.draftAuthMode = "";
+    ui.draftPreset = "";
     ui.msg = `已新增「${provider.name}」`;
     ui.err = "";
     if (baseUrl) {
@@ -369,9 +520,15 @@ async function handleTextProviderAction(action, id, modelId, enabled) {
     if (!provider) return;
     const baseUrl = root.querySelector(`[data-tp-edit=baseUrl][data-id="${CSS.escape(id)}"]`)?.value.trim() || provider.baseUrl;
     const apiKeyRaw = root.querySelector(`[data-tp-edit=apiKey][data-id="${CSS.escape(id)}"]`)?.value || "";
+    const authMode = normalizeAuthMode(root.querySelector(`[data-tp-edit=authMode][data-id="${CSS.escape(id)}"]`)?.value ?? provider.authMode);
+    const cookieUrl = authMode === "cookie-proxy"
+      ? (root.querySelector(`[data-tp-edit=cookieUrl][data-id="${CSS.escape(id)}"]`)?.value.trim() ?? provider.cookieUrl ?? "")
+      : "";
     replaceProvider({
       ...provider,
       baseUrl,
+      authMode,
+      cookieUrl,
       apiKey: apiKeyRaw.trim() ? apiKeyRaw : provider.apiKey,
       name: provider.name || suggestProviderName(baseUrl, provider.preset),
     });
@@ -446,6 +603,8 @@ async function handleTextProviderAction(action, id, modelId, enabled) {
 
 export {
   fieldBlock,
+  runCookieProbe,
+  apiKeyLabel,
   escapeAttr,
   syncTextCatalog,
   persistTextCatalog,

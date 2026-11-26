@@ -245,4 +245,82 @@ for (const request of requests) {
 resetPermissionPrompter();
 delete globalThis.chrome;
 
-console.log("PASS openai content parse, thinking-budget retry, stream fallback, host permissions");
+const cookieModel = {
+  authMode: "cookie-proxy",
+  baseUrl: "http://127.0.0.1:8811/api/model-proxy/v1",
+  cookieUrl: "https://tango.example.com",
+  model: "proxy-model",
+  apiKey: "",
+};
+const cookieCalls = [];
+function cookieHeader(headers, name) {
+  if (!headers) return undefined;
+  if (typeof headers.get === "function") return headers.get(name);
+  const key = Object.keys(headers).find((item) => item.toLowerCase() === name.toLowerCase());
+  return key ? headers[key] : undefined;
+}
+function installCookieChrome({ allowHost = true } = {}) {
+  globalThis.chrome = {
+    permissions: {
+      contains: async (query) => allowHost || !query.origins,
+      request: async () => false,
+    },
+    cookies: {
+      getAll: async (query) => {
+        cookieCalls.push(query);
+        return [{ name: "sid", value: "secret", path: "/" }];
+      },
+    },
+  };
+}
+installCookieChrome();
+globalThis.fetch = async (url, opts) => {
+  cookieCalls.push({ url: String(url), opts });
+  if (String(url).endsWith("/models")) {
+    return Response.json({ data: [{ id: cookieModel.model }] });
+  }
+  const body = opts?.body ? JSON.parse(opts.body) : {};
+  if (body.stream) {
+    return sseResponse([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "流式" } }] })}\n\n`,
+      "data: [DONE]\n\n",
+    ]);
+  }
+  return Response.json({ choices: [{ message: { content: "pong" }, finish_reason: "stop" }] });
+};
+resetPermissionPrompter();
+const listed = await listRemoteModels(cookieModel);
+assert.equal(listed.models[0].id, cookieModel.model);
+const connected = await testConnection(cookieModel);
+assert.equal(connected.ok, true);
+assert.equal(connected.preview, "pong");
+assert.equal(await completeChat(cookieModel, { messages: [{ role: "user", content: "ping" }] }), "pong");
+const streamedCookie = await streamTurn(cookieModel, { messages: [{ role: "user", content: "ping" }] });
+assert.equal(streamedCookie.content, "流式");
+const forwarded = cookieCalls.filter((call) => call && call.opts);
+assert.equal(forwarded.length, 4, "list, connect, complete, and stream each forward once");
+for (const call of forwarded) {
+  assert.equal(cookieHeader(call.opts.headers, "Authorization"), undefined, "cookie-proxy without a key omits Authorization");
+  assert.equal(cookieHeader(call.opts.headers, "X-Forwarded-Cookie"), "sid=secret");
+}
+assert.ok(cookieCalls.some((query) => query?.url === "https://tango.example.com"));
+
+cookieCalls.length = 0;
+installCookieChrome({ allowHost: false });
+resetPermissionPrompter();
+setPermissionPrompter(() => false);
+const fetchesBeforeDeny = cookieCalls.filter((call) => call && call.opts).length;
+for (const request of [
+  () => listRemoteModels(cookieModel),
+  () => testConnection(cookieModel),
+  () => completeChat(cookieModel, { messages: [] }),
+  () => streamTurn(cookieModel, { messages: [] }),
+]) {
+  await assert.rejects(request, /未授予权限/);
+}
+assert.equal(cookieCalls.filter((call) => call && call.opts).length, fetchesBeforeDeny, "denied hosts do not fetch");
+assert.equal(cookieCalls.some((query) => query?.url === "https://tango.example.com"), false, "denied hosts do not read cookies");
+resetPermissionPrompter();
+delete globalThis.chrome;
+
+console.log("PASS openai content parse, thinking-budget retry, stream fallback, host permissions, cookie proxy");
