@@ -6,7 +6,7 @@ import { join, basename } from "node:path";
 import { test } from "node:test";
 import { createGeekbiClient } from "../integrations/geekbi/client.js";
 import { europeanSites, normalizeCandidates, productForCandidate, reviewPod, sourcingParams, mapPodJobs } from "../flows/temu/pod/service.js";
-import { resolvePodImageModel, generatePodImage, arkImageModel } from "../flows/temu/pod/image-model.js";
+import { resolvePodImageModel, generatePodImage, artworkPrompt, arkImageModel } from "../flows/temu/pod/image-model.js";
 import { saveArtwork } from "../flows/temu/pod/directory.js";
 import { loadProductDirectory } from "../../native/product-directory.mjs";
 
@@ -29,10 +29,11 @@ test("GeekBI canonical GET/POST, image hash, cache, concurrency, and budget", as
       const headers = options.headers;
       const values = [options.method, target.pathname, target.search.slice(1), headers["X-GB-Timestamp"], headers["X-GB-Nonce"]];
       if (options.method === "POST") {
-        assert.equal(target.search, "?siteId=15");
+        assert.equal(target.search, "");
+        assert.equal(options.body.get("siteId"), "15");
         const file = options.body.get("file");
         assert.equal(file.type, "image/jpeg");
-        const digest = sha(`file:file=${sha(Buffer.from(await file.arrayBuffer()))}&page=1&size=12`);
+        const digest = sha(`file:file=${sha(Buffer.from(await file.arrayBuffer()))}&page=1&siteId=15&size=12`);
         assert.equal(headers["X-GB-Body-SHA256"], digest);
         values.push(digest);
       }
@@ -79,6 +80,16 @@ test("only EU sites and male apparel reach review, preserving market figures and
   assert.deepEqual(await mapPodJobs([1, 2, 3], 2, async n => n * 2), [{ value: 2 }, { value: 4 }, { value: 6 }]);
 });
 
+test("selected market photos drive the artwork prompt independently of listing copy", () => {
+  const title = "Men's Novel Color Block Pullover Hoodie";
+  const prompt = artworkPrompt("", "print", { hasStylePhoto: true, market: title });
+  assert.doesNotMatch(prompt, /Pullover Hoodie/u);
+  assert.match(prompt, /色块顺序、相对尺寸和分界走向/u);
+  assert.match(prompt, /不改裤子等其他衣物/u);
+  assert.match(artworkPrompt("深色在肩部", "print", { hasStylePhoto: true }), /用户补充要求：深色在肩部/u);
+  assert.doesNotMatch(artworkPrompt("", "plain", { hasStylePhoto: true }), /图2/u);
+});
+
 test("image edits use an existing model provider and approved product directories remain importable", async () => {
   const model = resolvePodImageModel({
     text: { model: "text-only" },
@@ -92,7 +103,7 @@ test("image edits use an existing model provider and approved product directorie
       assert.equal(body.model, arkImageModel);
       assert.equal(body.image.length, 2);
       assert.match(body.prompt, /图1是唯一商品底图/u);
-      assert.match(body.prompt, /图2是市场风格参考/u);
+      assert.match(body.prompt, /图2只作视觉参考/u);
       assert.match(body.prompt, /进阶印花裂变/u);
       return Response.json({ data: [{ b64_json: Buffer.from(await image.arrayBuffer()).toString("base64") }] });
     },

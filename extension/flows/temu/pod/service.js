@@ -162,10 +162,12 @@ export function candidateReviewPrompt(candidate) {
     + "\n商品标题：" + candidate.title;
 }
 
-export function imageCheckPrompt(theme) {
+export function imageCheckPrompt(theme, { hasReference = false } = {}) {
   return "第一张为原图，第二张为富图。对比口袋的数量、位置、尺寸和形状，以及门襟拉链、帽型、袖口、下摆、缝线、颜色、比例和视角。检查口袋上是否新增或丢失真实布标、徽章、纽扣、铆钉等实物部件。"
     + "只允许指定印花变化。正面没出现在图里就标明不可核对。"
-    + "检查主题拼写和图案是否异常。仅以 JSON 输出 result（通过、需修改、待核对）、evidence（逐项差异或不可见部分）。"
+    + "检查主题拼写和图案是否异常。"
+    + (hasReference ? "第三张为印花参考。检查成图是否保留了第三张最显眼的配色、色块方向、覆盖范围和布局；原图以外的衣物、人物或背景有变化，以及参考仅为拼色却新增无关图案，都判为需修改。" : "")
+    + "仅以 JSON 输出 result（通过、需修改、待核对）、evidence（逐项差异或不可见部分）。"
     + "\n主题：" + theme;
 }
 

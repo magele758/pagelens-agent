@@ -25,23 +25,32 @@ export function resolvePodImageModel(settings, ref) {
   return resolveModel(settings, "text");
 }
 
-export function artworkPrompt(theme, mode, { market, strength = "standard", hasStylePhoto = false } = {}) {
-  const fixed = "图1是唯一商品底图。锁定拍摄角度、人物、背景和裁切范围。锁定服装底色、版型、比例与材质，按图1原样保留口袋数量、开口位置、形状、拉链、腰头、抽绳、缝线、袖口和下摆。已有的实物标签原样保留，禁止新增贴标、徽章或五金。只有平面印花区域允许改动。";
-  const marketNote = market ? `Temu 市场参考的款式特征：${market}。这是风格依据，不能移植参考款的服装结构。` : "";
-  const styleImage = hasStylePhoto ? "图2是市场风格参考。只提取印花布局、覆盖率、色彩关系和图案密度。以图1为唯一照片底稿，不复制图2的原始图案、文字、商标、人物或背景。" : "";
-  const edit = mode === "plain"
-    ? "去除原有印花和印刷文字，用同一面料的干净纯色无痕补齐，保留原有高光、阴影和褶皱。"
-    : [
-      strength === "advanced" ? "进阶印花裂变。新设计可改变印花布局、节奏与配色，但仍只修改印花。" :
-        "标准印花裂变。已有印花时保留大致位置和覆盖范围，改成不同的原创画面。纯色底图按指定位置增加印花。",
-      marketNote, styleImage, `原创设计要求：${theme}。`,
-      "所有图案沿真实面料的褶皱走向融合；避开袋口、拉链缝隙、拉绳和皮肤。要求为原创平面印花，不增加立体配件、口袋或织造结构。"
+export function artworkPrompt(theme, mode, { strength = "standard", hasStylePhoto = false } = {}) {
+  const fixed = "图1是唯一商品底图。锁定拍摄角度、人物、姿势、背景、裁切，以及其他衣物和配饰。保留商品版型、比例、面料质感、口袋数量与开口、领口、拉链、腰头、抽绳、缝线、袖口、下摆以及已有实物标签。禁止新增贴标、徽章、拼接缝、五金或立体材质。只改图1目标商品的表面，不改裤子等其他衣物。";
+  let edit;
+  if (mode === "plain") {
+    edit = "去除原有印花和印刷文字，用同一面料的干净纯色无痕补齐，保留原本的底色、高光、阴影和褶皱。";
+  } else if (hasStylePhoto) {
+    edit = [
+      "图2只作视觉参考。直接观察图2衣服上可见的图案、色块比例、配色、边界方向、布局和覆盖范围，将最显眼的特征映射到图1现有面料表面。参考是纯拼色时，重点迁移色块顺序、相对尺寸和分界走向，将各色块视为纯平面色层，只借颜色和边界；排除参考图的粗糙颗粒、编织纹、绒面、毛圈和材质明暗，不要另加迷彩、图案、装饰条或实体拼接。",
+      strength === "advanced" ? "进阶印花裂变。可以重新组织图2的视觉元素，成图仍须能看出它的主色关系与标志性布局。" :
+        "标准印花裂变。保留图2的主要配色与布局关系，包括纯色底图上的新增色块；允许改变被覆盖区域的颜色，其余区域保持图1原样。",
+      theme && `用户补充要求：${theme}。按此细化图2可见的视觉特征。`,
+      "只迁移平面视觉特征，不复制图2的服装类型、部件、材质、文字、商标、模特或场景。各色块下方必须连续保留图1原有的细纹、光泽、褶皱和阴影，像同一块面料换色；保护拉链、袋口、罗纹和皮肤。",
     ].filter(Boolean).join("\n");
+  } else {
+    edit = [
+      strength === "advanced" ? "进阶印花裂变。允许重排印花布局、节奏与配色。" :
+        "标准印花裂变。已有印花时保留大致位置和覆盖范围，纯色底图按指定位置新增印花。",
+      `原创设计要求：${theme}。`,
+      "只改平面印花，其他区域保留底色。所有图案沿面料褶皱自然贴合，避开袋口、拉链和皮肤。",
+    ].join("\n");
+  }
   return [fixed, edit, "输出一张可核对的商品照片。"].join("\n");
 }
 
 export async function generatePodImage(model, reference, theme, mode, {
-  fetcher = fetch, referencePhoto, market, strength,
+  fetcher = fetch, referencePhoto, strength,
 } = {}) {
   if (!isModelReady(model)) throw new Error("请从已配置模型中选择支持参考图编辑的模型。");
   const base = new URL(model.baseUrl);
@@ -49,7 +58,7 @@ export async function generatePodImage(model, reference, theme, mode, {
   base.pathname = base.pathname.replace(/\/(?:chat\/completions|responses|models|images\/(?:generations|edits))\/?$/u, "").replace(/\/$/u, "");
   const ark = isSeedream(model.model);
   const stylePhoto = mode === "plain" ? null : referencePhoto;
-  const prompt = artworkPrompt(theme, mode, { market, strength, hasStylePhoto: Boolean(stylePhoto) });
+  const prompt = artworkPrompt(theme, mode, { strength, hasStylePhoto: Boolean(stylePhoto) });
   const headers = model.apiKey ? { Authorization: "Bearer " + model.apiKey.trim() } : {};
   let body;
   if (ark) {

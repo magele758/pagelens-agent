@@ -58,3 +58,42 @@
 .pod-reference small { color: var(--muted); }
 .pod-reference p { margin: 0; overflow-wrap: anywhere; }
 .pod-reference button { justify-self: start; }
+
+.pod-product-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
+}
+.pod-product-grid .pod-card { padding: 8px; }
+.pod-product-grid .pod-card-head { display: grid; gap: 6px; }
+.pod-product-grid .pod-card-head small, .pod-card-title span, .pod-reference-label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pod-product-grid .pod-card-head small { margin-top: 0; }
+.pod-card-title { display: flex; min-width: 0; }
+.pod-card-title span, .pod-reference-label { min-width: 0; }
+.pod-thumb.pod-large-img, .pod-empty-img.pod-large-img {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 4;
+  background: var(--surface-soft, var(--surface));
+}
+.pod-thumb.pod-large-img { cursor: zoom-in; }
+.pod-large-img img { height: 100%; }
+.pod-product-grid .pod-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pod-product-grid .pod-metrics dd { overflow-wrap: anywhere; }
+.pod-product-grid .pod-actions { gap: 5px; }
+.pod-dialog button.pod-icon-action {
+  display: inline-grid;
+  place-items: center;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 4px;
+}
+.pod-reference-preview { display: flex; align-items: center; gap: 8px; }
+.pod-reference-label { flex: 1; }
+.pod-reference-label span, .pod-reference-label small { display: block; }
+.pod-zoom figcaption { overflow-wrap: anywhere; }

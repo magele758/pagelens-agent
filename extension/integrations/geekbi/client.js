@@ -26,22 +26,20 @@ export function createGeekbiClient({ storage, fetcher = fetch, now = Date.now })
     if (!geekbiConfigured(settings)) throw new Error("请先在设置中启用并配置极鲸云。");
     if (!Object.hasOwn(endpoints, action)) throw new Error("极鲸云接口不存在。");
     const app = (await sha(settings.appKey)).slice(0, 24);
-    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== "").sort());
+    const fields = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== "").sort());
+    const query = action === "image" ? "" : fields.toString();
     let form, bodyHash;
     if (action === "image") {
       if (!photo?.size || photo.size > 10 * 1024 * 1024) throw new Error("图搜需要一张不超过 10 MB 的图片。");
-      const siteId = query.get("siteId");
-      query.delete("siteId");
       form = new FormData();
-      for (const [name, value] of query) form.append(name, value);
+      // The image endpoint verifies siteId as a multipart field along with pagination.
+      for (const [name, value] of fields) form.append(name, value);
       form.append("file", photo, "reference.jpg");
-      const entries = [...query].map(entry => new URLSearchParams([entry]).toString());
+      const entries = [...fields].map(entry => new URLSearchParams([entry]).toString());
       entries.push("file:file=" + await sha(await photo.arrayBuffer()));
       bodyHash = await sha(entries.sort().join("&"));
-      for (const key of [...query.keys()]) query.delete(key);
-      if (siteId) query.set("siteId", siteId);
     }
-    const cacheKey = prefix + "cache." + app + "." + await sha(JSON.stringify([action, query.toString(), bodyHash]));
+    const cacheKey = prefix + "cache." + app + "." + await sha(JSON.stringify([action, query, bodyHash]));
     if (inFlight.has(cacheKey)) return inFlight.get(cacheKey);
     const pending = (async () => {
       const allowance = await serialized(async () => {
@@ -62,10 +60,10 @@ export function createGeekbiClient({ storage, fetcher = fetch, now = Date.now })
       const method = form ? "POST" : "GET";
       const timestamp = String(Math.floor(now() / 1000));
       const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
-      const canonical = [method, path, query.toString(), timestamp, nonce, ...(bodyHash ? [bodyHash] : [])].join("\n");
+      const canonical = [method, path, query, timestamp, nonce, ...(bodyHash ? [bodyHash] : [])].join("\n");
       const key = await crypto.subtle.importKey("raw", encoder.encode(settings.appSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
       const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(canonical));
-      const response = await fetcher(origin + path + (query.size ? "?" + query : ""), {
+      const response = await fetcher(origin + path + (query ? "?" + query : ""), {
         method, body: form, redirect: "error", credentials: "omit", signal: AbortSignal.timeout(30000),
         headers: {
           "X-GB-App-Key": settings.appKey, "X-GB-Timestamp": timestamp, "X-GB-Nonce": nonce,
