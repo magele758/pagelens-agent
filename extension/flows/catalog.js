@@ -12,6 +12,7 @@ export const workflowPlatforms = [
     { id: "voucher-draft", name: "优惠券表单试填", description: "试填店铺固定金额券，核对券码、门槛和数量。" },
   ] },
   { id: "temu", name: "Temu", icon: "temu.png", features: [
+    { id: "temu-pod", name: "选品与富图", description: "筛选欧洲男装，生成印花、核对实物细节并导出商品目录。" },
     { id: "temu-product-listing", name: "商品上架", description: "按站点与类目逐步试填，读取商品目录并上传图片。" },
     { id: "temu-product-data", name: "商品数据", description: "读取商品列表的商品、经营站点、SKU、库存和价格。" },
     { id: "temu-campaign-data", name: "活动数据", description: "读取营销活动、报名记录与结果。" },

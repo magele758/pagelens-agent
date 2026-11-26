@@ -68,6 +68,11 @@ test("selects a platform and opens the requested workflow without running it", a
   openCatalog = bindWorkflowCatalog({
     openProductListing, openSheinListing, openMarketing, openTiktokDraft, openProductCapture, openProductLibrary,
     openTemuListing: feature => (temuFlow = feature.id, true),
+    openTemuPod: (feature, platform) => {
+      assert.equal(platform, "temu");
+      temuFlow = feature.id;
+      return true;
+    },
     openTemuOperations: ({ mode }) => (temuFlow = mode, true),
   });
 
@@ -88,7 +93,7 @@ test("selects a platform and opens the requested workflow without running it", a
   choosePlatform("temu");
   assert.deepEqual(selected(document), ["temu"]);
   assert.deepEqual(choices().map(item => item.dataset.workflow), [
-    "temu-product-listing", "temu-product-data", "temu-campaign-data", "temu-campaign-draft",
+    "temu-pod", "temu-product-listing", "temu-product-data", "temu-campaign-data", "temu-campaign-draft",
     "temu-marketing-data", "temu-order-data", "temu-finance-data", "product-capture",
   ]);
   assert.equal(byId("workflow-feature-empty").hidden, true);
@@ -96,7 +101,7 @@ test("selects a platform and opens the requested workflow without running it", a
   byId("workflow-catalog-close").click();
   byId("btn-ptc-flow").click();
   assert.deepEqual(selected(document), ["temu"]);
-  for (const id of ["temu-product-listing", "temu-campaign-draft", "temu-finance-data"]) {
+  for (const id of ["temu-pod", "temu-product-listing", "temu-campaign-draft", "temu-finance-data"]) {
     await launch(id);
     assert.equal(temuFlow, id);
     openCatalog();

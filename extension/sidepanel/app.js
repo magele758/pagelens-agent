@@ -56,6 +56,8 @@ import { pickTargetTab, refreshTab } from "./tab-context.js";
 import { applyUiTheme, bindThemeEditor } from "./theme.js";
 import { delegatePanel, trustPanel } from "./trust-runtime.js";
 import { bindWorkflowCatalog } from "./workflow-catalog.js";
+import { bindGeekbiSettings } from "../integrations/geekbi/settings.js";
+import { bindTemuPod } from "../flows/temu/pod/panel.js";
 import { bindDailyOperations } from "../skill-components/daily-operations/panel.js";
 import { bindWorkflowShortcuts } from "./workflow-shortcuts.js";
 import { bindTemuListingPanel } from "./temu-listing-panel.js";
@@ -191,6 +193,7 @@ function wire() {
     downloadText(`pagelens-debug-${Date.now()}.json`, json, "application/json");
   });
   bindComposer();
+  bindGeekbiSettings($("settings-group-geekbi"));
   let openCatalog;
   const onBack = () => openCatalog();
   const openMarketing = bindShopeeMarketingPanel({
@@ -238,7 +241,8 @@ function wire() {
     replay: request => replaySheinListing({ ...request, settings: state.settings }),
   });
   const openDailyOperations = bindDailyOperations({ getTargetTab: pickTargetTab, onBack });
-  const workflowHandlers = { openProductListing, openSheinListing, openMarketing, openTiktokDraft, openTemuListing, openTemuOperations, openDailyOperations, ...captureActions };
+  const openTemuPod = bindTemuPod({ getSettings: () => state.settings, onBack });
+  const workflowHandlers = { openProductListing, openSheinListing, openMarketing, openTiktokDraft, openTemuListing, openTemuOperations, openDailyOperations, openTemuPod, ...captureActions };
   openCatalog = bindWorkflowCatalog(workflowHandlers);
   bindWorkflowShortcuts({ getTargetTab: pickTargetTab, handlers: workflowHandlers, onTabAccess: refreshTab });
   try {

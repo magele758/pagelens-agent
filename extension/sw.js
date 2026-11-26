@@ -15,6 +15,7 @@ import { installWindowMail } from "./lib/window-mail.js";
 import { installDelegate } from "./lib/agent/delegate-sw.js";
 import { installAgentGateway } from "./lib/bridge/gateway.js";
 import { chooseNativeProductDirectory, nativeSend } from "./lib/native-host.js";
+import { handleGeekbiMessage } from "./integrations/geekbi/runtime.js";
 import { handleDailyMessage, onDailyAlarm, restoreDailyOperations } from "./flows/daily-operations/runtime.js";
 
 applyOptionalLocalSettings().catch(() => {});
@@ -59,6 +60,11 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "pl.geekbi") {
+    handleGeekbiMessage(msg, _sender).then(value => sendResponse({ ok: true, value }),
+      error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
   if (typeof msg?.type === "string" && msg.type.startsWith("pl.daily.")) {
     if (_sender?.id !== chrome.runtime.id || _sender?.url !== chrome.runtime.getURL("sidepanel/index.html")) return false;
     handleDailyMessage(msg).then(value => sendResponse({ ok: true, value }),
